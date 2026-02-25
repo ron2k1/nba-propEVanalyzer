@@ -1,0 +1,29 @@
+{
+  "success": true,
+  "featureKeys": [
+    "line",
+    "over_odds",
+    "prob_over",
+    "prob_under",
+    "projection",
+    "under_odds"
+  ],
+  "targetKey": "actual",
+  "intercept": -21.324573,
+  "coefficients": {
+    "line": -0.372087,
+    "over_odds": -0.164219,
+    "prob_over": 0.27701,
+    "prob_under": -0.27701,
+    "projection": 1.484932,
+    "under_odds": -0.006183
+  },
+  "metrics": {
+    "rows": 12,
+    "rmse": 0.8253,
+    "r2": 0.9822,
+    "ridgeAlpha": 0.5
+  },
+  "trainedAtUtc": "2026-02-25T07:31:14Z",
+  "sourceFile": "C:\\Users\\thegr\\OneDrive\\Desktop\\nba data ver 2\\examples\\calibration_sample.csv"
+}

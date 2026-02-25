@@ -1,0 +1,9 @@
+﻿.venv/
+__pycache__/
+*.pyc
+.nba_cache/
+.tmp/
+pip-build-tracker-*/
+pip-ephem-wheel-cache-*/
+pip-install-*/
+data/

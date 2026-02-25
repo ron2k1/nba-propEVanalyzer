@@ -1,0 +1,77 @@
+NBA PROP ENGINE - FULL SETUP WITH ODDS API KEY (COPY/PASTE)
+============================================================
+
+0) Open PowerShell.
+
+1) Go to the project folder.
+   cd "C:\Users\thegr\OneDrive\Desktop\nba data ver 2"
+
+2) Create virtual environment (one-time).
+   python -m venv .venv
+
+3) Install dependencies into the virtual environment.
+   .\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+
+4) Set ODDS API key for THIS terminal session only.
+   (Replace YOUR_ODDS_API_KEY_HERE with your real key)
+   $env:ODDS_API_KEY = "YOUR_ODDS_API_KEY_HERE"
+
+5) Optional: Save ODDS API key permanently for your Windows user.
+   (Run once, then close/reopen terminal)
+   setx ODDS_API_KEY "YOUR_ODDS_API_KEY_HERE"
+
+5b) Optional: Set NEWS API key for injury/news ingestion.
+    $env:NEWS_API_KEY = "YOUR_NEWS_API_KEY_HERE"
+
+6) Start the app (recommended).
+   (This script auto-relaunches as Administrator when needed)
+   powershell -ExecutionPolicy Bypass -File ".\run_ui.ps1" -OddsApiKey $env:ODDS_API_KEY
+
+7) Open the app in browser.
+   http://127.0.0.1:8787
+
+8) Verify odds from CLI (optional test).
+   .\.venv\Scripts\python.exe .\nba_mod.py odds
+   .\.venv\Scripts\python.exe .\nba_mod.py odds_live
+
+9) Verify live NBA data still works.
+   .\.venv\Scripts\python.exe .\nba_mod.py games
+   .\.venv\Scripts\python.exe .\nba_mod.py prop_ev 2544 ORL 1 pts 25 -110 -110 0 LAL
+   .\.venv\Scripts\python.exe .\nba_mod.py prop_ev "LeBron James" ORL 1 pts 25 -110 -110 0 LAL
+   .\.venv\Scripts\python.exe .\nba_mod.py auto_sweep "LeBron James" LAL ORL 1 pts 0 us "draftkings,fanduel" basketball_nba 15
+   .\.venv\Scripts\python.exe .\nba_mod.py player_lookup "anthony edwards" 10
+
+10) Track and settle picks (new).
+    Auto-log is enabled for every successful prop_ev run.
+    Data file: .\data\prop_journal.jsonl
+    .\.venv\Scripts\python.exe .\nba_mod.py best_today 15
+    .\.venv\Scripts\python.exe .\nba_mod.py settle_yesterday
+    .\.venv\Scripts\python.exe .\nba_mod.py results_yesterday 50
+    .\.venv\Scripts\python.exe .\nba_mod.py export_training_rows .\examples\training_from_journal.csv csv
+
+10b) Option 1 + Option 3 quick checks.
+    .\.venv\Scripts\python.exe .\nba_mod.py prop_ev_ml "LeBron James" ORL 1 pts 25 -110 -110 0
+    .\.venv\Scripts\python.exe .\nba_mod.py injury_news LAL 24
+    .\.venv\Scripts\python.exe .\nba_mod.py usage_adjust_news "LeBron James" LAL 24
+
+11) Useful odds CLI variants.
+    Pregame with selected books:
+    .\.venv\Scripts\python.exe .\nba_mod.py odds us "h2h,spreads,totals" "draftkings,fanduel" basketball_nba
+
+    Live odds:
+    .\.venv\Scripts\python.exe .\nba_mod.py odds_live us "h2h,spreads,totals" "draftkings,fanduel" basketball_nba 8
+
+    Player props:
+    .\.venv\Scripts\python.exe .\nba_mod.py auto_sweep "LeBron James" LAL ORL 1 pts 0 us "draftkings,fanduel" basketball_nba 15
+
+12) If ODDS_API_KEY seems missing in elevated mode:
+    Use run_ui.ps1 with explicit key parameter:
+    powershell -ExecutionPolicy Bypass -File ".\run_ui.ps1" -OddsApiKey "YOUR_ODDS_API_KEY_HERE"
+
+13) Common errors and fixes:
+    - WinError 10013:
+      Accept admin prompt from run_ui.ps1 and run from that elevated session.
+    - ODDS_API_KEY not set:
+      Set $env:ODDS_API_KEY again, or use setx + reopen terminal.
+    - No live odds:
+      There may be no in-progress NBA games at that moment.

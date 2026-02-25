@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Odds conversion and single-leg EV math."""
+
+import math
+from statistics import NormalDist
+
+from nba_data_collection import PROJECTION_CONFIG, safe_div, safe_round
+
+
+def american_to_implied_prob(odds):
+    if odds is None or odds == 0:
+        return None
+    o = float(odds)
+    return 100.0 / (o + 100.0) if o > 0 else (-o) / ((-o) + 100.0)
+
+
+def american_to_decimal(odds):
+    if odds is None or odds == 0:
+        return None
+    o = float(odds)
+    return 1.0 + o / 100.0 if o > 0 else 1.0 + 100.0 / (-o)
+
+
+def prob_to_american(p):
+    if p is None or p <= 0 or p >= 1:
+        return None
+    return round(100.0 * (1.0 - p) / p) if p < 0.5 else round(-100.0 * p / (1.0 - p))
+
+
+def _normal_cdf_fallback(z):
+    a1, a2, a3, a4, a5 = 0.254829592, -0.284496736, 1.421413741, -1.453152027, 1.061405429
+    p_ = 0.3275911
+    sign = 1.0 if z >= 0 else -1.0
+    x = abs(z) / math.sqrt(2)
+    t = 1.0 / (1.0 + p_ * x)
+    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * math.exp(-x * x)
+    return 0.5 * (1.0 + sign * y)
+
+
+def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_threshold=None):
+    if not over_odds or not under_odds:
+        return None
+    if min_edge_threshold is None:
+        min_edge_threshold = float(PROJECTION_CONFIG.get("min_edge_threshold", 0.03))
+
+    eff_stdev = stdev if (stdev and stdev > 0) else max(float(projection) * 0.20, 1.0)
+
+    line_val = float(line)
+    is_integer_line = abs(line_val - round(line_val)) < 1e-9
+
+    try:
+        dist = NormalDist(mu=float(projection), sigma=float(eff_stdev))
+        if is_integer_line:
+            lo = line_val - 0.5
+            hi = line_val + 0.5
+            cdf_lo = dist.cdf(lo)
+            cdf_hi = dist.cdf(hi)
+            prob_push = cdf_hi - cdf_lo
+            prob_over = 1.0 - cdf_hi
+            prob_under = cdf_lo
+        else:
+            prob_over = 1.0 - dist.cdf(line_val)
+            prob_under = dist.cdf(line_val)
+            prob_push = 0.0
+    except Exception:
+        sigma = max(float(eff_stdev), 0.01)
+        if is_integer_line:
+            z_lo = (line_val - 0.5 - float(projection)) / sigma
+            z_hi = (line_val + 0.5 - float(projection)) / sigma
+            cdf_lo = _normal_cdf_fallback(z_lo)
+            cdf_hi = _normal_cdf_fallback(z_hi)
+            prob_push = cdf_hi - cdf_lo
+            prob_over = 1.0 - cdf_hi
+            prob_under = cdf_lo
+        else:
+            z = (line_val - float(projection)) / sigma
+            prob_over = 1.0 - _normal_cdf_fallback(z)
+            prob_under = _normal_cdf_fallback(z)
+            prob_push = 0.0
+
+    prob_over = max(0.0, min(1.0, prob_over))
+    prob_under = max(0.0, min(1.0, prob_under))
+    prob_push = max(0.0, min(1.0, prob_push))
+    total_prob = prob_over + prob_under + prob_push
+    if total_prob > 0:
+        prob_over /= total_prob
+        prob_under /= total_prob
+        prob_push /= total_prob
+    else:
+        prob_over, prob_under, prob_push = 0.5, 0.5, 0.0
+
+    p1 = american_to_implied_prob(over_odds) or 0.5
+    p2 = american_to_implied_prob(under_odds) or 0.5
+    total = p1 + p2
+    vig = total - 1.0
+    no_vig_over = p1 / total if total > 0 else 0.5
+    no_vig_under = p2 / total if total > 0 else 0.5
+
+    def _side_ev(p_side, p_lose, p_push, odds, implied_p):
+        dec = american_to_decimal(odds)
+        if dec is None or dec <= 1.0:
+            return None
+        action_prob = max(0.0, 1.0 - p_push)
+        p_side_no_push = safe_div(p_side, action_prob, default=0.0) if action_prob > 0 else 0.0
+        ev_unit = p_side * (dec - 1.0) - p_lose
+        ev_pct = ev_unit * 100.0
+        edge = p_side_no_push - implied_p
+        b = dec - 1.0
+        kelly = max(0.0, (p_side_no_push * b - (1.0 - p_side_no_push)) / b) if b > 0 else 0.0
+        fair = prob_to_american(p_side_no_push)
+        implied_adj = implied_p * action_prob
+        meets_threshold = abs(edge) >= float(min_edge_threshold)
+
+        if ev_pct <= 0 or edge <= 0:
+            verdict = "Negative EV"
+        elif not meets_threshold:
+            verdict = "Thin Edge"
+        elif edge < 0.05:
+            verdict = "Good Value"
+        else:
+            verdict = "Strong Value"
+
+        return {
+            "impliedProb": safe_round(implied_p, 4),
+            "impliedProbAdj": safe_round(implied_adj, 4),
+            "pSide": safe_round(p_side, 4),
+            "pSideNoPush": safe_round(p_side_no_push, 4),
+            "pLose": safe_round(p_lose, 4),
+            "pPush": safe_round(p_push, 4),
+            "edge": safe_round(edge, 4),
+            "evPerUnit": safe_round(ev_unit, 4),
+            "evPercent": safe_round(ev_pct, 2),
+            "decimalOdds": safe_round(dec, 4),
+            "fairOdds": fair,
+            "kellyFraction": safe_round(kelly, 4),
+            "halfKelly": safe_round(kelly / 2, 4),
+            "meetsThreshold": bool(meets_threshold),
+            "verdict": verdict,
+        }
+
+    return {
+        "projection": projection,
+        "line": line,
+        "stdev": safe_round(eff_stdev, 2),
+        "probOver": safe_round(prob_over, 4),
+        "probUnder": safe_round(prob_under, 4),
+        "probPush": safe_round(prob_push, 4),
+        "noVigOver": safe_round(no_vig_over, 4),
+        "noVigUnder": safe_round(no_vig_under, 4),
+        "vig": safe_round(vig, 4),
+        "minEdgeThreshold": safe_round(min_edge_threshold, 4),
+        "over": _side_ev(prob_over, prob_under, prob_push, over_odds, p1),
+        "under": _side_ev(prob_under, prob_over, prob_push, under_odds, p2),
+    }

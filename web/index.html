@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>NBA Prop Engine</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="bg-shape bg-shape-a"></div>
+  <div class="bg-shape bg-shape-b"></div>
+
+  <header class="page-head">
+    <h1>NBA Prop Engine</h1>
+    <p>Live projection + EV UI backed by <code>nba_mod.py</code></p>
+    <div id="healthBadge" class="badge">Checking API...</div>
+  </header>
+
+  <main class="layout">
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Slate</h2>
+        <button id="loadGamesBtn" class="btn btn-secondary">Refresh Games</button>
+      </div>
+      <p class="hint">Use a matchup below to prefill home/away context for props.</p>
+      <div id="gamesContainer" class="games-grid"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Prop EV</h2>
+      </div>
+      <p class="hint">Use either player name or player ID. Selecting a name auto-fills ID.</p>
+      <form id="propForm" class="form-grid">
+        <label>
+          Player ID
+          <input id="playerId" type="number" value="2544">
+        </label>
+        <label>
+          Player Name
+          <input id="playerName" type="text" list="playersList" placeholder="LeBron James">
+        </label>
+        <label>
+          Player Team
+          <input id="playerTeamAbbr" type="text" maxlength="3" placeholder="LAL">
+        </label>
+        <label>
+          Opponent
+          <input id="opponentAbbr" type="text" maxlength="3" required placeholder="ORL">
+        </label>
+        <label>
+          Stat
+          <select id="stat" required>
+            <option value="pts">Points</option>
+            <option value="reb">Rebounds</option>
+            <option value="ast">Assists</option>
+            <option value="fg3m">3PM</option>
+            <option value="stl">Steals</option>
+            <option value="blk">Blocks</option>
+            <option value="tov">Turnovers</option>
+            <option value="pra">PRA</option>
+            <option value="pr">PR</option>
+            <option value="pa">PA</option>
+            <option value="ra">RA</option>
+          </select>
+        </label>
+        <label>
+          Line
+          <input id="line" type="number" step="0.5" required value="24.5">
+        </label>
+        <label>
+          Over Odds
+          <input id="overOdds" type="number" required value="-110">
+        </label>
+        <label>
+          Under Odds
+          <input id="underOdds" type="number" required value="-110">
+        </label>
+        <label class="toggle">
+          <input id="isHome" type="checkbox" checked>
+          Is Home
+        </label>
+        <label class="toggle">
+          <input id="isB2b" type="checkbox">
+          Back-to-back
+        </label>
+        <label>
+          Sweep Top N
+          <input id="sweepTopN" type="number" min="1" max="50" value="15">
+        </label>
+        <button type="submit" class="btn btn-primary">Run Prop EV</button>
+        <button id="autoSweepBtn" type="button" class="btn btn-secondary">Auto Sweep Best Line</button>
+      </form>
+      <p class="hint">Auto sweep uses Regions/Bookmakers/Sport from the Sportsbook Odds panel.</p>
+      <datalist id="playersList"></datalist>
+
+      <div id="propResult" class="result"></div>
+      <div id="sweepResult" class="result"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Parlay EV</h2>
+        <button id="parlayBtn" class="btn btn-primary">Run Parlay</button>
+      </div>
+      <p class="hint">2-3 legs only. Edit JSON directly.</p>
+      <textarea id="parlayLegs" class="codebox">[
+  {"playerId":2544,"playerTeam":"LAL","stat":"pts","line":25.5,"side":"over","probOver":0.58,"overOdds":-110,"underOdds":-110},
+  {"playerId":2544,"playerTeam":"LAL","stat":"reb","line":8.5,"side":"under","probOver":0.52,"overOdds":-115,"underOdds":-105}
+]</textarea>
+      <div id="parlayResult" class="result"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Sportsbook Odds</h2>
+      </div>
+      <form id="oddsForm" class="form-grid">
+        <label>
+          Regions
+          <input id="oddsRegions" type="text" value="us" placeholder="us">
+        </label>
+        <label>
+          Markets
+          <input id="oddsMarkets" type="text" value="h2h,spreads,totals" placeholder="h2h,spreads,totals">
+        </label>
+        <label>
+          Bookmakers (optional)
+          <input id="oddsBookmakers" type="text" placeholder="draftkings,fanduel">
+        </label>
+        <label>
+          Sport Key
+          <input id="oddsSport" type="text" value="basketball_nba" placeholder="basketball_nba">
+        </label>
+        <label>
+          Live Max Events
+          <input id="oddsMaxEvents" type="number" value="8" min="1" max="20">
+        </label>
+      </form>
+      <div class="card-actions">
+        <button id="propsPresetBtn" class="btn btn-chip">Props Preset</button>
+        <button id="loadOddsBtn" class="btn btn-secondary">Load Pregame Odds</button>
+        <button id="loadLiveOddsBtn" class="btn btn-primary">Load Live Odds</button>
+      </div>
+      <p id="oddsMarketWarning" class="hint market-warning" hidden></p>
+      <p class="hint">Set <code>ODDS_API_KEY</code> in your shell before launch to enable these endpoints.</p>
+      <p class="hint">Use "Auto Sweep Best Line" for player props. Odds panel is for h2h/spreads/totals.</p>
+      <div id="oddsResult" class="result"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Tracking & Settlement</h2>
+      </div>
+      <p class="hint">Review top EV picks, settle previous picks, and inspect win/loss results.</p>
+      <form id="trackingForm" class="form-grid">
+        <label>
+          Date Override (optional)
+          <input id="trackingDate" type="date">
+        </label>
+        <label>
+          Limit
+          <input id="trackingLimit" type="number" min="1" max="200" value="15">
+        </label>
+      </form>
+      <div class="card-actions">
+        <button id="loadBestTodayBtn" class="btn btn-primary">Load Best EV</button>
+        <button id="settleYesterdayBtn" class="btn btn-secondary">Settle Date</button>
+        <button id="loadResultsYesterdayBtn" class="btn btn-secondary">Load Results</button>
+      </div>
+      <div id="trackingResult" class="result"></div>
+    </section>
+  </main>
+
+  <template id="gameCardTemplate">
+    <article class="game-card">
+      <h3 class="matchup"></h3>
+      <p class="meta"></p>
+      <div class="card-actions">
+        <button class="btn btn-chip use-home">Use Home</button>
+        <button class="btn btn-chip use-away">Use Away</button>
+      </div>
+    </article>
+  </template>
+
+  <script src="/app.js"></script>
+</body>
+</html>
