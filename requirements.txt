@@ -1,4 +1,7 @@
+anthropic>=0.40.0
+tabpfn>=6.0.0
 certifi==2026.2.25
+python-dotenv>=1.0.0
 charset-normalizer==3.4.4
 idna==3.11
 nba_api==1.11.4

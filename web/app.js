@@ -25,6 +25,14 @@ const loadBestTodayBtn = $("loadBestTodayBtn");
 const settleYesterdayBtn = $("settleYesterdayBtn");
 const loadResultsYesterdayBtn = $("loadResultsYesterdayBtn");
 const trackingResult = $("trackingResult");
+const starterAccuracyForm = $("starterAccuracyForm");
+const starterAccDateInput = $("starterAccDate");
+const starterAccBookmakersInput = $("starterAccBookmakers");
+const starterAccRegionsInput = $("starterAccRegions");
+const starterAccSportInput = $("starterAccSport");
+const starterAccModelInput = $("starterAccModel");
+const runStarterAccuracyBtn = $("runStarterAccuracyBtn");
+const starterAccuracyResult = $("starterAccuracyResult");
 let playersLoaded = false;
 const playersById = new Map();
 const playersByNormName = new Map();
@@ -264,6 +272,74 @@ function renderGames(payload) {
   });
 }
 
+function renderLlmAnalysis(llm) {
+  if (!llm) return "";
+
+  function providerTag(provider) {
+    return provider ? `<span class="llm-provider-tag">${escapeHtml(provider)}</span>` : "";
+  }
+
+  function injuryCard(s) {
+    if (!s || !s.success) {
+      return `<div class="llm-card">
+        <div class="llm-card-title">Injury Signal ${providerTag(s?.provider)}</div>
+        <div class="llm-card-error">${escapeHtml(s?.error || "No news signals")}</div>
+      </div>`;
+    }
+    const adjPct = Number(s.adjustmentPct) * 100;
+    const sign = adjPct >= 0 ? "+" : "";
+    const adjColor = adjPct > 0 ? "color:var(--ok)" : adjPct < 0 ? "color:var(--bad)" : "";
+    return `<div class="llm-card">
+      <div class="llm-card-title">Injury Signal ${providerTag(s.provider)}</div>
+      <div class="llm-card-value" style="${adjColor}">${sign}${adjPct.toFixed(1)}%</div>
+      <div class="llm-card-reasoning">${escapeHtml(s.reasoning || "")}</div>
+      <div class="llm-card-meta">Confidence: ${pct(s.confidence)}</div>
+    </div>`;
+  }
+
+  function matchupCard(s) {
+    if (!s || !s.success) {
+      return `<div class="llm-card">
+        <div class="llm-card-title">Matchup Context ${providerTag(s?.provider)}</div>
+        <div class="llm-card-error">${escapeHtml(s?.error || "Unavailable")}</div>
+      </div>`;
+    }
+    const mod = Number(s.modifier);
+    const modSign = mod >= 1 ? "color:var(--ok)" : "color:var(--bad)";
+    return `<div class="llm-card">
+      <div class="llm-card-title">Matchup Context ${providerTag(s.provider)}</div>
+      <div class="llm-card-value" style="${modSign}">${fmt(mod, 2)}x</div>
+      <div class="llm-card-reasoning">${escapeHtml(s.reasoning || "")}</div>
+      <div class="llm-card-meta">Confidence: ${pct(s.confidence)}</div>
+    </div>`;
+  }
+
+  function lineCard(s) {
+    if (!s || !s.success) {
+      return `<div class="llm-card">
+        <div class="llm-card-title">Line Reasoning ${providerTag(s?.provider)}</div>
+        <div class="llm-card-error">${escapeHtml(s?.error || "Unavailable")}</div>
+      </div>`;
+    }
+    const verdict = String(s.verdict || "neutral").toLowerCase();
+    return `<div class="llm-card verdict-${verdict}">
+      <div class="llm-card-title">Line Reasoning ${providerTag(s.provider)}</div>
+      <div class="llm-card-value">${verdict.toUpperCase()} &nbsp;${escapeHtml(String(s.sharpnessScore ?? "?"))}/10</div>
+      <div class="llm-card-reasoning">${escapeHtml(s.reasoning || "")}</div>
+    </div>`;
+  }
+
+  return `
+    <div class="llm-section">
+      <h4>LLM Analysis</h4>
+      <div class="llm-cards">
+        ${injuryCard(llm.injurySignal)}
+        ${matchupCard(llm.matchupContext)}
+        ${lineCard(llm.lineReasoning)}
+      </div>
+    </div>`;
+}
+
 function renderProp(payload) {
   if (!payload || payload.success !== true) {
     showError(propResult, payload?.error || "Prop EV request failed.", payload);
@@ -314,7 +390,17 @@ function renderProp(payload) {
         <h4>Games Sample</h4>
         <p>${escapeHtml(payload.gamesPlayed ?? "n/a")}</p>
       </article>
+      <article class="metric">
+        <h4>Distribution</h4>
+        <p>${escapeHtml(ev.distributionMode || "normal")}</p>
+      </article>
+      ${payload.referenceBook ? `
+      <article class="metric ev-over">
+        <h4>Reference Book</h4>
+        <p>${escapeHtml(payload.referenceBook.book || "n/a")} | No-Vig O ${pctAlreadyPercent(payload.referenceBook.noVigOver * 100)}</p>
+      </article>` : ""}
     </div>
+    ${renderLlmAnalysis(payload.llmAnalysis)}
     <h4>Adjustments</h4>
     <pre>${escapeHtml(JSON.stringify(adj, null, 2))}</pre>
     <h4>Raw Result</h4>
@@ -597,6 +683,31 @@ function renderTrackingResults(payload, settlePayload = null) {
   }
 
   const summary = payload.summary || {};
+  const clvSection = (summary.clvSampleSize > 0) ? `
+    <h4>Closing Line Value</h4>
+    <div class="metric-grid">
+      <article class="metric">
+        <h4>CLV Sample</h4>
+        <p>${escapeHtml(summary.clvSampleSize ?? 0)}</p>
+      </article>
+      <article class="metric ev-over">
+        <h4>Avg CLV Line</h4>
+        <p>${fmt(summary.avgClvLine, 3)}</p>
+      </article>
+      <article class="metric ev-over">
+        <h4>Avg CLV Odds%</h4>
+        <p>${fmt(summary.avgClvOddsPct, 2)}%</p>
+      </article>
+      <article class="metric">
+        <h4>+CLV Count</h4>
+        <p>${escapeHtml(summary.positiveClvCount ?? 0)} / ${escapeHtml(summary.clvSampleSize ?? 0)}</p>
+      </article>
+      <article class="metric">
+        <h4>+CLV Rate</h4>
+        <p>${pctAlreadyPercent(summary.positiveClvPct)}</p>
+      </article>
+    </div>
+  ` : "";
   const rows = (Array.isArray(payload.results) ? payload.results : []).map((r) => `
     <tr>
       <td>${escapeHtml(r.playerName || `${r.playerId || "?"}`)}</td>
@@ -638,6 +749,7 @@ function renderTrackingResults(payload, settlePayload = null) {
 
   trackingResult.innerHTML = `
     ${settleBanner}
+    ${clvSection}
     <div class="metric-grid">
       <article class="metric">
         <h4>Date</h4>
@@ -690,6 +802,161 @@ function renderTrackingResults(payload, settlePayload = null) {
       </table>
     </div>
   `;
+}
+
+function renderStarterAccuracy(payload) {
+  if (!payload || payload.success !== true) {
+    showError(starterAccuracyResult, payload?.error || "Starter accuracy run failed.", payload);
+    return;
+  }
+
+  const byStat = payload.byStat || {};
+  const byStatRows = Object.entries(byStat).map(([stat, s]) => `
+    <tr>
+      <td>${escapeHtml(String(stat || "").toUpperCase())}</td>
+      <td>${escapeHtml(s.leans ?? 0)}</td>
+      <td>${escapeHtml(s.wins ?? 0)}</td>
+      <td>${escapeHtml(s.losses ?? 0)}</td>
+      <td>${escapeHtml(s.pushes ?? 0)}</td>
+      <td>${pctAlreadyPercent(s.hitRateNoPushPct)}</td>
+      <td>${fmt(s.pnlUnits, 2)}</td>
+      <td>${pctAlreadyPercent(s.roiPctPerBet)}</td>
+    </tr>
+  `).join("");
+
+  const topRows = (Array.isArray(payload.sampleTopByEv) ? payload.sampleTopByEv : []).slice(0, 12).map((r) => `
+    <tr>
+      <td>${escapeHtml(r.playerName || `${r.playerId || "?"}`)}</td>
+      <td>${escapeHtml(r.teamAbbr || "")}</td>
+      <td>${escapeHtml(String(r.stat || "").toUpperCase())}</td>
+      <td>${escapeHtml(String(r.side || "").toUpperCase())}</td>
+      <td>${fmt(r.line, 1)}</td>
+      <td>${fmt(r.projection, 1)}</td>
+      <td>${fmt(r.actual, 1)}</td>
+      <td>${fmt(r.evPct, 2)}%</td>
+      <td>${escapeHtml(String(r.odds ?? "n/a"))}</td>
+      <td>${statusPill(r.outcome)}</td>
+      <td>${fmt(r.pnl1u, 2)}</td>
+    </tr>
+  `).join("");
+
+  starterAccuracyResult.innerHTML = `
+    <div class="metric-grid">
+      <article class="metric">
+        <h4>Date</h4>
+        <p>${escapeHtml(payload.targetDate || "n/a")}</p>
+      </article>
+      <article class="metric">
+        <h4>Games Final</h4>
+        <p>${escapeHtml(payload.gamesFinal ?? 0)}</p>
+      </article>
+      <article class="metric">
+        <h4>Starters Seen</h4>
+        <p>${escapeHtml(payload.startersSeen ?? 0)}</p>
+      </article>
+      <article class="metric">
+        <h4>Starter Markets</h4>
+        <p>${escapeHtml(payload.starterStatMarketsWithLines ?? 0)}</p>
+      </article>
+      <article class="metric">
+        <h4>EV Leans</h4>
+        <p>${escapeHtml(payload.evLeansPlaced ?? 0)}</p>
+      </article>
+      <article class="metric">
+        <h4>Record</h4>
+        <p>${escapeHtml(payload.wins ?? 0)} / ${escapeHtml(payload.losses ?? 0)} / ${escapeHtml(payload.pushes ?? 0)}</p>
+      </article>
+      <article class="metric">
+        <h4>Hit Rate (No Push)</h4>
+        <p>${pctAlreadyPercent(payload.hitRateNoPushPct)}</p>
+      </article>
+      <article class="metric">
+        <h4>PnL (1u)</h4>
+        <p>${fmt(payload.pnlUnits, 2)}</p>
+      </article>
+      <article class="metric">
+        <h4>ROI / Bet</h4>
+        <p>${pctAlreadyPercent(payload.roiPctPerBet)}</p>
+      </article>
+      <article class="metric">
+        <h4>Projection Errors</h4>
+        <p>${escapeHtml(payload.projectionErrors ?? 0)}</p>
+      </article>
+      <article class="metric">
+        <h4>Missing Odds Events</h4>
+        <p>${escapeHtml(payload.missingEventOdds ?? 0)}</p>
+      </article>
+      <article class="metric">
+        <h4>Runtime</h4>
+        <p>${fmt(payload.runtimeSec, 1)}s</p>
+      </article>
+    </div>
+    <h4>By Stat</h4>
+    <div class="odds-table-wrap">
+      <table class="odds-table">
+        <thead>
+          <tr>
+            <th>Stat</th>
+            <th>Leans</th>
+            <th>Wins</th>
+            <th>Losses</th>
+            <th>Pushes</th>
+            <th>Hit Rate</th>
+            <th>PnL</th>
+            <th>ROI</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${byStatRows || "<tr><td colspan='8'>No stat rows.</td></tr>"}
+        </tbody>
+      </table>
+    </div>
+    <h4>Top EV Sample</h4>
+    <div class="odds-table-wrap">
+      <table class="odds-table">
+        <thead>
+          <tr>
+            <th>Player</th>
+            <th>Team</th>
+            <th>Stat</th>
+            <th>Side</th>
+            <th>Line</th>
+            <th>Proj</th>
+            <th>Actual</th>
+            <th>EV%</th>
+            <th>Odds</th>
+            <th>Outcome</th>
+            <th>PnL</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${topRows || "<tr><td colspan='11'>No EV leans found.</td></tr>"}
+        </tbody>
+      </table>
+    </div>
+    <h4>Raw Result</h4>
+    <pre>${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
+  `;
+}
+
+async function runStarterAccuracy() {
+  starterAccuracyResult.innerHTML = "<p>Running starter EV accuracy. This can take a few minutes...</p>";
+  const params = new URLSearchParams();
+  const d = starterAccDateInput.value.trim();
+  if (d) {
+    params.set("date", d);
+  }
+  params.set("bookmakers", starterAccBookmakersInput.value.trim() || "draftkings,fanduel");
+  params.set("regions", starterAccRegionsInput.value.trim() || "us");
+  params.set("sport", starterAccSportInput.value.trim() || "basketball_nba");
+  params.set("modelVariant", starterAccModelInput.value.trim() || "full");
+
+  try {
+    const data = await apiGet(`/api/starter_accuracy?${params.toString()}`);
+    renderStarterAccuracy(data);
+  } catch (err) {
+    showError(starterAccuracyResult, `Failed to run starter accuracy: ${err.message}`);
+  }
 }
 
 async function loadBestToday(silent = false) {
@@ -860,6 +1127,66 @@ async function resolvePlayerContextForRequest(containerForError) {
   };
 }
 
+function renderLiveProjection(payload) {
+  const liveResult = $("liveResult");
+  if (!payload || payload.success !== true) {
+    showError(liveResult, payload?.error || "Live projection failed.", payload);
+    return;
+  }
+
+  const pace = Number(payload.gamePacePct);
+  const paceBar = Number.isFinite(pace)
+    ? `<div class="pace-bar-wrap"><div class="pace-bar" style="width:${Math.min(pace, 100).toFixed(1)}%"></div></div><span>${pace.toFixed(1)}% through projected mins</span>`
+    : "";
+
+  const stats = payload.liveStats || {};
+  const statRows = [
+    ["PTS", stats.PTS], ["REB", stats.REB], ["AST", stats.AST],
+    ["STL", stats.STL], ["BLK", stats.BLK], ["TOV", stats.TOV], ["FG3M", stats.FG3M],
+  ].map(([k, v]) => `<tr><td>${k}</td><td>${v ?? "n/a"}</td></tr>`).join("");
+
+  const periodLabel = payload.gameStatus === 3 ? "Final" : `Q${payload.period ?? "?"}`;
+
+  liveResult.innerHTML = `
+    <div class="metric-grid">
+      <article class="metric ev-over">
+        <h4>Live Projection</h4>
+        <p>${fmt(payload.liveProjection, 1)}</p>
+      </article>
+      <article class="metric">
+        <h4>Current ${String(payload.stat || "").toUpperCase()}</h4>
+        <p>${fmt(payload.currentStat, 1)}</p>
+      </article>
+      <article class="metric">
+        <h4>Pregame Proj</h4>
+        <p>${fmt(payload.pregameProjection, 1)}</p>
+      </article>
+      <article class="metric">
+        <h4>Mins Played</h4>
+        <p>${fmt(payload.minsPlayed, 1)} / ${fmt(payload.projectedMinutes, 1)}</p>
+      </article>
+      <article class="metric">
+        <h4>Remaining Mins</h4>
+        <p>${fmt(payload.remainingMins, 1)}</p>
+      </article>
+      <article class="metric">
+        <h4>Per-Min Rate</h4>
+        <p>${fmt(payload.perMinRate, 4)}</p>
+      </article>
+      <article class="metric">
+        <h4>Period</h4>
+        <p>${escapeHtml(periodLabel)}</p>
+      </article>
+    </div>
+    <div class="pace-row">${paceBar}</div>
+    <h4>Live Stat Line</h4>
+    <table class="odds-table">
+      <thead><tr><th>Stat</th><th>Current</th></tr></thead>
+      <tbody>${statRows}</tbody>
+    </table>
+  `;
+}
+
 propForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   propResult.innerHTML = "<p>Running prop EV...</p>";
@@ -881,6 +1208,7 @@ propForm.addEventListener("submit", async (event) => {
     overOdds: Number($("overOdds").value),
     underOdds: Number($("underOdds").value),
     isB2b: $("isB2b").checked,
+    referenceBook: $("referenceBook").value.trim(),
   };
 
   try {
@@ -936,6 +1264,71 @@ playerIdInput.addEventListener("change", syncPlayerNameFromId);
 playerNameInput.addEventListener("change", syncPlayerIdFromName);
 playerNameInput.addEventListener("blur", syncPlayerIdFromName);
 
+// Live projection player sync
+function syncLiveNameFromId() {
+  if (!playersLoaded) return;
+  const id = Number($("livePlayerId").value);
+  if (!Number.isFinite(id) || id <= 0) return;
+  const entry = playersById.get(id);
+  if (entry) $("livePlayerName").value = `${entry.name} (${entry.id})`;
+}
+function syncLiveIdFromName() {
+  if (!playersLoaded) return;
+  const resolved = resolvePlayerIdFromName($("livePlayerName").value);
+  if (resolved.id) {
+    $("livePlayerId").value = resolved.id;
+    const entry = playersById.get(resolved.id);
+    if (entry) $("livePlayerName").value = `${entry.name} (${entry.id})`;
+  }
+}
+$("livePlayerId").addEventListener("change", syncLiveNameFromId);
+$("livePlayerName").addEventListener("change", syncLiveIdFromName);
+$("livePlayerName").addEventListener("blur", syncLiveIdFromName);
+
+$("liveForm").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const liveResult = $("liveResult");
+  liveResult.innerHTML = "<p>Fetching live boxscore...</p>";
+
+  if (!playersLoaded) await loadPlayersIndex();
+
+  let resolvedId = Number($("livePlayerId").value);
+  if (!Number.isFinite(resolvedId) || resolvedId <= 0) resolvedId = null;
+
+  const rawName = $("livePlayerName").value.trim();
+  if (rawName && playersLoaded) {
+    const r = resolvePlayerIdFromName(rawName);
+    if (r.ambiguous) {
+      const opts = (r.candidates || []).map((x) => `${x.name} (${x.id})`).join(", ");
+      return showError(liveResult, `Ambiguous player name. Matches: ${opts}`);
+    }
+    if (r.id) resolvedId = r.id;
+  }
+
+  if (!resolvedId && !rawName) {
+    return showError(liveResult, "Enter a Player ID or Player Name.");
+  }
+
+  const playerTeamAbbr = toUpperTrim($("livePlayerTeam").value);
+  if (!playerTeamAbbr) return showError(liveResult, "Player Team is required.");
+
+  const payload = {
+    playerId: resolvedId || null,
+    playerName: rawName || "",
+    playerTeamAbbr,
+    opponentAbbr: toUpperTrim($("liveOpponent").value),
+    isHome: $("liveIsHome").checked,
+    stat: $("liveStat").value,
+  };
+
+  try {
+    const data = await apiPost("/api/live_projection", payload);
+    renderLiveProjection(data);
+  } catch (err) {
+    showError(liveResult, `Live projection failed: ${err.message}`);
+  }
+});
+
 parlayBtn.addEventListener("click", async () => {
   parlayResult.innerHTML = "<p>Running parlay EV...</p>";
   let legs;
@@ -965,6 +1358,11 @@ trackingForm.addEventListener("submit", (event) => {
 loadBestTodayBtn.addEventListener("click", () => loadBestToday());
 settleYesterdayBtn.addEventListener("click", () => settleDate());
 loadResultsYesterdayBtn.addEventListener("click", () => loadResults());
+starterAccuracyForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  runStarterAccuracy();
+});
+runStarterAccuracyBtn.addEventListener("click", () => runStarterAccuracy());
 
 checkHealth();
 loadGames();

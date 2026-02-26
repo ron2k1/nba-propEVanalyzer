@@ -1,4 +1,4 @@
-﻿.venv/
+.venv/
 __pycache__/
 *.pyc
 .nba_cache/
@@ -7,3 +7,11 @@ pip-build-tracker-*/
 pip-ephem-wheel-cache-*/
 pip-install-*/
 data/
+.env
+.env.local
+.env.*.local
+.claude/
+scratch/
+AGENT_MAP.md
+CLAUDE.md
+*.log
