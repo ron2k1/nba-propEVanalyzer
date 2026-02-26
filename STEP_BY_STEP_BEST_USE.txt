@@ -2,7 +2,7 @@ NBA PROP ENGINE - STEP BY STEP (BEST USE)
 =========================================
 
 1) Open PowerShell and go to the project folder.
-   cd "C:\Users\thegr\OneDrive\Desktop\nba data ver 2"
+   cd "<repo-folder>"
 
 2) Confirm dependencies are in the project virtual environment.
    .\.venv\Scripts\python.exe -m pip install -r .\requirements.txt

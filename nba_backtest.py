@@ -5,7 +5,7 @@ import math
 import time
 from datetime import datetime, timedelta
 
-from nba_api.stats.endpoints import boxscoretraditionalv2, scoreboardv3
+from nba_api.stats.endpoints import boxscoretraditionalv3, scoreboardv3
 
 from nba_data_collection import (
     API_DELAY,
@@ -115,14 +115,35 @@ def _minutes_played(raw_min):
 
 def _fetch_boxscore_players(game_id):
     def fetch():
-        return boxscoretraditionalv2.BoxScoreTraditionalV2(
+        return boxscoretraditionalv3.BoxScoreTraditionalV3(
             game_id=game_id,
-            headers=HEADERS,
             timeout=30,
         )
 
-    box = retry_api_call(fetch).get_normalized_dict()
-    return box.get("PlayerStats", []) or []
+    payload = retry_api_call(fetch).get_dict() or {}
+    box = payload.get("boxScoreTraditional", {}) or {}
+    rows = []
+    for team_key in ("homeTeam", "awayTeam"):
+        team = box.get(team_key, {}) or {}
+        team_id = int(team.get("teamId", 0) or 0)
+        for player in team.get("players", []) or []:
+            pid = int(player.get("personId", 0) or 0)
+            stats = player.get("statistics", {}) or {}
+            rows.append(
+                {
+                    "PLAYER_ID": pid,
+                    "TEAM_ID": team_id,
+                    "MIN": stats.get("minutes"),
+                    "PTS": stats.get("points"),
+                    "REB": stats.get("reboundsTotal"),
+                    "AST": stats.get("assists"),
+                    "STL": stats.get("steals"),
+                    "BLK": stats.get("blocks"),
+                    "TOV": stats.get("turnovers"),
+                    "FG3M": stats.get("threePointersMade"),
+                }
+            )
+    return rows
 
 
 def _actual_stats(row):

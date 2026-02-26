@@ -161,6 +161,20 @@ def infer_projection_feature_keys(rows, target_key="actual", min_non_null=10):
 
 
 def _fit_projection_estimator(X_train, y_train, model_type="gradient_boosting", random_state=42):
+    mt = str(model_type or "gradient_boosting").lower().strip()
+
+    if mt in {"tabpfn"}:
+        try:
+            from tabpfn import TabPFNRegressor
+        except ImportError:
+            return None, (
+                "tabpfn is required for model_type='tabpfn'. "
+                "Install with: .\\.venv\\Scripts\\python.exe -m pip install tabpfn"
+            )
+        est = TabPFNRegressor(random_state=random_state)
+        est.fit(X_train, y_train)
+        return est, None
+
     try:
         from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
         from sklearn.linear_model import LinearRegression
@@ -170,7 +184,6 @@ def _fit_projection_estimator(X_train, y_train, model_type="gradient_boosting", 
             "Install with: .\\.venv\\Scripts\\python.exe -m pip install scikit-learn"
         )
 
-    mt = str(model_type or "gradient_boosting").lower().strip()
     if mt in {"gbr", "gradient_boosting", "gb"}:
         est = GradientBoostingRegressor(random_state=random_state)
     elif mt in {"rf", "random_forest"}:
@@ -183,7 +196,7 @@ def _fit_projection_estimator(X_train, y_train, model_type="gradient_boosting", 
     elif mt in {"linear", "linreg"}:
         est = LinearRegression()
     else:
-        return None, f"Unsupported model_type '{model_type}'. Use gradient_boosting|random_forest|linear."
+        return None, f"Unsupported model_type '{model_type}'. Use gradient_boosting|random_forest|linear|tabpfn."
 
     est.fit(X_train, y_train)
     return est, None

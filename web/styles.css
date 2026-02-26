@@ -399,3 +399,116 @@ pre {
   border-radius: 10px;
   padding: 8px 10px;
 }
+
+/* ── LLM Analysis ───────────────────────────────────── */
+.llm-section {
+  margin-top: 14px;
+  border-top: 1px dashed #c8c2b2;
+  padding-top: 12px;
+}
+
+.llm-section h4 {
+  margin: 0 0 10px 0;
+  font-size: 0.95rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.llm-provider-tag {
+  font-size: 0.75rem;
+  font-weight: 400;
+  color: #fff;
+  background: var(--brand);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.llm-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+@media (max-width: 740px) {
+  .llm-cards { grid-template-columns: 1fr; }
+}
+
+.llm-card {
+  border-radius: 10px;
+  border: 1px solid #d6dfe8;
+  background: #f7fafd;
+  padding: 10px 12px;
+  display: grid;
+  gap: 5px;
+}
+
+.llm-card-title {
+  font-size: 0.78rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.llm-card-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+}
+
+.llm-card-reasoning {
+  font-size: 0.84rem;
+  color: var(--ink);
+  line-height: 1.45;
+}
+
+.llm-card-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.llm-card.verdict-soft {
+  border-color: #b7dcc8;
+  background: #f0faf4;
+}
+
+.llm-card.verdict-soft .llm-card-value { color: var(--ok); }
+
+.llm-card.verdict-sharp {
+  border-color: #efc8c2;
+  background: #fdf3f2;
+}
+
+.llm-card.verdict-sharp .llm-card-value { color: var(--bad); }
+
+.llm-card.verdict-neutral {
+  border-color: #d8d3bf;
+  background: #f9f7f2;
+}
+
+.llm-card-error {
+  font-size: 0.83rem;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.pace-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.pace-bar-wrap {
+  flex: 1;
+  height: 8px;
+  background: var(--line);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.pace-bar {
+  height: 100%;
+  background: var(--brand);
+  border-radius: 4px;
+  transition: width 0.4s ease;
+}

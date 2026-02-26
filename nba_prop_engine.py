@@ -5,7 +5,7 @@ from nba_api.stats.static import players as nba_players_static
 
 from nba_data_collection import get_nba_player_prop_offers, safe_round
 from nba_data_prep import compute_projection
-from nba_ev_engine import american_to_decimal, compute_ev
+from nba_ev_engine import american_to_decimal, american_to_implied_prob, compute_ev
 
 _ALL_PLAYERS_BY_ID = {
     int(p["id"]): str(p.get("full_name", ""))
@@ -64,6 +64,7 @@ def compute_prop_ev(
     bookmakers=None,
     sport="basketball_nba",
     model_variant="full",
+    reference_book=None,
 ):
     stat_key = str(stat or "").lower().strip()
     line_val = float(line)
@@ -93,52 +94,91 @@ def compute_prop_ev(
     best_over_book = None
     best_under_book = None
     line_shopping = None
+    player_name = _ALL_PLAYERS_BY_ID.get(int(player_id), "")
+    reference_probs = None
+    reference_book_meta = None
 
-    if player_team_abbr:
-        player_name = _ALL_PLAYERS_BY_ID.get(int(player_id), "")
-        if player_name:
-            offers_data = get_nba_player_prop_offers(
+    if player_team_abbr and player_name:
+        offers_data = get_nba_player_prop_offers(
+            player_name=player_name,
+            player_team_abbr=player_team_abbr,
+            opponent_abbr=opponent_abbr,
+            is_home=is_home,
+            stat=stat_key,
+            regions=regions,
+            bookmakers=bookmakers,
+            sport=sport,
+            odds_format="american",
+        )
+        if offers_data.get("success"):
+            offers = offers_data.get("offers", []) or []
+            best_over, best_under = _best_side_prices_for_line(offers, line_val, tolerance=0.051)
+            if best_over:
+                best_over_odds = int(best_over["odds"])
+                best_over_book = best_over.get("book")
+            if best_under:
+                best_under_odds = int(best_under["odds"])
+                best_under_book = best_under.get("book")
+            line_shopping = {
+                "eventId": offers_data.get("eventId"),
+                "eventHomeTeam": offers_data.get("eventHomeTeam"),
+                "eventAwayTeam": offers_data.get("eventAwayTeam"),
+                "offerCount": len(offers),
+                "matchedLine": line_val,
+                "bestOverOdds": best_over_odds,
+                "bestOverBook": best_over_book,
+                "bestUnderOdds": best_under_odds,
+                "bestUnderBook": best_under_book,
+                "quota": offers_data.get("quota"),
+                "discoveryQuota": offers_data.get("discoveryQuota"),
+            }
+        else:
+            line_shopping = {
+                "error": offers_data.get("error"),
+                "details": offers_data.get("details"),
+            }
+
+        if reference_book and str(reference_book).strip():
+            ref_book_str = str(reference_book).strip()
+            ref_offers_data = get_nba_player_prop_offers(
                 player_name=player_name,
                 player_team_abbr=player_team_abbr,
                 opponent_abbr=opponent_abbr,
                 is_home=is_home,
                 stat=stat_key,
                 regions=regions,
-                bookmakers=bookmakers,
+                bookmakers=ref_book_str,
                 sport=sport,
                 odds_format="american",
             )
-            if offers_data.get("success"):
-                offers = offers_data.get("offers", []) or []
-                best_over, best_under = _best_side_prices_for_line(offers, line_val, tolerance=0.051)
-                if best_over:
-                    best_over_odds = int(best_over["odds"])
-                    best_over_book = best_over.get("book")
-                if best_under:
-                    best_under_odds = int(best_under["odds"])
-                    best_under_book = best_under.get("book")
-                line_shopping = {
-                    "eventId": offers_data.get("eventId"),
-                    "eventHomeTeam": offers_data.get("eventHomeTeam"),
-                    "eventAwayTeam": offers_data.get("eventAwayTeam"),
-                    "offerCount": len(offers),
-                    "matchedLine": line_val,
-                    "bestOverOdds": best_over_odds,
-                    "bestOverBook": best_over_book,
-                    "bestUnderOdds": best_under_odds,
-                    "bestUnderBook": best_under_book,
-                    "quota": offers_data.get("quota"),
-                    "discoveryQuota": offers_data.get("discoveryQuota"),
-                }
-            else:
-                line_shopping = {
-                    "error": offers_data.get("error"),
-                    "details": offers_data.get("details"),
-                }
+            if ref_offers_data.get("success"):
+                ref_offers = ref_offers_data.get("offers", []) or []
+                ref_over, ref_under = _best_side_prices_for_line(ref_offers, line_val, tolerance=0.051)
+                if ref_over and ref_under:
+                    p_over_raw = american_to_implied_prob(ref_over["odds"])
+                    p_under_raw = american_to_implied_prob(ref_under["odds"])
+                    total = (p_over_raw or 0.0) + (p_under_raw or 0.0)
+                    if total > 0:
+                        reference_probs = {
+                            "over": p_over_raw / total,
+                            "under": p_under_raw / total,
+                            "push": 0.0,
+                        }
+                        reference_book_meta = {
+                            "book": ref_book_str,
+                            "line": line_val,
+                            "overOdds": ref_over["odds"],
+                            "underOdds": ref_under["odds"],
+                            "noVigOver": safe_round(p_over_raw / total, 4),
+                            "noVigUnder": safe_round(p_under_raw / total, 4),
+                        }
 
     projection_val = proj["projection"]
     stdev_val = proj.get("projStdev") or proj.get("stdev") or 0
-    ev_data = compute_ev(projection_val, line_val, best_over_odds, best_under_odds, stdev_val)
+    ev_data = compute_ev(
+        projection_val, line_val, best_over_odds, best_under_odds, stdev_val,
+        stat=stat_key, reference_probs=reference_probs,
+    )
 
     return {
         "success": True,
@@ -160,6 +200,7 @@ def compute_prop_ev(
         "bestOverBook": best_over_book,
         "bestUnderBook": best_under_book,
         "lineShopping": line_shopping,
+        "referenceBook": reference_book_meta,
     }
 
 
@@ -177,6 +218,21 @@ def compute_auto_line_sweep(
     top_n=15,
 ):
     try:
+        requested_books = str(bookmakers or "").strip()
+
+        def _fetch_offers(bookmakers_filter):
+            return get_nba_player_prop_offers(
+                player_name=player_name,
+                player_team_abbr=player_team_abbr,
+                opponent_abbr=opponent_abbr,
+                is_home=is_home,
+                stat=stat_key,
+                regions=regions,
+                bookmakers=bookmakers_filter,
+                sport=sport,
+                odds_format="american",
+            )
+
         proj_data = compute_projection(player_id, opponent_abbr, is_home, is_b2b, season)
         if not proj_data.get("success"):
             return proj_data
@@ -194,29 +250,84 @@ def compute_auto_line_sweep(
         if not player_name:
             return {"success": False, "error": f"Could not resolve player name for player_id={player_id}"}
 
-        offer_data = get_nba_player_prop_offers(
-            player_name=player_name,
-            player_team_abbr=player_team_abbr,
-            opponent_abbr=opponent_abbr,
-            is_home=is_home,
-            stat=stat_key,
-            regions=regions,
-            bookmakers=bookmakers,
-            sport=sport,
-            odds_format="american",
-        )
+        fallback_used = False
+        fallback_reason = None
+        offer_data = _fetch_offers(bookmakers)
         if not offer_data.get("success"):
-            return {
-                "success": False,
-                "error": offer_data.get("error", "Failed to fetch player prop offers."),
-                "details": offer_data.get("details"),
-                "projection": proj,
-                "playerId": player_id,
-                "playerName": player_name,
-                "stat": stat_key,
-            }
+            # If selected books fail (often due pulled markets), retry across all books.
+            if requested_books:
+                fallback_data = _fetch_offers(None)
+                if fallback_data.get("success"):
+                    fallback_used = True
+                    fallback_reason = "selected_bookmakers_failed"
+                    offer_data = fallback_data
+                else:
+                    return {
+                        "success": False,
+                        "error": offer_data.get("error", "Failed to fetch player prop offers."),
+                        "details": offer_data.get("details"),
+                        "projection": proj,
+                        "playerId": player_id,
+                        "playerName": player_name,
+                        "stat": stat_key,
+                        "fallbackAttempted": True,
+                        "fallbackSucceeded": False,
+                        "fallbackError": fallback_data.get("error"),
+                        "fallbackDetails": fallback_data.get("details"),
+                    }
+            else:
+                return {
+                    "success": False,
+                    "error": offer_data.get("error", "Failed to fetch player prop offers."),
+                    "details": offer_data.get("details"),
+                    "projection": proj,
+                    "playerId": player_id,
+                    "playerName": player_name,
+                    "stat": stat_key,
+                }
 
         offers = offer_data.get("offers", []) or []
+        if not offers and requested_books:
+            # Selected books had no complete over/under pairs, retry all books.
+            fallback_data = _fetch_offers(None)
+            fallback_offers = fallback_data.get("offers", []) or []
+            if fallback_data.get("success") and fallback_offers:
+                fallback_used = True
+                fallback_reason = "selected_bookmakers_no_pairs"
+                offer_data = fallback_data
+                offers = fallback_offers
+            elif fallback_data.get("success"):
+                return {
+                    "success": False,
+                    "error": "No over/under line pairs found for this player/stat in selected books.",
+                    "projection": proj,
+                    "playerId": player_id,
+                    "playerName": player_name,
+                    "stat": stat_key,
+                    "offerCount": 0,
+                    "eventId": offer_data.get("eventId"),
+                    "eventHomeTeam": offer_data.get("eventHomeTeam"),
+                    "eventAwayTeam": offer_data.get("eventAwayTeam"),
+                    "fallbackAttempted": True,
+                    "fallbackSucceeded": False,
+                }
+            else:
+                return {
+                    "success": False,
+                    "error": "No over/under line pairs found for this player/stat in selected books.",
+                    "details": fallback_data.get("error"),
+                    "projection": proj,
+                    "playerId": player_id,
+                    "playerName": player_name,
+                    "stat": stat_key,
+                    "offerCount": 0,
+                    "eventId": offer_data.get("eventId"),
+                    "eventHomeTeam": offer_data.get("eventHomeTeam"),
+                    "eventAwayTeam": offer_data.get("eventAwayTeam"),
+                    "fallbackAttempted": True,
+                    "fallbackSucceeded": False,
+                }
+
         if not offers:
             return {
                 "success": False,
@@ -241,7 +352,7 @@ def compute_auto_line_sweep(
             if line is None or over_odds is None or under_odds is None:
                 continue
 
-            ev = compute_ev(projection_val, line, over_odds, under_odds, stdev_val)
+            ev = compute_ev(projection_val, line, over_odds, under_odds, stdev_val, stat=stat_key)
             if not ev:
                 continue
 
@@ -313,6 +424,106 @@ def compute_auto_line_sweep(
             "bestRecommendation": best,
             "quota": offer_data.get("quota"),
             "discoveryQuota": offer_data.get("discoveryQuota"),
+            "requestedBookmakers": requested_books or None,
+            "fallbackUsed": fallback_used,
+            "fallbackReason": fallback_reason,
+            "bookmakersRequested": offer_data.get("bookmakersRequested"),
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+_STAT_BOX_KEY = {
+    "pts": "PTS", "reb": "REB", "ast": "AST",
+    "stl": "STL", "blk": "BLK", "tov": "TOV",
+    "fg3m": "FG3M", "pra": "PRA",
+}
+
+
+def _clamp(val, lo, hi):
+    return max(lo, min(hi, val))
+
+
+def compute_live_projection(pregame_proj, live_stats, stat_key):
+    """
+    Adjust a pregame projection using current in-game stats.
+
+    Formula:
+        remaining_mins      = projectedMinutes - mins_played
+        blended_per_min     = blend(pregame_per_min, live_per_min, sample_weight)
+        projected_remaining = blended_per_min * adjusted_remaining_mins
+        live_projection   = current_stat + projected_remaining
+    """
+    try:
+        stat_key = str(stat_key).lower().strip()
+        box_key = _STAT_BOX_KEY.get(stat_key, stat_key.upper())
+
+        per_min_rate = float(pregame_proj.get("perMinRate") or 0)
+        projected_minutes = float(pregame_proj.get("projectedMinutes") or 36)
+        pregame_projection = float(pregame_proj.get("projection") or 0)
+
+        current_stat = float(live_stats.get(box_key) or 0)
+        mins_played = float(live_stats.get("minsPlayed") or 0)
+
+        remaining_mins = max(0.0, projected_minutes - mins_played)
+        progress = mins_played / projected_minutes if projected_minutes > 0 else 0.0
+        live_per_min = current_stat / mins_played if mins_played > 0 else per_min_rate
+
+        # Move from pregame-driven to live-driven as minutes accumulate.
+        blend_weight = _clamp(progress * 0.55, 0.0, 0.55)
+        shot_attempts = float(live_stats.get("ShotAttempts") or 0.0)
+        if shot_attempts <= 0:
+            fga = float(live_stats.get("FGA") or 0.0)
+            fta = float(live_stats.get("FTA") or 0.0)
+            shot_attempts = fga + 0.44 * fta
+
+        # For scoring stats, use shot volume as additional confidence in live rate.
+        if stat_key in {"pts", "fg3m"}:
+            shot_weight = _clamp(shot_attempts / 20.0, 0.0, 0.65)
+            blend_weight = max(blend_weight, shot_weight)
+
+        blended_per_min = (1.0 - blend_weight) * per_min_rate + blend_weight * live_per_min
+        if per_min_rate > 0:
+            blended_per_min = _clamp(blended_per_min, per_min_rate * 0.55, per_min_rate * 1.45)
+        blended_per_min = max(0.0, blended_per_min)
+
+        # Minutes context: slight boost in close games, slight trim in blowouts/foul trouble.
+        minute_multiplier = 1.0
+        period = int(live_stats.get("period") or 0)
+        margin_abs = abs(float(live_stats.get("scoreMargin") or 0.0))
+        fouls = float(live_stats.get("PF") or 0.0)
+        if period >= 3:
+            if margin_abs <= 6:
+                minute_multiplier *= 1.06
+            elif margin_abs >= 15:
+                minute_multiplier *= 0.90
+            if fouls >= 5:
+                minute_multiplier *= 0.90
+        elif period == 2 and margin_abs <= 4:
+            minute_multiplier *= 1.02
+
+        adjusted_remaining_mins = max(0.0, remaining_mins * minute_multiplier)
+        projected_remaining = blended_per_min * adjusted_remaining_mins
+        live_projection = round(current_stat + projected_remaining, 1)
+
+        pace_pct = round(mins_played / projected_minutes * 100, 1) if projected_minutes > 0 else 0
+
+        return {
+            "success": True,
+            "stat": stat_key,
+            "liveProjection": live_projection,
+            "currentStat": current_stat,
+            "minsPlayed": round(mins_played, 1),
+            "remainingMins": round(adjusted_remaining_mins, 1),
+            "projectedMinutes": projected_minutes,
+            "perMinRate": round(blended_per_min, 4),
+            "basePerMinRate": round(per_min_rate, 4),
+            "livePerMinRate": round(live_per_min, 4),
+            "blendWeight": round(blend_weight, 3),
+            "minuteMultiplier": round(minute_multiplier, 3),
+            "shotAttempts": round(shot_attempts, 2),
+            "pregameProjection": pregame_projection,
+            "gamePacePct": pace_pct,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}

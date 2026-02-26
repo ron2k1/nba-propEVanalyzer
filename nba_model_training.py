@@ -29,7 +29,7 @@ from nba_model_ml_training import (
     train_ridge_calibrator_from_file,
 )
 from nba_parlay_engine import compute_parlay_ev
-from nba_prop_engine import compute_auto_line_sweep, compute_prop_ev
+from nba_prop_engine import compute_auto_line_sweep, compute_live_projection, compute_prop_ev
 
 __all__ = [
     "DEFAULT_PROJECTION_ML_MODEL_PATH",
@@ -37,6 +37,7 @@ __all__ = [
     "american_to_implied_prob",
     "compute_auto_line_sweep",
     "compute_ev",
+    "compute_live_projection",
     "compute_parlay_ev",
     "compute_prop_ev",
     "compute_prop_ev_with_ml",

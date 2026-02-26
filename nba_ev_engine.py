@@ -37,7 +37,26 @@ def _normal_cdf_fallback(z):
     return 0.5 * (1.0 + sign * y)
 
 
-def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_threshold=None):
+_POISSON_STATS = {"stl", "blk", "fg3m", "tov"}
+
+
+def _poisson_pmf(k, lam):
+    """Poisson PMF P(X = k) for X ~ Poisson(lam)."""
+    if lam <= 0:
+        return 1.0 if k == 0 else 0.0
+    try:
+        log_p = k * math.log(lam) - lam - sum(math.log(i) for i in range(1, k + 1))
+        return math.exp(log_p)
+    except (ValueError, OverflowError):
+        return 0.0
+
+
+def _poisson_cdf(k, lam):
+    """Poisson CDF P(X <= k) for X ~ Poisson(lam)."""
+    return sum(_poisson_pmf(i, lam) for i in range(0, max(0, k) + 1))
+
+
+def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_threshold=None, stat=None, reference_probs=None):
     if not over_odds or not under_odds:
         return None
     if min_edge_threshold is None:
@@ -48,35 +67,60 @@ def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_thr
     line_val = float(line)
     is_integer_line = abs(line_val - round(line_val)) < 1e-9
 
-    try:
-        dist = NormalDist(mu=float(projection), sigma=float(eff_stdev))
+    stat_key = str(stat or "").lower()
+
+    if reference_probs is not None:
+        # Sharp-book reference mode: use supplied no-vig probabilities directly.
+        prob_over = max(0.0, min(1.0, float(reference_probs.get("over", 0.5))))
+        prob_under = max(0.0, min(1.0, float(reference_probs.get("under", 0.5))))
+        prob_push = max(0.0, min(1.0, float(reference_probs.get("push", 0.0))))
+        dist_mode = "reference"
+    elif stat_key in _POISSON_STATS:
+        # Poisson path for low-count discrete stats (stl, blk, fg3m, tov).
+        lam = max(0.001, float(projection))
         if is_integer_line:
-            lo = line_val - 0.5
-            hi = line_val + 0.5
-            cdf_lo = dist.cdf(lo)
-            cdf_hi = dist.cdf(hi)
-            prob_push = cdf_hi - cdf_lo
-            prob_over = 1.0 - cdf_hi
-            prob_under = cdf_lo
+            k = int(round(line_val))
+            prob_push = _poisson_pmf(k, lam)
+            prob_over = max(0.0, 1.0 - _poisson_cdf(k, lam))
+            prob_under = max(0.0, _poisson_cdf(k - 1, lam))
         else:
-            prob_over = 1.0 - dist.cdf(line_val)
-            prob_under = dist.cdf(line_val)
+            k_floor = int(math.floor(line_val))
             prob_push = 0.0
-    except Exception:
-        sigma = max(float(eff_stdev), 0.01)
-        if is_integer_line:
-            z_lo = (line_val - 0.5 - float(projection)) / sigma
-            z_hi = (line_val + 0.5 - float(projection)) / sigma
-            cdf_lo = _normal_cdf_fallback(z_lo)
-            cdf_hi = _normal_cdf_fallback(z_hi)
-            prob_push = cdf_hi - cdf_lo
-            prob_over = 1.0 - cdf_hi
-            prob_under = cdf_lo
-        else:
-            z = (line_val - float(projection)) / sigma
-            prob_over = 1.0 - _normal_cdf_fallback(z)
-            prob_under = _normal_cdf_fallback(z)
-            prob_push = 0.0
+            prob_over = max(0.0, 1.0 - _poisson_cdf(k_floor, lam))
+            prob_under = max(0.0, _poisson_cdf(k_floor, lam))
+        dist_mode = "poisson"
+    else:
+        # Normal distribution path (pts, reb, ast, pra, pr, pa, ra).
+        dist_mode = "normal"
+        try:
+            dist = NormalDist(mu=float(projection), sigma=float(eff_stdev))
+            if is_integer_line:
+                lo = line_val - 0.5
+                hi = line_val + 0.5
+                cdf_lo = dist.cdf(lo)
+                cdf_hi = dist.cdf(hi)
+                prob_push = cdf_hi - cdf_lo
+                prob_over = 1.0 - cdf_hi
+                prob_under = cdf_lo
+            else:
+                prob_over = 1.0 - dist.cdf(line_val)
+                prob_under = dist.cdf(line_val)
+                prob_push = 0.0
+        except Exception:
+            sigma = max(float(eff_stdev), 0.01)
+            if is_integer_line:
+                z_lo = (line_val - 0.5 - float(projection)) / sigma
+                z_hi = (line_val + 0.5 - float(projection)) / sigma
+                cdf_lo = _normal_cdf_fallback(z_lo)
+                cdf_hi = _normal_cdf_fallback(z_hi)
+                prob_push = cdf_hi - cdf_lo
+                prob_over = 1.0 - cdf_hi
+                prob_under = cdf_lo
+            else:
+                z = (line_val - float(projection)) / sigma
+                prob_over = 1.0 - _normal_cdf_fallback(z)
+                prob_under = _normal_cdf_fallback(z)
+                prob_push = 0.0
 
     prob_over = max(0.0, min(1.0, prob_over))
     prob_under = max(0.0, min(1.0, prob_under))
@@ -142,6 +186,7 @@ def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_thr
         "projection": projection,
         "line": line,
         "stdev": safe_round(eff_stdev, 2),
+        "distributionMode": dist_mode,
         "probOver": safe_round(prob_over, 4),
         "probUnder": safe_round(prob_under, 4),
         "probPush": safe_round(prob_push, 4),

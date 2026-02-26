@@ -1,12 +1,21 @@
 #!/usr/bin/env python3
 """Data collection layer for NBA pipeline."""
 
+# Agent navigation index (high-level):
+# - Core helpers/config: lines ~1-260
+# - Odds API + player prop offer extraction: lines ~288-855
+# - NBA stats pulls (games/players/defense): lines ~856-1667
+# - Live-game stat extraction: lines ~1668+
+# For Tier 2 changes, most projection behavior is in `nba_prep_projection.py` and
+# `nba_prop_engine.py`; this file mainly handles fetch/normalize/caching.
+
 import json
 import time
 import math
 import os
 import hashlib
 import re
+import unicodedata
 import traceback
 import statistics
 from datetime import datetime, timedelta
@@ -101,7 +110,11 @@ def team_id_from_abbr(abbr):
     return t["id"] if t else None
 
 def _normalize_player_name(name):
-    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", str(name or "").lower())).strip()
+    raw = str(name or "").strip().lower()
+    # Remove diacritics so "Jokić" matches "Jokic".
+    raw = unicodedata.normalize("NFKD", raw)
+    raw = "".join(ch for ch in raw if not unicodedata.combining(ch))
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", raw)).strip()
 
 def _format_player_candidate(player):
     return {
@@ -703,8 +716,10 @@ def get_nba_player_prop_offers(
     future_events = []
     for event in events:
         commence = _parse_iso_datetime(event.get("commence_time"))
-        if commence and commence.replace(tzinfo=None) <= now:
-            continue
+        if commence:
+            age = (now - commence.replace(tzinfo=None)).total_seconds()
+            if age > 4 * 3600:  # exclude games that started more than 4 hours ago
+                continue
         future_events.append(event)
 
     exp_home = team_abbr if bool(is_home) else opp_abbr
@@ -966,6 +981,13 @@ def get_player_game_log(player_id, season=None, last_n=25, as_of_date=None):
         if season is None:
             season = CURRENT_SEASON
         cutoff_date = _coerce_date(as_of_date)
+        cutoff_key = cutoff_date.isoformat() if cutoff_date else "full"
+        last_n_key = "all" if last_n is None else int(last_n)
+        cache_key = f"gamelog_{player_id}_{season}_{last_n_key}_{cutoff_key}"
+        cached = cache_get(cache_key, 900)
+        if cached:
+            return cached
+
         date_to_nullable = ""
         if cutoff_date:
             date_to_nullable = (cutoff_date - timedelta(days=1)).strftime("%m/%d/%Y")
@@ -1065,11 +1087,13 @@ def get_player_game_log(player_id, season=None, last_n=25, as_of_date=None):
                 "altLines":   alt_lines,
             }
 
-        return {
+        out = {
             "success": True, "gameLogs": result, "rolling": rolling,
             "hitRates": hit_rates, "playerId": player_id, "gamesPlayed": len(result),
             "gamesExcludedDnp": games_excluded_dnp,
         }
+        cache_set(cache_key, out)
+        return out
     except Exception as e:
         return {"success": False, "error": str(e), "gameLogs": [], "rolling": {},
                 "hitRates": {}, "playerId": player_id, "gamesPlayed": 0,
@@ -1658,6 +1682,169 @@ def get_team_roster_status(team_abbr, season=None):
         }
         cache_set(cache_key, out)
         return out
+
+    except Exception as e:
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
+
+
+def _parse_live_minutes(raw):
+    """Parse a minutes string from boxscoretraditionalv3 (mm:ss or PT##M##.##S)."""
+    s = str(raw or "").strip()
+    if not s or s.upper().startswith("DNP"):
+        return 0.0
+    if s.upper().startswith("PT"):
+        m = re.match(r"PT(\d+)M([\d.]+)S", s.upper())
+        if m:
+            return float(m.group(1)) + float(m.group(2)) / 60.0
+        return 0.0
+    if ":" in s:
+        try:
+            mm, ss = s.split(":", 1)
+            return max(0.0, float(mm) + float(ss) / 60.0)
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        return max(0.0, float(s))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def get_live_player_stats(player_id, team_abbr):
+    """
+    Fetch current in-game stats for a player in a live or recently started game today.
+    Returns the player's current stat line, minutes played, period, and game metadata.
+    """
+    try:
+        player_id = int(player_id)
+        team_abbr = str(team_abbr).upper().strip()
+
+        games_data = get_todays_games()
+        games = games_data.get("games", [])
+
+        matching_games = []
+        for g in games:
+            home_abbr = (g.get("homeTeam") or {}).get("abbreviation", "")
+            away_abbr = (g.get("awayTeam") or {}).get("abbreviation", "")
+            if team_abbr in (home_abbr, away_abbr):
+                matching_games.append(g)
+
+        if not matching_games:
+            return {"success": False, "error": f"No game found today for {team_abbr}"}
+
+        # Scoreboard status convention:
+        # 1 = scheduled, 2 = live, 3 = final
+        selected_game = None
+        for g in matching_games:
+            try:
+                status = int(g.get("gameStatus", 0) or 0)
+            except (TypeError, ValueError):
+                status = 0
+            if status in (2, 3):
+                selected_game = g
+                break
+
+        if not selected_game:
+            g = matching_games[0]
+            return {
+                "success": False,
+                "error": (
+                    f"Game for {team_abbr} is not live yet. "
+                    "Live projection is available once the game starts."
+                ),
+                "gameId": g.get("gameId"),
+                "period": g.get("period", 0),
+                "gameStatus": g.get("gameStatus", 0),
+            }
+
+        game_id = selected_game.get("gameId")
+        game_period = selected_game.get("period", 0)
+        game_status = selected_game.get("gameStatus", 0)
+        home_team = selected_game.get("homeTeam") or {}
+        away_team = selected_game.get("awayTeam") or {}
+        is_home_team = str(home_team.get("abbreviation", "")).upper() == team_abbr
+        team_score = float((home_team if is_home_team else away_team).get("score", 0) or 0)
+        opp_score = float((away_team if is_home_team else home_team).get("score", 0) or 0)
+        score_margin = team_score - opp_score
+
+        def fetch():
+            resp = requests.get(
+                f"https://cdn.nba.com/static/json/liveData/boxscore/boxscore_{game_id}.json",
+                timeout=30,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+        payload = retry_api_call(fetch) or {}
+        box = payload.get("game") or {}
+
+        total_players = 0
+        for team_key in ("homeTeam", "awayTeam"):
+            team = box.get(team_key, {}) or {}
+            total_players += len(team.get("players", []) or [])
+
+        if total_players == 0:
+            return {
+                "success": False,
+                "error": "Live boxscore is not populated yet for this game.",
+                "gameId": game_id,
+                "period": game_period,
+                "gameStatus": game_status,
+            }
+
+        player_row = None
+        for team_key in ("homeTeam", "awayTeam"):
+            team = box.get(team_key, {}) or {}
+            for player in team.get("players", []) or []:
+                if int(player.get("personId", 0) or 0) == player_id:
+                    stats = player.get("statistics", {}) or {}
+                    pts  = float(stats.get("points") or 0)
+                    reb  = float(stats.get("reboundsTotal") or 0)
+                    ast  = float(stats.get("assists") or 0)
+                    fga = float(stats.get("fieldGoalsAttempted") or 0)
+                    fgm = float(stats.get("fieldGoalsMade") or 0)
+                    fta = float(stats.get("freeThrowsAttempted") or 0)
+                    ftm = float(stats.get("freeThrowsMade") or 0)
+                    fg3a = float(stats.get("threePointersAttempted") or 0)
+                    fg3m = float(stats.get("threePointersMade") or 0)
+                    foul_count = float(stats.get("foulsPersonal") or 0)
+                    player_row = {
+                        "minsPlayed": _parse_live_minutes(stats.get("minutes", "")),
+                        "PTS":  pts,
+                        "REB":  reb,
+                        "AST":  ast,
+                        "STL":  float(stats.get("steals") or 0),
+                        "BLK":  float(stats.get("blocks") or 0),
+                        "TOV":  float(stats.get("turnovers") or 0),
+                        "FG3M": fg3m,
+                        "FGA":  fga,
+                        "FGM":  fgm,
+                        "FTA":  fta,
+                        "FTM":  ftm,
+                        "FG3A": fg3a,
+                        "PF":   foul_count,
+                        "ShotAttempts": fga + 0.44 * fta,
+                        "PRA":  pts + reb + ast,
+                    }
+                    break
+            if player_row:
+                break
+
+        if not player_row:
+            return {
+                "success": False,
+                "error": f"Player {player_id} not found in live boxscore for game {game_id}",
+            }
+
+        return {
+            "success": True,
+            "gameId": game_id,
+            "period": game_period,
+            "gameStatus": game_status,
+            "teamScore": safe_round(team_score, 1),
+            "oppScore": safe_round(opp_score, 1),
+            "scoreMargin": safe_round(score_margin, 1),
+            "stats": player_row,
+        }
 
     except Exception as e:
         return {"success": False, "error": str(e), "traceback": traceback.format_exc()}

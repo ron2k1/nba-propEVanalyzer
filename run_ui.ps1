@@ -1,7 +1,7 @@
 param(
     [string]$HostAddress = "127.0.0.1",
     [int]$Port = 8787,
-    [string]$OddsApiKey = "9f99c64339964f169206e51b8a10d056"
+    [string]$OddsApiKey = ""
 )
 
 $ErrorActionPreference = "Stop"

@@ -344,6 +344,42 @@ def _pnl_for_outcome(result, odds):
     return None
 
 
+def _summarize_clv(entries):
+    """Compute CLV aggregate metrics over entries that have closing line data."""
+    clv_entries = [e for e in entries if e.get("clvLine") is not None]
+    n = len(clv_entries)
+    if n == 0:
+        return {
+            "clvSampleSize": 0,
+            "avgClvLine": None,
+            "avgClvOddsPct": None,
+            "positiveClvCount": None,
+            "positiveClvPct": None,
+        }
+    avg_clv_line = safe_round(
+        sum(_as_float(e.get("clvLine"), 0.0) for e in clv_entries) / n, 4
+    )
+    odds_entries = [e for e in clv_entries if e.get("clvOddsPct") is not None]
+    avg_clv_odds = (
+        safe_round(
+            sum(_as_float(e.get("clvOddsPct"), 0.0) for e in odds_entries) / len(odds_entries), 4
+        )
+        if odds_entries
+        else None
+    )
+    positive_count = sum(
+        1 for e in clv_entries if (_as_float(e.get("clvLine"), 0.0) or 0.0) > 0
+    )
+    positive_pct = safe_round(positive_count / n * 100.0, 2)
+    return {
+        "clvSampleSize": n,
+        "avgClvLine": avg_clv_line,
+        "avgClvOddsPct": avg_clv_odds,
+        "positiveClvCount": positive_count,
+        "positiveClvPct": positive_pct,
+    }
+
+
 def _summarize_settled(entries):
     graded = [e for e in entries if str(e.get("result")) in {"win", "loss", "push"}]
     wins = sum(1 for e in graded if e.get("result") == "win")
@@ -463,13 +499,17 @@ def settle_entries_for_date(date_str):
     _write_journal_entries(entries)
 
     same_day_entries = [e for e in entries if str(e.get("pickDate")) == str(date_str)]
-    summary = _summarize_settled(same_day_entries)
+    same_day_deduped = _dedupe_latest(same_day_entries)
+    summary = _summarize_settled(same_day_deduped)
+    summary.update(_summarize_clv(same_day_deduped))
     return {
         "success": True,
         "date": str(date_str),
         "pendingCount": len(candidates),
         "settledNow": touched,
         "unresolved": unresolved,
+        "entriesLogged": len(same_day_entries),
+        "entriesUnique": len(same_day_deduped),
         "summary": summary,
     }
 
@@ -541,6 +581,7 @@ def results_for_date(date_str=None, limit=50):
     deduped = _dedupe_latest(filtered)
 
     summary = _summarize_settled(deduped)
+    summary.update(_summarize_clv(deduped))
     unsettled = [e for e in deduped if not bool(e.get("settled"))]
 
     graded = [e for e in deduped if str(e.get("result")) in {"win", "loss", "push"}]

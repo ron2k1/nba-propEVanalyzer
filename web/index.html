@@ -85,6 +85,10 @@
           Back-to-back
         </label>
         <label>
+          Reference Book (optional)
+          <input id="referenceBook" type="text" placeholder="pinnacle">
+        </label>
+        <label>
           Sweep Top N
           <input id="sweepTopN" type="number" min="1" max="50" value="15">
         </label>
@@ -96,6 +100,50 @@
 
       <div id="propResult" class="result"></div>
       <div id="sweepResult" class="result"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Live Projection</h2>
+      </div>
+      <p class="hint">Fetches real-time boxscore and adjusts the pregame projection based on minutes remaining.</p>
+      <form id="liveForm" class="form-grid">
+        <label>
+          Player ID
+          <input id="livePlayerId" type="number">
+        </label>
+        <label>
+          Player Name
+          <input id="livePlayerName" type="text" list="playersList" placeholder="Victor Wembanyama">
+        </label>
+        <label>
+          Player Team
+          <input id="livePlayerTeam" type="text" maxlength="3" placeholder="SAS">
+        </label>
+        <label>
+          Opponent
+          <input id="liveOpponent" type="text" maxlength="3" placeholder="TOR">
+        </label>
+        <label>
+          Stat
+          <select id="liveStat">
+            <option value="pts">Points</option>
+            <option value="reb">Rebounds</option>
+            <option value="ast">Assists</option>
+            <option value="fg3m">3PM</option>
+            <option value="stl">Steals</option>
+            <option value="blk">Blocks</option>
+            <option value="tov">Turnovers</option>
+            <option value="pra">PRA</option>
+          </select>
+        </label>
+        <label class="toggle">
+          <input id="liveIsHome" type="checkbox">
+          Is Home
+        </label>
+        <button type="submit" class="btn btn-primary">Run Live Projection</button>
+      </form>
+      <div id="liveResult" class="result"></div>
     </section>
 
     <section class="panel">
@@ -169,6 +217,42 @@
         <button id="loadResultsYesterdayBtn" class="btn btn-secondary">Load Results</button>
       </div>
       <div id="trackingResult" class="result"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Starter EV Accuracy</h2>
+      </div>
+      <p class="hint">Pregame historical test on all starters for a date using EV-positive leans.</p>
+      <form id="starterAccuracyForm" class="form-grid">
+        <label>
+          Date
+          <input id="starterAccDate" type="date">
+        </label>
+        <label>
+          Bookmakers
+          <input id="starterAccBookmakers" type="text" value="draftkings,fanduel" placeholder="draftkings,fanduel">
+        </label>
+        <label>
+          Regions
+          <input id="starterAccRegions" type="text" value="us" placeholder="us">
+        </label>
+        <label>
+          Sport
+          <input id="starterAccSport" type="text" value="basketball_nba" placeholder="basketball_nba">
+        </label>
+        <label>
+          Model Variant
+          <select id="starterAccModel">
+            <option value="full">Full</option>
+            <option value="simple">Simple</option>
+          </select>
+        </label>
+      </form>
+      <div class="card-actions">
+        <button id="runStarterAccuracyBtn" class="btn btn-primary">Run Starter Accuracy</button>
+      </div>
+      <div id="starterAccuracyResult" class="result"></div>
     </section>
   </main>
 

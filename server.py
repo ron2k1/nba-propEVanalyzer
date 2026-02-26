@@ -17,22 +17,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from dotenv import load_dotenv
+load_dotenv(override=True)
+
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "web"
 NBA_SCRIPT = ROOT / "nba_mod.py"
 DEFAULT_TIMEOUT_SEC = 300
+LONG_TIMEOUT_SEC = 1800
 DEFAULT_ODDS_MARKETS = "h2h,spreads,totals"
 
 
-def _run_nba_command(args):
+def _run_nba_command(args, timeout_sec=None):
     cmd = [sys.executable, str(NBA_SCRIPT), *args]
     completed = subprocess.run(
         cmd,
         cwd=str(ROOT),
         capture_output=True,
         text=True,
-        timeout=DEFAULT_TIMEOUT_SEC,
+        timeout=timeout_sec or DEFAULT_TIMEOUT_SEC,
     )
 
     stdout = (completed.stdout or "").strip()
@@ -206,6 +210,18 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     args.append(date_str)
                 return self._send_json(200, _run_nba_command(args))
 
+            if path == "/api/starter_accuracy":
+                date_str = (query.get("date") or [""])[0].strip()
+                bookmakers = (query.get("bookmakers") or ["draftkings,fanduel"])[0].strip() or "draftkings,fanduel"
+                regions = (query.get("regions") or ["us"])[0].strip() or "us"
+                sport = (query.get("sport") or ["basketball_nba"])[0].strip() or "basketball_nba"
+                model_variant = (query.get("modelVariant") or ["full"])[0].strip() or "full"
+                args = ["starter_accuracy"]
+                if date_str:
+                    args.append(date_str)
+                args.extend([bookmakers, regions, sport, model_variant])
+                return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
+
             if path == "/api/settle_yesterday":
                 date_str = (query.get("date") or [""])[0].strip()
                 args = ["settle_yesterday"]
@@ -261,8 +277,11 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     "1" if bool(body.get("isB2b", False)) else "0",
                 ]
                 player_team_abbr = str(body.get("playerTeamAbbr", "")).upper().strip()
+                reference_book = str(body.get("referenceBook", "")).strip()
                 if player_team_abbr:
                     args.append(player_team_abbr)
+                    if reference_book:
+                        args.append(reference_book)
                 return self._send_json(200, _run_nba_command(args))
 
             if path == "/api/prop_ev_ml":
@@ -349,6 +368,53 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     return self._send_json(400, {"success": False, "error": "legs must be a JSON array."})
                 args = ["parlay_ev", json.dumps(legs, separators=(",", ":"))]
                 return self._send_json(200, _run_nba_command(args))
+
+            if path == "/api/live_projection":
+                required = ["playerTeamAbbr", "opponentAbbr", "isHome", "stat"]
+                missing = [k for k in required if k not in body]
+                if missing:
+                    return self._send_json(400, {"success": False, "error": f"Missing fields: {', '.join(missing)}"})
+
+                raw_player_id = body.get("playerId")
+                raw_player_name = str(body.get("playerName", "")).strip()
+                player_arg = None
+                if raw_player_id is not None and str(raw_player_id).strip() != "":
+                    try:
+                        player_arg = str(int(raw_player_id))
+                    except (TypeError, ValueError):
+                        return self._send_json(400, {"success": False, "error": "playerId must be numeric if provided."})
+                elif raw_player_name:
+                    player_arg = raw_player_name
+                else:
+                    return self._send_json(400, {"success": False, "error": "Provide playerId or playerName."})
+
+                args = [
+                    "live_projection",
+                    player_arg,
+                    str(body["playerTeamAbbr"]).upper(),
+                    str(body["opponentAbbr"]).upper(),
+                    "1" if bool(body["isHome"]) else "0",
+                    str(body["stat"]).lower(),
+                ]
+                return self._send_json(200, _run_nba_command(args))
+
+            if path == "/api/llm_analyze":
+                required = ["playerName", "teamAbbr", "opponentAbbr", "isHome", "stat", "line"]
+                missing = [k for k in required if k not in body]
+                if missing:
+                    return self._send_json(400, {"success": False, "error": f"Missing fields: {', '.join(missing)}"})
+                args = [
+                    "llm_analyze",
+                    str(body["playerName"]).strip(),
+                    str(body["teamAbbr"]).upper(),
+                    str(body["opponentAbbr"]).upper(),
+                    "1" if bool(body["isHome"]) else "0",
+                    str(body["stat"]).lower(),
+                    str(float(body["line"])),
+                    str(int(body.get("overOdds", -110))),
+                    str(int(body.get("underOdds", -110))),
+                ]
+                return self._send_json(200, _run_nba_command(args, timeout_sec=120))
 
             self._send_json(404, {"success": False, "error": "Unknown endpoint."})
         except subprocess.TimeoutExpired:
