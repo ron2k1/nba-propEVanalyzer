@@ -148,7 +148,7 @@ def handle_line_command(command, argv):
     # minutes_eval
     # -----------------------------------------------------------------------
     if command == "minutes_eval":
-        from nba_backtest import run_minutes_eval
+        from core.nba_backtest import run_minutes_eval
 
         if len(argv) < 3:
             return {
