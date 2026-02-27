@@ -327,7 +327,7 @@ def run_backtest(
 
     _delay = 0.35 if fast else API_DELAY
     _results_dir = _os.path.join(
-        _os.path.dirname(_os.path.abspath(__file__)), "data", "backtest_results"
+        _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "data", "backtest_results"
     )
 
     model_key = str(model or "both").lower().strip()
@@ -649,7 +649,7 @@ def run_backtest(
 
         if save_results:
             results_dir = _os.path.join(
-                _os.path.dirname(_os.path.abspath(__file__)), "data", "backtest_results"
+                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "data", "backtest_results"
             )
             _os.makedirs(results_dir, exist_ok=True)
             model_tag = model_key.replace(",", "-")
