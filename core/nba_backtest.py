@@ -549,6 +549,7 @@ def run_backtest(
                                 DEFAULT_SYNTHETIC_OVER_ODDS,
                                 DEFAULT_SYNTHETIC_UNDER_ODDS,
                                 stdev=stdev_val,
+                                stat=stat,
                             )
                             if not ev:
                                 continue
