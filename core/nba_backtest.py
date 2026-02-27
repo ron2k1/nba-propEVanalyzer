@@ -721,7 +721,7 @@ def run_minutes_eval(date_from, date_to=None, data_source="nba", bref_dir=None):
     Returns MAE, bias, sample count, and calibration buckets
     (from nba_minutes_model.minutes_calibration_bins).
     """
-    from nba_minutes_model import minutes_calibration_bins
+    from .nba_minutes_model import minutes_calibration_bins
 
     import sys as _sys
 
