@@ -13,9 +13,9 @@ from pathlib import Path
 from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.static import players as nba_players_static
 
-from nba_data_collection import HEADERS, API_DELAY, retry_api_call, safe_round, safe_div
+from .nba_data_collection import HEADERS, API_DELAY, retry_api_call, safe_round, safe_div
 
-ROOT_DIR = Path(__file__).resolve().parent
+ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 JOURNAL_PATH = DATA_DIR / "prop_journal.jsonl"
 

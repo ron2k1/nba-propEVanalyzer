@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Core data and odds CLI commands."""
 
-from nba_data_collection import (
+from core.nba_data_collection import (
     get_active_players_for_teams,
     get_all_players,
     get_all_teams,
@@ -16,8 +16,8 @@ from nba_data_collection import (
     get_todays_games,
     search_players_by_name,
 )
-from nba_data_prep import compute_usage_adjustment
-from nba_injury_news import compute_usage_adjustment_with_news, fetch_nba_injury_news
+from core.nba_data_prep import compute_usage_adjustment
+from core.nba_injury_news import compute_usage_adjustment_with_news, fetch_nba_injury_news
 
 from .shared import DEFAULT_ODDS_MARKETS, resolve_player_or_result
 

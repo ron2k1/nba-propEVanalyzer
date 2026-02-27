@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""LLM-powered reasoning layer using gpt-oss:20b (Ollama) with Claude fallback."""
+"""LLM-powered reasoning layer with configurable provider priority."""
 
 import json
 import os
@@ -13,6 +13,7 @@ load_dotenv(override=True)
 _OLLAMA_BASE = "http://localhost:11434"
 _OLLAMA_MODEL = "gpt-oss:20b"
 _CLAUDE_MODEL = "claude-sonnet-4-6"
+_PROVIDER_ORDER = os.getenv("LLM_PROVIDER_ORDER", "ollama_first").strip().lower()
 _TIMEOUT = 90
 
 
@@ -61,7 +62,23 @@ def _call_claude(system_prompt, user_prompt):
 
 
 def _llm_call(system_prompt, user_prompt):
-    """Try Ollama (gpt-oss:20b) first, fall back to Claude."""
+    """
+    Call LLM providers in configured order.
+
+    LLM_PROVIDER_ORDER:
+      - ollama_first (default)
+      - claude_first
+    """
+    if _PROVIDER_ORDER == "claude_first":
+        content, err = _call_claude(system_prompt, user_prompt)
+        if content:
+            return content, "claude", None
+        content, err2 = _call_ollama(system_prompt, user_prompt)
+        if content:
+            return content, "gpt-oss:20b", None
+        return None, None, f"Claude: {err} | Ollama: {err2}"
+
+    # Default behavior: Ollama first for low-cost runtime inference.
     content, err = _call_ollama(system_prompt, user_prompt)
     if content:
         return content, "gpt-oss:20b", None

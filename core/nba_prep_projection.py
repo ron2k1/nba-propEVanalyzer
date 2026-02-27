@@ -5,7 +5,7 @@ import statistics
 import time
 import traceback
 
-from nba_data_collection import (
+from .nba_data_collection import (
     API_DELAY,
     CURRENT_SEASON,
     PROJECTION_CONFIG,
@@ -18,6 +18,7 @@ from nba_data_collection import (
     safe_div,
     safe_round,
 )
+from .nba_minutes_model import compute_minutes_multiplier
 
 _DEF_WEIGHTS = {
     "G": {
@@ -239,6 +240,7 @@ def compute_projection(
     blend_with_line=None,
     model_variant="full",
     as_of_date=None,
+    minutes_multiplier=None,
 ):
     try:
         if season is None:
@@ -280,7 +282,24 @@ def compute_projection(
                     pvt_mults = pvt_data.get("multipliers")
 
         minutes_ctx = _project_minutes(logs, rolling, splits, is_home, is_b2b)
-        projected_minutes = minutes_ctx["projectedMinutes"] or 0.0
+        base_projected_minutes = minutes_ctx["projectedMinutes"] or 0.0
+
+        # --- Minutes model: enrich minutesProjection with confidence + reasoning ---
+        _mm = compute_minutes_multiplier(rolling, logs, is_b2b=is_b2b, splits=splits)
+        minutes_ctx["minutesMultiplier"]  = _mm["multiplier"]
+        minutes_ctx["minutesConfidence"]  = _mm["minutesConfidence"]
+        minutes_ctx["minutesReasoning"]   = _mm["minutesReasoning"]
+
+        # Effective multiplier: external caller override takes precedence over model
+        if minutes_multiplier is not None:
+            _eff_mult = max(0.50, min(2.0, float(minutes_multiplier)))
+            minutes_ctx["externalMultiplier"] = safe_round(_eff_mult, 3)
+            minutes_ctx["minutesReasoning"].append(f"external_override:{_eff_mult:.2f}")
+        else:
+            _eff_mult = _mm["multiplier"]
+
+        projected_minutes = max(0.0, base_projected_minutes * _eff_mult)
+        minutes_ctx["projectedMinutes"] = safe_round(projected_minutes, 2)
 
         core_stats = ["pts", "reb", "ast", "stl", "blk", "tov", "fg3m"]
         projections = {}

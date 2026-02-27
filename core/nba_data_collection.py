@@ -18,7 +18,7 @@ import re
 import unicodedata
 import traceback
 import statistics
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 
@@ -58,7 +58,7 @@ PROJECTION_CONFIG = {
     "min_edge_threshold": 0.03,      # minimum edge required for value verdicts
 }
 CURRENT_SEASON = get_season_string()
-_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".nba_cache")
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".nba_cache")
 os.makedirs(_CACHE_DIR, exist_ok=True)
 _ALL_TEAMS_BY_ABBR = {t["abbreviation"]: t for t in nba_teams_static.get_teams()}
 _ALL_TEAMS_BY_ID   = {t["id"]:           t for t in nba_teams_static.get_teams()}
@@ -336,7 +336,14 @@ def _odds_api_get(path, params=None, timeout=30):
             },
         }
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        msg = str(e)
+        if "WinError 10013" in msg:
+            msg = (
+                f"{msg} "
+                "Windows blocked the outbound socket. Allow python.exe in Windows Firewall "
+                "or run the UI launcher elevated (run_ui.ps1)."
+            )
+        return {"success": False, "error": msg}
 
 def _odds_price_to_decimal(price, odds_format):
     try:
@@ -444,6 +451,21 @@ def _extract_player_offer_side_and_name(outcome):
     if desc_norm.startswith("under"):
         return "under", (name_raw or participant_raw)
     return None, None
+
+
+def _normalize_bookmaker_key(book_name):
+    return re.sub(r"[^a-z0-9]+", "", str(book_name or "").lower())
+
+
+def _bookmaker_priority(book_name):
+    key = _normalize_bookmaker_key(book_name)
+    if "betmgm" in key:
+        return 3
+    if "draftkings" in key:
+        return 2
+    if "fanduel" in key:
+        return 1
+    return 0
 
 def _extract_odds_discrepancies(events, odds_format):
     """
@@ -841,7 +863,13 @@ def get_nba_player_prop_offers(
         deduped[key] = offer
 
     offers_out = list(deduped.values())
-    offers_out.sort(key=lambda x: (str(x.get("bookmaker", "")), float(x.get("line", 0))))
+    offers_out.sort(
+        key=lambda x: (
+            -_bookmaker_priority(x.get("bookmaker")),
+            float(x.get("line", 0)),
+            str(x.get("bookmaker", "")),
+        )
+    )
 
     out = {
         "success": True,
@@ -865,6 +893,245 @@ def get_nba_player_prop_offers(
     }
     cache_set(cache_key, out)
     return out
+
+
+def get_event_player_props_bulk(
+    event_id,
+    stat,
+    bookmakers=None,
+    sport=ODDS_DEFAULT_SPORT,
+    odds_format="american",
+):
+    """
+    Fetch all player prop lines for ALL players in a single event for one stat.
+    Unlike get_nba_player_prop_offers(), returns every player found (no name filter).
+
+    Used by the line-history collector to snapshot all props for a game in one call.
+
+    Returns:
+      {
+        "success": bool,
+        "eventId": str,
+        "stat": str,
+        "marketKey": str,
+        "snapshots": [
+          {"player_name": str, "book": str, "line": float,
+           "over_odds": int, "under_odds": int, "game_id": str}
+        ],
+        "quota": {...}
+      }
+    """
+    stat_key   = str(stat or "").lower().strip()
+    market_key = ODDS_PLAYER_PROP_MARKET_BY_STAT.get(stat_key)
+    if not market_key:
+        return {"success": False, "error": f"unsupported stat '{stat_key}'", "snapshots": []}
+
+    prop_params = {
+        "regions":    ODDS_DEFAULT_REGIONS,
+        "markets":    market_key,
+        "oddsFormat": odds_format,
+        "dateFormat": "iso",
+    }
+    if bookmakers:
+        prop_params["bookmakers"] = bookmakers
+
+    resp = _odds_api_get(f"sports/{sport}/events/{event_id}/odds", params=prop_params, timeout=30)
+    if not resp.get("success"):
+        return {"success": False, "error": resp.get("error"), "snapshots": [],
+                "quota": resp.get("quota")}
+
+    payload  = resp.get("data", {}) or {}
+    books    = payload.get("bookmakers", []) or []
+
+    snapshots = []
+    for bm in books:
+        book_name = bm.get("title") or bm.get("key") or "unknown"
+        # Collect per-player, per-line records within this bookmaker
+        player_lines = {}   # (player_name, line_val) → record
+        for market in bm.get("markets", []) or []:
+            if market.get("key") != market_key:
+                continue
+            for outcome in market.get("outcomes", []) or []:
+                side, player_name = _extract_player_offer_side_and_name(outcome)
+                if side not in {"over", "under"} or not player_name:
+                    continue
+                point = outcome.get("point")
+                if point is None:
+                    continue
+                try:
+                    line_val = float(point)
+                except (TypeError, ValueError):
+                    continue
+                price = outcome.get("price")
+                if price is None:
+                    continue
+
+                rec = player_lines.setdefault(
+                    (player_name, line_val),
+                    {
+                        "player_name": player_name,
+                        "book":        book_name,
+                        "game_id":     event_id,
+                        "stat":        stat_key,
+                        "line":        safe_round(line_val, 1),
+                        "over_odds":   None,
+                        "under_odds":  None,
+                    },
+                )
+                if side == "over":
+                    rec["over_odds"] = price
+                else:
+                    rec["under_odds"] = price
+
+        for rec in player_lines.values():
+            if rec["over_odds"] is not None and rec["under_odds"] is not None:
+                snapshots.append(rec)
+
+    return {
+        "success":   True,
+        "eventId":   event_id,
+        "stat":      stat_key,
+        "marketKey": market_key,
+        "snapshots": snapshots,
+        "quota":     resp.get("quota"),
+    }
+
+
+def get_todays_event_props_bulk(
+    bookmakers="betmgm,draftkings,fanduel",
+    stats=None,
+    sport=ODDS_DEFAULT_SPORT,
+    odds_format="american",
+):
+    """
+    Snapshot ALL player prop lines for today's games across specified books and stats.
+
+    Returns a flat list of snapshot dicts ready for LineStore.append_snapshots(), each
+    enriched with timestamp_utc, player_team_abbr (best-effort), opponent_abbr,
+    is_home, and commence_time.
+
+    stats: list of stat keys (default: ["pts","reb","ast","fg3m","tov"])
+           pass ["all"] to fetch all 11 markets (uses more API quota)
+
+    API cost: 1 quota request per (event × market).  Default 5 stats × N_games.
+    """
+    if stats is None:
+        stats = ["pts", "reb", "ast", "fg3m", "tov"]
+    elif stats == ["all"]:
+        stats = list(ODDS_PLAYER_PROP_MARKET_BY_STAT.keys())
+
+    # 1) Discover today's events via the h2h endpoint (single call)
+    events_resp = _odds_api_get(
+        f"sports/{sport}/odds",
+        params={
+            "regions":    ODDS_DEFAULT_REGIONS,
+            "markets":    "h2h",
+            "oddsFormat": odds_format,
+            "dateFormat": "iso",
+        },
+        timeout=30,
+    )
+    if not events_resp.get("success"):
+        return {
+            "success": False,
+            "error":   events_resp.get("error"),
+            "snapshots": [],
+            "quota":   events_resp.get("quota"),
+        }
+
+    now    = datetime.utcnow()
+    events = [
+        e for e in (events_resp.get("data") or [])
+        if (
+            (lambda c: not c or (now - c.replace(tzinfo=None)).total_seconds() < 4 * 3600)(
+                _parse_iso_datetime(e.get("commence_time"))
+            )
+        )
+    ]
+
+    if not events:
+        return {
+            "success":   True,
+            "snapshots": [],
+            "eventCount": 0,
+            "message":   "no active events found",
+            "quota":     events_resp.get("quota"),
+        }
+
+    timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    all_snapshots = []
+    errors        = []
+
+    for event in events:
+        event_id      = event.get("id", "")
+        home_name     = event.get("home_team", "")
+        away_name     = event.get("away_team", "")
+        commence_time = event.get("commence_time", "")
+
+        # Best-effort team abbr from name
+        home_abbr = _abbr_from_team_name(home_name)
+        away_abbr = _abbr_from_team_name(away_name)
+
+        for stat in stats:
+            result = get_event_player_props_bulk(
+                event_id=event_id,
+                stat=stat,
+                bookmakers=bookmakers,
+                sport=sport,
+                odds_format=odds_format,
+            )
+            if not result.get("success"):
+                errors.append({"event_id": event_id, "stat": stat,
+                               "error": result.get("error")})
+                continue
+
+            for snap in result.get("snapshots", []):
+                all_snapshots.append({
+                    "timestamp_utc":    timestamp_utc,
+                    "game_id":          event_id,
+                    "player_name":      snap["player_name"],
+                    "player_team_abbr": "",        # enriched later by monitor if needed
+                    "opponent_abbr":    "",
+                    "is_home":          None,
+                    "stat":             stat,
+                    "line":             snap["line"],
+                    "over_odds":        snap["over_odds"],
+                    "under_odds":       snap["under_odds"],
+                    "book":             snap["book"],
+                    "commence_time":    commence_time,
+                    "home_team_abbr":   home_abbr,
+                    "away_team_abbr":   away_abbr,
+                })
+
+    return {
+        "success":     True,
+        "timestamp":   timestamp_utc,
+        "eventCount":  len(events),
+        "statCount":   len(stats),
+        "snapshots":   all_snapshots,
+        "snapshotCount": len(all_snapshots),
+        "errors":      errors,
+        "quota":       events_resp.get("quota"),
+    }
+
+
+def _abbr_from_team_name(team_name: str) -> str:
+    """Best-effort convert Odds API team name → NBA abbreviation."""
+    if not team_name:
+        return ""
+    norm = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", str(team_name).lower())).strip()
+    for abbr, t in _ALL_TEAMS_BY_ABBR.items():
+        city     = str(t.get("city",      "") or "").lower().strip()
+        nickname = str(t.get("nickname",  "") or "").lower().strip()
+        full     = str(t.get("full_name", "") or "").lower().strip()
+        for variant in (city, nickname, full, f"{city} {nickname}"):
+            if variant and variant == norm:
+                return abbr
+        for variant in (city, nickname, full):
+            if variant and len(variant) >= 4 and variant in norm:
+                return abbr
+    return ""
+
 
 def get_todays_games():
     """

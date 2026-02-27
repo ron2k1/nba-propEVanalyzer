@@ -3,7 +3,7 @@
 
 import json
 
-from nba_bet_tracking import (
+from core.nba_bet_tracking import (
     best_plays_for_date,
     best_today,
     export_training_rows,

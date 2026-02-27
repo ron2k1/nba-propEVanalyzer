@@ -11,12 +11,12 @@ from pathlib import Path
 
 import numpy as np
 
-from nba_data_collection import safe_round
-from nba_ev_engine import american_to_implied_prob, compute_ev
-from nba_prop_engine import compute_prop_ev
+from .nba_data_collection import safe_round
+from .nba_ev_engine import american_to_implied_prob, compute_ev
+from .nba_prop_engine import compute_prop_ev
 
 DEFAULT_PROJECTION_ML_MODEL_PATH = str(
-    (Path(__file__).resolve().parent / "models" / "production_projection_model.pkl")
+    (Path(__file__).resolve().parent.parent / "models" / "production_projection_model.pkl")
 )
 
 

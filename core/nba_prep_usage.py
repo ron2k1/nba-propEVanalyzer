@@ -3,7 +3,7 @@
 
 import traceback
 
-from nba_data_collection import CURRENT_SEASON, get_team_roster_status, safe_round
+from .nba_data_collection import CURRENT_SEASON, get_team_roster_status, safe_round
 
 _USG_STAT_ELASTICITY = {
     "pts": 0.80,

@@ -3,7 +3,7 @@
 
 import os
 
-from nba_model_training import (
+from core.nba_model_training import (
     promote_projection_ml_model,
     train_projection_ml_from_file,
     train_ridge_calibrator_from_file,

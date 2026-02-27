@@ -5,8 +5,10 @@ import json
 
 from nba_api.stats.static import players as nba_players_static
 
-from nba_llm_engine import llm_full_analysis, llm_injury_signal, llm_matchup_context, llm_line_reasoning
-from nba_injury_news import fetch_nba_injury_news
+from core.nba_llm_engine import llm_full_analysis, llm_injury_signal, llm_matchup_context, llm_line_reasoning
+from core.nba_injury_news import fetch_nba_injury_news
+from core.nba_data_prep import compute_projection
+from core.nba_model_training import compute_ev
 
 from .shared import resolve_player_or_result
 
@@ -56,20 +58,56 @@ def handle_llm_command(command, argv):
                 if sig_pid in (0, int(player_id)):
                     news_signals.append(s)
 
-        # Simple EV data stub for line reasoning
-        ev_data = {"over": {"evPercent": None}, "under": {"evPercent": None}}
+        # Build real projection/EV context so line reasoning has meaningful inputs.
+        projection_value = float(line)
+        opponent_defense = None
+        matchup_history = None
+        ev_data = None
+        projection_source = "line_fallback"
 
-        return llm_full_analysis(
+        proj_res = compute_projection(
+            player_id=player_id,
+            opponent_abbr=opponent_abbr,
+            is_home=is_home,
+            is_b2b=False,
+            model_variant="full",
+        )
+        if proj_res.get("success"):
+            stat_proj = (proj_res.get("projections") or {}).get(stat)
+            opponent_defense = proj_res.get("opponentDefense")
+            matchup_history = proj_res.get("matchupHistory")
+            if stat_proj:
+                projection_value = float(stat_proj.get("projection") or projection_value)
+                stdev_val = stat_proj.get("projStdev") or stat_proj.get("stdev")
+                ev_data = compute_ev(
+                    projection=projection_value,
+                    line=line,
+                    over_odds=over_odds,
+                    under_odds=under_odds,
+                    stdev=stdev_val,
+                    stat=stat,
+                )
+                projection_source = "model_projection"
+
+        analysis = llm_full_analysis(
             player_name=player_name,
             team_abbr=team_abbr,
             stat=stat,
             line=line,
-            projection=line,  # no model projection at this entry point
+            projection=projection_value,
             opponent_abbr=opponent_abbr,
             is_home=is_home,
             ev_data=ev_data,
+            opponent_defense=opponent_defense,
+            matchup_history=matchup_history,
             news_signals=news_signals,
         )
+        analysis["projectionSource"] = projection_source
+        if proj_res.get("success") and proj_res.get("gamesPlayed") is not None:
+            analysis["gamesPlayed"] = int(proj_res.get("gamesPlayed") or 0)
+        elif not proj_res.get("success"):
+            analysis["projectionContextError"] = proj_res.get("error")
+        return analysis
 
     if command == "llm_injury":
         # Usage: llm_injury <team> [lookback_hours]

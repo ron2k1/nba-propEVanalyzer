@@ -8,13 +8,13 @@ Primary implementations now live in:
 - nba_model_ml_training.py
 """
 
-from nba_ev_engine import (
+from .nba_ev_engine import (
     american_to_decimal,
     american_to_implied_prob,
     compute_ev,
     prob_to_american,
 )
-from nba_model_ml_training import (
+from .nba_model_ml_training import (
     DEFAULT_PROJECTION_ML_MODEL_PATH,
     compute_prop_ev_with_ml,
     infer_feature_keys,
@@ -28,8 +28,8 @@ from nba_model_ml_training import (
     train_ridge_calibrator,
     train_ridge_calibrator_from_file,
 )
-from nba_parlay_engine import compute_parlay_ev
-from nba_prop_engine import compute_auto_line_sweep, compute_live_projection, compute_prop_ev
+from .nba_parlay_engine import compute_parlay_ev
+from .nba_prop_engine import compute_auto_line_sweep, compute_live_projection, compute_prop_ev
 
 __all__ = [
     "DEFAULT_PROJECTION_ML_MODEL_PATH",

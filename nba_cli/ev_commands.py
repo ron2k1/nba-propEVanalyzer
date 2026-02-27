@@ -8,13 +8,13 @@ from datetime import datetime
 
 from nba_api.stats.static import players as nba_players_static
 
-from nba_backtest import run_backtest
-from nba_bet_tracking import log_prop_ev_entry
-from nba_data_collection import get_live_player_stats, safe_round
-from nba_data_prep import compute_projection, compute_usage_adjustment
-from nba_injury_news import fetch_nba_injury_news
-from nba_llm_engine import llm_full_analysis
-from nba_model_training import (
+from core.nba_backtest import run_backtest
+from core.nba_bet_tracking import log_prop_ev_entry
+from core.nba_data_collection import get_live_player_stats, safe_round
+from core.nba_data_prep import compute_projection, compute_usage_adjustment
+from core.nba_injury_news import fetch_nba_injury_news
+from core.nba_llm_engine import llm_full_analysis
+from core.nba_model_training import (
     compute_auto_line_sweep,
     compute_ev,
     compute_live_projection,
@@ -22,7 +22,7 @@ from nba_model_training import (
     compute_prop_ev,
     compute_prop_ev_with_ml,
 )
-from nba_starter_accuracy import run_starter_accuracy
+from core.nba_starter_accuracy import run_starter_accuracy
 
 from .shared import VALID_LIVE_PROJECTION_STATS, resolve_player_or_result
 
@@ -594,7 +594,8 @@ def handle_ev_command(command, argv):
             return {
                 "error": (
                     "Usage: backtest <date_from:YYYY-MM-DD> [date_to:YYYY-MM-DD] "
-                    "[--model full|simple|both]"
+                    "[--model full|simple|both] [--save] [--fast] "
+                    "[--data-source nba|bref|local] [--local] [--bref-dir <path>]"
                 )
             }
         date_from = argv[2]
@@ -605,19 +606,46 @@ def handle_ev_command(command, argv):
             idx += 1
 
         model = "both"
+        save_results = False
+        fast = False
+        data_source = "nba"
+        bref_dir = None
         while idx < len(argv):
             token = str(argv[idx]).strip().lower()
             if token == "--model" and idx + 1 < len(argv):
                 model = str(argv[idx + 1]).strip().lower()
                 idx += 2
                 continue
+            if token == "--save":
+                save_results = True
+                idx += 1
+                continue
+            if token == "--fast":
+                fast = True
+                idx += 1
+                continue
+            if token == "--local":
+                data_source = "local"
+                idx += 1
+                continue
+            if token == "--data-source" and idx + 1 < len(argv):
+                data_source = str(argv[idx + 1]).strip().lower()
+                idx += 2
+                continue
+            if token == "--bref-dir" and idx + 1 < len(argv):
+                bref_dir = str(argv[idx + 1]).strip()
+                idx += 2
+                continue
             return {
                 "error": (
                     "Invalid backtest arguments. "
-                    "Usage: backtest <date_from> [date_to] [--model full|simple|both]"
+                    "Usage: backtest <date_from> [date_to] [--model full|simple|both] "
+                    "[--save] [--fast] [--data-source nba|bref|local] [--local] [--bref-dir <path>]"
                 )
             }
-        return run_backtest(date_from=date_from, date_to=date_to, model=model)
+        return run_backtest(date_from=date_from, date_to=date_to, model=model,
+                            save_results=save_results, fast=fast,
+                            data_source=data_source, bref_dir=bref_dir)
 
     if command == "starter_accuracy":
         # starter_accuracy [date_yyyy-mm-dd] [bookmakers_csv] [regions] [sport] [model_variant]
@@ -632,7 +660,7 @@ def handle_ev_command(command, argv):
             except ValueError:
                 pass
 
-        bookmakers = rest[0] if len(rest) > 0 else "draftkings,fanduel"
+        bookmakers = rest[0] if len(rest) > 0 else "betmgm,draftkings,fanduel"
         regions = rest[1] if len(rest) > 1 else "us"
         sport = rest[2] if len(rest) > 2 else "basketball_nba"
         model_variant = rest[3] if len(rest) > 3 else "full"

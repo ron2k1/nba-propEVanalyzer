@@ -4,7 +4,7 @@
 import math
 from statistics import NormalDist
 
-from nba_data_collection import PROJECTION_CONFIG, safe_div, safe_round
+from .nba_data_collection import PROJECTION_CONFIG, safe_div, safe_round
 
 
 def american_to_implied_prob(odds):

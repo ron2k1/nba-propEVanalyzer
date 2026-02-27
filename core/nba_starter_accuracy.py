@@ -8,7 +8,7 @@ import requests
 from nba_api.stats.endpoints import scoreboardv3
 from nba_api.stats.static import players as nba_players_static
 
-from nba_data_collection import (
+from .nba_data_collection import (
     API_DELAY,
     ODDS_PLAYER_PROP_MARKET_BY_STAT,
     PROJECTION_CONFIG,
@@ -22,8 +22,8 @@ from nba_data_collection import (
     safe_div,
     safe_round,
 )
-from nba_data_prep import compute_projection
-from nba_ev_engine import compute_ev
+from .nba_data_prep import compute_projection
+from .nba_ev_engine import compute_ev
 
 TRACKED_STATS = ["pts", "reb", "ast", "fg3m", "stl", "blk", "tov", "pra"]
 DEFAULT_BOOKMAKERS = "draftkings,fanduel"

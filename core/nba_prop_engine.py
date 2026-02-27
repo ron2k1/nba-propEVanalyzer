@@ -3,15 +3,38 @@
 
 from nba_api.stats.static import players as nba_players_static
 
-from nba_data_collection import get_nba_player_prop_offers, safe_round
-from nba_data_prep import compute_projection
-from nba_ev_engine import american_to_decimal, american_to_implied_prob, compute_ev
+from .nba_data_collection import get_nba_player_prop_offers, safe_round
+from .nba_data_prep import compute_projection
+from .nba_ev_engine import american_to_decimal, american_to_implied_prob, compute_ev
 
 _ALL_PLAYERS_BY_ID = {
     int(p["id"]): str(p.get("full_name", ""))
     for p in nba_players_static.get_players()
     if p.get("id")
 }
+PREFERRED_BOOKMAKERS = ("betmgm", "draftkings", "fanduel")
+
+
+def _normalize_book_key(book_name):
+    return "".join(ch for ch in str(book_name or "").lower() if ch.isalnum())
+
+
+def _book_priority_score(book_name):
+    key = _normalize_book_key(book_name)
+    if "betmgm" in key:
+        return 3
+    if "draftkings" in key:
+        return 2
+    if "fanduel" in key:
+        return 1
+    return 0
+
+
+def _clean_bookmaker_csv(raw_value, default_csv=None):
+    items = [x.strip().lower() for x in str(raw_value or "").split(",") if x.strip()]
+    if items:
+        return ",".join(items)
+    return str(default_csv or "").strip().lower()
 
 
 def _best_side_prices_for_line(offers, target_line, tolerance=0.05):
@@ -31,7 +54,14 @@ def _best_side_prices_for_line(offers, target_line, tolerance=0.05):
         under_dec = american_to_decimal(under_odds)
 
         if over_dec is not None:
-            if best_over is None or over_dec > best_over["decimal"]:
+            if (
+                best_over is None
+                or over_dec > best_over["decimal"]
+                or (
+                    abs(over_dec - best_over["decimal"]) < 1e-9
+                    and _book_priority_score(offer.get("bookmaker")) > _book_priority_score(best_over.get("book"))
+                )
+            ):
                 best_over = {
                     "odds": int(over_odds),
                     "book": offer.get("bookmaker"),
@@ -39,7 +69,14 @@ def _best_side_prices_for_line(offers, target_line, tolerance=0.05):
                     "line": line_val,
                 }
         if under_dec is not None:
-            if best_under is None or under_dec > best_under["decimal"]:
+            if (
+                best_under is None
+                or under_dec > best_under["decimal"]
+                or (
+                    abs(under_dec - best_under["decimal"]) < 1e-9
+                    and _book_priority_score(offer.get("bookmaker")) > _book_priority_score(best_under.get("book"))
+                )
+            ):
                 best_under = {
                     "odds": int(under_odds),
                     "book": offer.get("bookmaker"),
@@ -68,6 +105,8 @@ def compute_prop_ev(
 ):
     stat_key = str(stat or "").lower().strip()
     line_val = float(line)
+    preferred_books_csv = ",".join(PREFERRED_BOOKMAKERS)
+    books_filter = _clean_bookmaker_csv(bookmakers, default_csv=preferred_books_csv)
 
     proj_data = compute_projection(
         player_id=player_id,
@@ -106,7 +145,7 @@ def compute_prop_ev(
             is_home=is_home,
             stat=stat_key,
             regions=regions,
-            bookmakers=bookmakers,
+            bookmakers=books_filter,
             sport=sport,
             odds_format="american",
         )
@@ -216,9 +255,10 @@ def compute_auto_line_sweep(
     bookmakers=None,
     sport="basketball_nba",
     top_n=15,
+    allow_book_fallback=False,
 ):
     try:
-        requested_books = str(bookmakers or "").strip()
+        requested_books = _clean_bookmaker_csv(bookmakers, default_csv=",".join(PREFERRED_BOOKMAKERS))
 
         def _fetch_offers(bookmakers_filter):
             return get_nba_player_prop_offers(
@@ -252,10 +292,10 @@ def compute_auto_line_sweep(
 
         fallback_used = False
         fallback_reason = None
-        offer_data = _fetch_offers(bookmakers)
+        offer_data = _fetch_offers(requested_books)
         if not offer_data.get("success"):
             # If selected books fail (often due pulled markets), retry across all books.
-            if requested_books:
+            if requested_books and allow_book_fallback:
                 fallback_data = _fetch_offers(None)
                 if fallback_data.get("success"):
                     fallback_used = True
@@ -287,7 +327,7 @@ def compute_auto_line_sweep(
                 }
 
         offers = offer_data.get("offers", []) or []
-        if not offers and requested_books:
+        if not offers and requested_books and allow_book_fallback:
             # Selected books had no complete over/under pairs, retry all books.
             fallback_data = _fetch_offers(None)
             fallback_offers = fallback_data.get("offers", []) or []
@@ -396,7 +436,11 @@ def compute_auto_line_sweep(
             }
 
         ranked.sort(
-            key=lambda x: (x.get("bestEvPct", -9999), -abs((x.get("line") or 0) - (projection_val or 0))),
+            key=lambda x: (
+                x.get("bestEvPct", -9999),
+                -abs((x.get("line") or 0) - (projection_val or 0)),
+                _book_priority_score(x.get("bookmaker")),
+            ),
             reverse=True,
         )
         top_n_val = max(1, min(200, int(top_n or 15)))

@@ -1,0 +1,171 @@
+#!/usr/bin/env python3
+"""Quality gate for catching likely hallucination artifacts and regressions."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+
+FATAL_PATTERNS = [
+    (
+        "llm_projection_stub",
+        re.compile(r"projection\s*=\s*line\s*,\s*#\s*no model projection", re.IGNORECASE),
+    ),
+    (
+        "llm_ev_stub",
+        re.compile(
+            r'ev_data\s*=\s*\{"over":\s*\{"evPercent":\s*None\},\s*"under":\s*\{"evPercent":\s*None\}\}'
+        ),
+    ),
+    (
+        "llm_line_arg_bug",
+        re.compile(
+            r'if len\(argv\)\s*<\s*7:\s*\n\s*return \{"success": False, "error": "Usage: llm_line',
+            re.MULTILINE,
+        ),
+    ),
+]
+
+
+def _run(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _python_exe() -> str:
+    win_venv = ROOT / ".venv" / "Scripts" / "python.exe"
+    if win_venv.exists():
+        return str(win_venv)
+    return sys.executable
+
+
+def _tracked_py_files() -> list[str]:
+    cp = _run(["git", "ls-files", "*.py"], timeout=30)
+    if cp.returncode != 0:
+        return [str(p.relative_to(ROOT)) for p in ROOT.rglob("*.py") if ".venv" not in str(p)]
+    return [line.strip() for line in cp.stdout.splitlines() if line.strip()]
+
+
+def _scan_patterns() -> list[dict]:
+    findings: list[dict] = []
+    for path in _tracked_py_files():
+        file_path = ROOT / path
+        try:
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        for name, pattern in FATAL_PATTERNS:
+            if pattern.search(text):
+                findings.append({"file": path, "rule": name})
+    return findings
+
+
+def _compile_python(pyexe: str) -> tuple[bool, str]:
+    files = _tracked_py_files()
+    if not files:
+        return True, "no python files"
+    # Avoid command-line length issues by chunking.
+    chunk_size = 80
+    for i in range(0, len(files), chunk_size):
+        chunk = files[i : i + chunk_size]
+        cp = _run([pyexe, "-m", "py_compile", *chunk], timeout=180)
+        if cp.returncode != 0:
+            return False, (cp.stderr or cp.stdout).strip()
+    return True, "ok"
+
+
+def _check_js_syntax() -> tuple[bool, str]:
+    node = _run(["node", "--version"], timeout=10)
+    if node.returncode != 0:
+        return True, "node missing (skipped)"
+    cp = _run(["node", "--check", "web/app.js"], timeout=30)
+    if cp.returncode != 0:
+        return False, (cp.stderr or cp.stdout).strip()
+    return True, "ok"
+
+
+def _json_from_last_line(raw: str) -> dict | None:
+    lines = [x.strip() for x in (raw or "").splitlines() if x.strip()]
+    if not lines:
+        return None
+    try:
+        return json.loads(lines[-1])
+    except Exception:
+        return None
+
+
+def _smoke_llm(pyexe: str) -> tuple[bool, str]:
+    llm_line = _run([pyexe, "nba_mod.py", "llm_line", "203999", "pts", "30", "28.5"], timeout=240)
+    obj1 = _json_from_last_line(llm_line.stdout)
+    if llm_line.returncode != 0 or not obj1 or obj1.get("success") is not True:
+        detail = llm_line.stderr.strip() or llm_line.stdout.strip() or "llm_line failed"
+        return False, detail
+
+    llm_analyze = _run(
+        [pyexe, "nba_mod.py", "llm_analyze", "203999", "DEN", "LAL", "1", "pts", "30", "-110", "-110"],
+        timeout=300,
+    )
+    obj2 = _json_from_last_line(llm_analyze.stdout)
+    if llm_analyze.returncode != 0 or not obj2 or obj2.get("success") is not True:
+        detail = llm_analyze.stderr.strip() or llm_analyze.stdout.strip() or "llm_analyze failed"
+        return False, detail
+
+    if obj2.get("projectionSource") not in {"model_projection", "line_fallback"}:
+        return False, f"unexpected projectionSource: {obj2.get('projectionSource')}"
+
+    return True, f"providers: line={obj1.get('provider')}, analyze_line={((obj2.get('lineReasoning') or {}).get('provider'))}"
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Run repository quality gate checks.")
+    ap.add_argument("--full", action="store_true", help="Include slower LLM smoke tests.")
+    ap.add_argument("--json", action="store_true", help="Print JSON report.")
+    args = ap.parse_args()
+
+    pyexe = _python_exe()
+    report = {"ok": True, "checks": []}
+
+    ok, msg = _compile_python(pyexe)
+    report["checks"].append({"name": "python_compile", "ok": ok, "detail": msg})
+    report["ok"] = report["ok"] and ok
+
+    ok, msg = _check_js_syntax()
+    report["checks"].append({"name": "js_syntax", "ok": ok, "detail": msg})
+    report["ok"] = report["ok"] and ok
+
+    findings = _scan_patterns()
+    patt_ok = len(findings) == 0
+    report["checks"].append({"name": "hallucination_patterns", "ok": patt_ok, "detail": findings})
+    report["ok"] = report["ok"] and patt_ok
+
+    if args.full:
+        ok, msg = _smoke_llm(pyexe)
+        report["checks"].append({"name": "llm_smoke", "ok": ok, "detail": msg})
+        report["ok"] = report["ok"] and ok
+
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"QUALITY_GATE_OK={report['ok']}")
+        for chk in report["checks"]:
+            print(f"- {chk['name']}: {'PASS' if chk['ok'] else 'FAIL'}")
+            if chk["detail"] not in ("ok", "node missing (skipped)"):
+                print(f"  {chk['detail']}")
+
+    return 0 if report["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+

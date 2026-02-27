@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Shared CLI constants and helpers."""
 
-from nba_data_collection import resolve_player_identifier
+from core.nba_data_collection import resolve_player_identifier
 
 DEFAULT_ODDS_MARKETS = "h2h,spreads,totals"
 AVAILABLE_COMMANDS = (

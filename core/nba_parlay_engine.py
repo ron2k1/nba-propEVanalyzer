@@ -5,8 +5,8 @@ import math
 import statistics
 from statistics import NormalDist
 
-from nba_data_collection import safe_round
-from nba_ev_engine import american_to_decimal, prob_to_american
+from .nba_data_collection import safe_round
+from .nba_ev_engine import american_to_decimal, prob_to_american
 
 _SAME_PLAYER_CORR = {
     frozenset(["pts", "reb"]): 0.32,

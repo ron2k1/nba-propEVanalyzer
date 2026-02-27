@@ -8,8 +8,8 @@ from datetime import datetime, timedelta
 import requests
 from nba_api.stats.static import teams as nba_teams_static
 
-from nba_data_collection import cache_get, cache_set, get_team_roster_status, safe_round
-from nba_data_prep import compute_usage_adjustment, _USG_STAT_ELASTICITY
+from .nba_data_collection import cache_get, cache_set, get_team_roster_status, safe_round
+from .nba_data_prep import compute_usage_adjustment, _USG_STAT_ELASTICITY
 
 NEWS_API_BASE_URL = "https://newsapi.org/v2/everything"
 
