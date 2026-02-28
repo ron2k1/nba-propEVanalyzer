@@ -1,0 +1,45 @@
+---
+description: EV engine rules — compute_ev params, distribution modes, stat priorities, betting policy
+globs: "core/nba_ev_engine.py,core/nba_prop_engine.py,core/nba_decision_journal.py"
+alwaysApply: false
+---
+
+# EV Engine Rules
+
+## compute_ev() — always pass `stat=`
+
+Every call to `compute_ev()` must include `stat=<stat_key>` so temperature-scaling calibration is applied. Missing `stat=` silently skips calibration.
+
+## Distribution modes
+
+- Poisson: `stl`, `blk`, `fg3m`, `tov`
+- Normal CDF: `pts`, `reb`, `ast`, `pra`
+- Reference mode bypasses distribution
+
+## Stat priority
+
+`pts > reb > ast > pra > tov >> stl > fg3m > blk`
+
+## Book priority
+
+`BetMGM > DraftKings > FanDuel` — all `--books` flags and line selection follow this order.
+
+## BETTING_POLICY gate
+
+- Stat whitelist: `{pts, reb, ast, pra}`
+- Blocked confidence bins: `{4, 5}` (40-60%)
+- `min_edge_threshold`: 0.05 (no-vig edge)
+- `blk` and `fg3m`: structural Poisson bias — do not act on >60% model confidence until recalibrated
+
+## Edge verdicts
+
+| Edge | Verdict |
+|------|---------|
+| < 0 | Negative EV |
+| < 0.05 | Thin Edge |
+| 0.05 - 0.08 | Good Value |
+| >= 0.08 | Strong Value |
+
+## CLV rule
+
+High-quality bet requires `clvLine > 0` AND `clvOddsPct > 0`. Positive model EV alone is not sufficient.

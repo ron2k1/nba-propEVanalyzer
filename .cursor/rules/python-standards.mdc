@@ -1,0 +1,39 @@
+---
+description: Python import policy, module layout, and path resolution rules for core/ and nba_cli/
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Python Standards
+
+## Import policy
+
+- `core/` modules use **relative imports**: `from .nba_X import Y`
+- `nba_cli/` and `scripts/` use **absolute imports**: `from core.nba_X import Y`
+- Entrypoints (`server.py`, `nba_mod.py`) contain no engine imports directly
+
+## Module layout
+
+| What | Where |
+|------|-------|
+| API/cache | `core/nba_data_collection.py` |
+| Projection features | `core/nba_prep_projection.py` |
+| EV math | `core/nba_ev_engine.py` |
+| Prop/sweep | `core/nba_prop_engine.py` |
+| Decision journal | `core/nba_decision_journal.py` |
+| CLI commands | `nba_cli/router.py` + handler file |
+| Server endpoints | `server.py` |
+
+## Path resolution inside `core/`
+
+Always resolve to repo root with:
+
+```python
+ROOT = Path(__file__).resolve().parents[1]
+```
+
+Never resolve data paths relative to the module file itself.
+
+## New CLI commands
+
+Wire in `nba_cli/router.py` + a handler in the appropriate `nba_cli/*_commands.py` file. Never add logic to `nba_mod.py`.
