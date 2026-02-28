@@ -547,6 +547,24 @@ def compute_live_projection(pregame_proj, live_stats, stat_key):
             minute_multiplier *= 1.02
 
         adjusted_remaining_mins = max(0.0, remaining_mins * minute_multiplier)
+
+        # Close-game minutes floor: the pregame soft cap (33 min + decay)
+        # compresses star minutes to ~34 min for load-management risk.
+        # Once we're live and the game is close, override that ceiling
+        # using regulation time remaining and the player's usage share
+        # of game minutes.  Only for starter-level players (28+ min avg).
+        close_game_floor_applied = False
+        if projected_minutes >= 28 and period >= 3 and margin_abs <= 10 and fouls < 5:
+            _REGULATION_MINS_BY_PERIOD = {3: 24.0, 4: 12.0}
+            reg_remaining = _REGULATION_MINS_BY_PERIOD.get(period, 0.0)
+            if period > 4:
+                reg_remaining = 5.0
+            usage_share = min(0.88, projected_minutes / 48.0)
+            close_game_floor = reg_remaining * usage_share
+            if close_game_floor > adjusted_remaining_mins:
+                adjusted_remaining_mins = close_game_floor
+                close_game_floor_applied = True
+
         projected_remaining = blended_per_min * adjusted_remaining_mins
         live_projection = round(current_stat + projected_remaining, 1)
 
@@ -565,6 +583,7 @@ def compute_live_projection(pregame_proj, live_stats, stat_key):
             "livePerMinRate": round(live_per_min, 4),
             "blendWeight": round(blend_weight, 3),
             "minuteMultiplier": round(minute_multiplier, 3),
+            "closeGameFloor": close_game_floor_applied,
             "shotAttempts": round(shot_attempts, 2),
             "pregameProjection": pregame_projection,
             "gamePacePct": pace_pct,

@@ -1,0 +1,31 @@
+---
+description: Run quality gate before committing. Validates compilation, JS syntax, and hallucination patterns.
+alwaysApply: true
+---
+
+# Quality Gate
+
+Run before every commit:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\quality_gate.py --json
+```
+
+For deeper validation (includes LLM smoke tests):
+
+```powershell
+.\.venv\Scripts\python.exe scripts\quality_gate.py --full --json
+```
+
+## Hard blockers (do not commit)
+
+- `python_compile` failure in `core/` or `nba_cli/`
+- `hallucination_patterns` non-empty
+- `compute_ev()` call missing `stat=` parameter
+- Data paths inside `core/` not using `dirname(dirname(__file__))` for repo root
+
+## Pass criteria
+
+- `quality_gate.py --json` returns `"ok": true`
+- `prop_ev` smoke test returns `"success": true` with `distributionMode` field
+- No secrets (`.env`, API keys) in committed files
