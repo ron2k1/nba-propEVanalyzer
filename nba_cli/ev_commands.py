@@ -10,6 +10,7 @@ from nba_api.stats.static import players as nba_players_static
 
 from core.nba_backtest import run_backtest
 from core.nba_bet_tracking import log_prop_ev_entry
+from core.nba_decision_journal import DecisionJournal, _qualifies
 from core.nba_data_collection import get_live_player_stats, safe_round
 from core.nba_data_prep import compute_projection, compute_usage_adjustment
 from core.nba_injury_news import fetch_nba_injury_news
@@ -295,6 +296,7 @@ def handle_ev_command(command, argv):
         is_b2b = (argv[9] == "1") if len(argv) > 9 else False
         player_team_abbr = argv[10] if len(argv) > 10 else None
         reference_book = argv[11] if len(argv) > 11 else None
+        player_name = str(argv[2])
 
         result = compute_prop_ev(
             player_id=player_id,
@@ -366,6 +368,47 @@ def handle_ev_command(command, argv):
                 result["journalEntryId"] = journal_res.get("entryId")
             else:
                 result["journalError"] = journal_res.get("error")
+
+            # Decision Journal signal logging
+            _qualifies_ok, _skip = _qualifies(result, stat)
+            if _qualifies_ok:
+                _ev  = result.get("ev") or {}
+                _eo  = float((_ev.get("over")  or {}).get("edge") or 0.0)
+                _eu  = float((_ev.get("under") or {}).get("edge") or 0.0)
+                _rec = "over" if _eo >= _eu else "under"
+                _ls  = result.get("lineShopping") or {}
+                _url = (
+                    _ls.get("matchedLine") is not None
+                    and _ls.get("bestOverOdds") is not None
+                )
+                _book = (
+                    result.get("bestOverBook") if _rec == "over"
+                    else result.get("bestUnderBook")
+                ) or "user_supplied"
+                _dj  = DecisionJournal()
+                _djr = _dj.log_signal(
+                    player_id=player_id, player_name=player_name,
+                    team_abbr=player_team_abbr or "", opponent_abbr=opponent,
+                    stat=stat, line=line, book=_book,
+                    over_odds=over_odds, under_odds=under_odds,
+                    projection=float((result.get("projection") or {}).get("projection") or 0.0),
+                    prob_over=float(_ev.get("probOver") or 0.0),
+                    prob_under=float(_ev.get("probUnder") or 0.0),
+                    edge_over=_eo, edge_under=_eu, recommended_side=_rec,
+                    recommended_edge=max(_eo, _eu),
+                    confidence=max(
+                        float(_ev.get("probOver") or 0.0),
+                        float(_ev.get("probUnder") or 0.0),
+                    ),
+                    used_real_line=bool(_url), action_taken=0,
+                )
+                _dj.close()
+                if _djr.get("isDuplicate"):
+                    result["journalDuplicateSignal"] = True
+                elif _djr.get("success"):
+                    result["journalSignalId"] = _djr.get("signalId")
+                else:
+                    result["journalSignalError"] = _djr.get("error")
         return result
 
     if command == "prop_ev_ml":
@@ -469,6 +512,42 @@ def handle_ev_command(command, argv):
                     result["journalEntryId"] = journal_res.get("entryId")
                 else:
                     result["journalError"] = journal_res.get("error")
+
+            # Decision Journal signal logging for auto_sweep
+            _best    = result.get("bestRecommendation") or {}
+            _best_ev = _best.get("ev") or {}
+            _qs, _   = _qualifies({"ev": _best_ev, "success": True}, stat)
+            if _qs and _best_ev:
+                _eo2  = float((_best_ev.get("over")  or {}).get("edge") or 0.0)
+                _eu2  = float((_best_ev.get("under") or {}).get("edge") or 0.0)
+                _rec2 = "over" if _eo2 >= _eu2 else "under"
+                _dj2  = DecisionJournal()
+                _p2   = nba_players_static.find_player_by_id(player_id)
+                _dj2r = _dj2.log_signal(
+                    player_id=player_id,
+                    player_name=(_p2.get("full_name") if _p2 else str(argv[2])),
+                    team_abbr=player_team_abbr, opponent_abbr=opponent,
+                    stat=stat, line=float(_best.get("line") or 0.0),
+                    book=str(_best.get("bookmaker") or ""),
+                    over_odds=int(_best.get("overOdds") or -110),
+                    under_odds=int(_best.get("underOdds") or -110),
+                    projection=float((result.get("projection") or {}).get("projection") or 0.0),
+                    prob_over=float(_best_ev.get("probOver") or 0.0),
+                    prob_under=float(_best_ev.get("probUnder") or 0.0),
+                    edge_over=_eo2, edge_under=_eu2, recommended_side=_rec2,
+                    recommended_edge=max(_eo2, _eu2),
+                    confidence=max(
+                        float(_best_ev.get("probOver") or 0.0),
+                        float(_best_ev.get("probUnder") or 0.0),
+                    ),
+                    used_real_line=True,  # auto_sweep always uses live Odds API lines
+                    action_taken=0,
+                )
+                _dj2.close()
+                if _dj2r.get("isDuplicate"):
+                    result["journalDuplicateSignal"] = True
+                elif _dj2r.get("success"):
+                    result["journalSignalId"] = _dj2r.get("signalId")
         return result
 
     if command == "parlay_ev":
@@ -595,7 +674,8 @@ def handle_ev_command(command, argv):
                 "error": (
                     "Usage: backtest <date_from:YYYY-MM-DD> [date_to:YYYY-MM-DD] "
                     "[--model full|simple|both] [--save] [--fast] "
-                    "[--data-source nba|bref|local] [--local] [--bref-dir <path>]"
+                    "[--data-source nba|bref|local] [--local] [--bref-dir <path>] "
+                    "[--local-index <path>] [--odds-source local_history] [--odds-db <path>]"
                 )
             }
         date_from = argv[2]
@@ -610,6 +690,9 @@ def handle_ev_command(command, argv):
         fast = False
         data_source = "nba"
         bref_dir = None
+        odds_source = None
+        odds_db = None
+        local_index = None
         while idx < len(argv):
             token = str(argv[idx]).strip().lower()
             if token == "--model" and idx + 1 < len(argv):
@@ -636,16 +719,32 @@ def handle_ev_command(command, argv):
                 bref_dir = str(argv[idx + 1]).strip()
                 idx += 2
                 continue
+            if token == "--local-index" and idx + 1 < len(argv):
+                local_index = str(argv[idx + 1]).strip()
+                idx += 2
+                continue
+            if token == "--odds-source" and idx + 1 < len(argv):
+                odds_source = str(argv[idx + 1]).strip().lower()
+                idx += 2
+                continue
+            if token == "--odds-db" and idx + 1 < len(argv):
+                odds_db = str(argv[idx + 1]).strip()
+                idx += 2
+                continue
             return {
                 "error": (
                     "Invalid backtest arguments. "
                     "Usage: backtest <date_from> [date_to] [--model full|simple|both] "
-                    "[--save] [--fast] [--data-source nba|bref|local] [--local] [--bref-dir <path>]"
+                    "[--save] [--fast] [--data-source nba|bref|local] [--local] "
+                    "[--bref-dir <path>] [--local-index <path>] "
+                    "[--odds-source local_history] [--odds-db <path>]"
                 )
             }
         return run_backtest(date_from=date_from, date_to=date_to, model=model,
                             save_results=save_results, fast=fast,
-                            data_source=data_source, bref_dir=bref_dir)
+                            data_source=data_source, bref_dir=bref_dir,
+                            odds_source=odds_source, odds_db=odds_db,
+                            local_index=local_index)
 
     if command == "starter_accuracy":
         # starter_accuracy [date_yyyy-mm-dd] [bookmakers_csv] [regions] [sport] [model_variant]

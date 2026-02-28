@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Projection-focused prep logic."""
 
+import math
 import statistics
 import time
 import traceback
@@ -202,6 +203,15 @@ def _project_minutes(logs, rolling, splits, is_home, is_b2b):
 
     weighted_mins = _weighted_recent_average(vals)
     season_mins = rolling.get("min_avg_season", 0) or weighted_mins or 0.0
+    min_stdev = float(rolling.get("min_stdev", 0) or 0.0)
+
+    # Regression to mean for extreme recent minutes (mirrors stat regression).
+    if min_stdev > 0 and season_mins > 0:
+        z = abs((weighted_mins - season_mins) / min_stdev)
+        if z > 1.5:
+            shrink = min(0.5, (z - 1.5) * 0.25)
+            weighted_mins = weighted_mins * (1 - shrink) + season_mins * shrink
+
     base = 0.60 * weighted_mins + 0.40 * season_mins
 
     ha_adj = _home_away_adj(splits, "min", is_home, season_mins)
@@ -217,6 +227,13 @@ def _project_minutes(logs, rolling, splits, is_home, is_b2b):
     lo_c, hi_c = PROJECTION_CONFIG["combined"]
     combined = max(lo_c, min(hi_c, combined))
     projected = max(0.0, base * combined)
+
+    # High-minutes soft cap: above 33 min, diminishing returns account for
+    # load management, blowout rest, and foul trouble that affect stars.
+    _SOFT_CAP = 33.0
+    _DECAY = 0.55
+    if projected > _SOFT_CAP:
+        projected = _SOFT_CAP + (projected - _SOFT_CAP) * _DECAY
 
     return {
         "projectedMinutes": safe_round(projected, 2),
@@ -316,6 +333,22 @@ def compute_projection(
             season_avg = float(rolling.get(f"{stat}_avg_season", 0) or 0.0)
             season_mins = float(rolling.get("min_avg_season", 0) or weighted_mins or 1.0)
             stdev_val = float(rolling.get(f"{stat}_stdev", 0) or 0.0)
+
+            # Regression to mean: dampen extreme recent performance toward
+            # season average. Activates above 1.5 stdev; linear shrinkage to
+            # max 50%.  Prevents last-5 hot/cold streaks from dominating.
+            if stdev_val > 0 and season_avg > 0:
+                z = abs((weighted_avg - season_avg) / stdev_val)
+                if z > 1.5:
+                    shrink = min(0.5, (z - 1.5) * 0.25)
+                    weighted_avg = weighted_avg * (1 - shrink) + season_avg * shrink
+
+            # Variance inflation for small samples: widen CDF tails when we
+            # have fewer games, reflecting higher uncertainty.  No effect at
+            # n >= 25 (our max fetch window).
+            _N_REF = 25
+            if n < _N_REF and n > 0:
+                stdev_val = stdev_val * (1 + 2.0 * (1.0 / math.sqrt(n) - 1.0 / math.sqrt(_N_REF)))
 
             weighted_rate = safe_div(weighted_avg, weighted_mins, default=0.0)
             season_rate = safe_div(season_avg, season_mins, default=0.0)

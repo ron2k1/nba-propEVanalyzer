@@ -32,7 +32,6 @@ FATAL_PATTERNS = [
     ),
 ]
 
-
 def _run(cmd: list[str], timeout: int = 120) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         cmd,
@@ -127,6 +126,48 @@ def _smoke_llm(pyexe: str) -> tuple[bool, str]:
     return True, f"providers: line={obj1.get('provider')}, analyze_line={((obj2.get('lineReasoning') or {}).get('provider'))}"
 
 
+def _smoke_gamelog_fallback(pyexe: str) -> tuple[bool, str]:
+    script = (
+        "import json, os\n"
+        "from core import nba_data_collection as dc\n"
+        "player_id = 1628973\n"
+        "season = '2025-26'\n"
+        "cache_key = f'gamelog_{player_id}_{season}_25_full'\n"
+        "cache_path = dc._cache_path(cache_key)\n"
+        "try:\n"
+        "    if os.path.exists(cache_path):\n"
+        "        os.remove(cache_path)\n"
+        "except Exception:\n"
+        "    pass\n"
+        "orig_retry = dc.retry_api_call\n"
+        "dc.retry_api_call = lambda *a, **k: (_ for _ in ()).throw(ConnectionError('quality_gate_simulated_outage'))\n"
+        "try:\n"
+        "    out = dc.get_player_game_log(player_id, season=season, last_n=25)\n"
+        "finally:\n"
+        "    dc.retry_api_call = orig_retry\n"
+        "payload = {\n"
+        "    'success': bool(out.get('success')),\n"
+        "    'source': out.get('source'),\n"
+        "    'gamesPlayed': int(out.get('gamesPlayed') or len(out.get('gameLogs') or [])),\n"
+        "    'error': out.get('error'),\n"
+        "}\n"
+        "print(json.dumps(payload))\n"
+    )
+    cp = _run([pyexe, "-c", script], timeout=120)
+    obj = _json_from_last_line(cp.stdout)
+    if cp.returncode != 0 or not obj:
+        detail = cp.stderr.strip() or cp.stdout.strip() or "gamelog fallback smoke failed"
+        return False, detail
+    ok = (
+        obj.get("success") is True
+        and obj.get("source") == "local_index_fallback"
+        and int(obj.get("gamesPlayed") or 0) > 0
+    )
+    if not ok:
+        return False, json.dumps(obj, separators=(",", ":"))
+    return True, f"source={obj.get('source')} games={obj.get('gamesPlayed')}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Run repository quality gate checks.")
     ap.add_argument("--full", action="store_true", help="Include slower LLM smoke tests.")
@@ -149,10 +190,45 @@ def main() -> int:
     report["checks"].append({"name": "hallucination_patterns", "ok": patt_ok, "detail": findings})
     report["ok"] = report["ok"] and patt_ok
 
+    ok, msg = _smoke_gamelog_fallback(pyexe)
+    report["checks"].append({"name": "gamelog_fallback_smoke", "ok": ok, "detail": msg})
+    report["ok"] = report["ok"] and ok
+
     if args.full:
         ok, msg = _smoke_llm(pyexe)
         report["checks"].append({"name": "llm_smoke", "ok": ok, "detail": msg})
         report["ok"] = report["ok"] and ok
+
+        # LineStore → OddsStore bridge smoke
+        cp = _run([pyexe, "scripts/validate_line_bridge.py"], timeout=120)
+        last_line = cp.stdout.splitlines()[-1] if cp.stdout else ""
+        stdout_str = (cp.stdout or "").strip()
+        parse_error = None
+        if stdout_str:
+            try:
+                vj = json.loads(stdout_str)
+            except Exception as e:
+                parse_error = str(e)
+                # Fallback: parse from the last '{' to end, in case banner text precedes JSON.
+                brace_idx = stdout_str.rfind("{")
+                if brace_idx >= 0:
+                    try:
+                        vj = json.loads(stdout_str[brace_idx:])
+                        parse_error = None
+                    except Exception as e2:
+                        vj = {}
+                        parse_error = f"{parse_error}; fallback={e2}"
+                else:
+                    vj = {}
+        else:
+            vj = {}
+        bridge_ok = cp.returncode == 0 and isinstance(vj, dict) and vj.get("ok") is True
+        if parse_error:
+            bridge_detail = {"parseError": parse_error, "stdoutTail": cp.stdout[-300:]}
+        else:
+            bridge_detail = vj.get("checks", []) if isinstance(vj, dict) else []
+        report["checks"].append({"name": "line_bridge_smoke", "ok": bridge_ok, "detail": bridge_detail})
+        report["ok"] = report["ok"] and bridge_ok
 
     if args.json:
         print(json.dumps(report, indent=2))

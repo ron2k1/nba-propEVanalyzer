@@ -254,6 +254,53 @@ def llm_line_reasoning(player_name, stat, line, projection, ev_data=None, refere
     }
 
 
+def _heuristic_matchup_context(opponent_abbr, is_home):
+    venue = "home" if is_home else "road"
+    return {
+        "success": True,
+        "modifier": 1.0,
+        "reasoning": (
+            f"No structured defense or matchup-history data was available for {opponent_abbr}; "
+            f"keeping a neutral matchup modifier (1.00) on the {venue} split."
+        ),
+        "confidence": 0.5,
+        "provider": "heuristic",
+    }
+
+
+def _heuristic_line_reasoning(stat, line, projection, ev_data=None):
+    over = (ev_data or {}).get("over") or {}
+    under = (ev_data or {}).get("under") or {}
+    over_ev = float(over.get("evPercent") or 0.0)
+    under_ev = float(under.get("evPercent") or 0.0)
+    best_side = "over" if over_ev >= under_ev else "under"
+    best_ev = over_ev if best_side == "over" else under_ev
+    best_edge = float(((over if best_side == "over" else under).get("edge")) or 0.0)
+    best_prob = float((ev_data or {}).get("probOver") or 0.5) if best_side == "over" else float((ev_data or {}).get("probUnder") or 0.5)
+
+    if best_ev >= 8.0 and best_edge >= 0.05:
+        verdict = "soft"
+        score = 3
+    elif best_ev >= 3.0 and best_edge >= 0.02:
+        verdict = "neutral"
+        score = 5
+    else:
+        verdict = "sharp"
+        score = 8
+
+    return {
+        "success": True,
+        "verdict": verdict,
+        "sharpnessScore": score,
+        "reasoning": (
+            f"Model projection ({projection}) vs line ({line}) on {stat.upper()} implies a best-side "
+            f"{best_side} edge of {best_edge:.3f} ({best_ev:.2f}% EV, {best_prob:.1%} win probability), "
+            f"so the line grades as {verdict} in this fast heuristic mode."
+        ),
+        "provider": "heuristic",
+    }
+
+
 def llm_full_analysis(player_name, team_abbr, stat, line, projection,
                       opponent_abbr, is_home, ev_data=None, opponent_defense=None,
                       matchup_history=None, reference_book_meta=None, news_signals=None):
@@ -261,10 +308,18 @@ def llm_full_analysis(player_name, team_abbr, stat, line, projection,
     Run all 3 LLM analyses and return combined result.
     """
     injury = llm_injury_signal(player_name, team_abbr, news_signals or [])
-    matchup = llm_matchup_context(player_name, stat, projection, opponent_abbr,
-                                  is_home, opponent_defense, matchup_history)
-    line_r = llm_line_reasoning(player_name, stat, line, projection,
-                                ev_data, reference_book_meta)
+
+    has_structured_matchup = bool(opponent_defense) or bool(matchup_history)
+    if has_structured_matchup:
+        matchup = llm_matchup_context(player_name, stat, projection, opponent_abbr,
+                                      is_home, opponent_defense, matchup_history)
+    else:
+        matchup = _heuristic_matchup_context(opponent_abbr, is_home)
+
+    if reference_book_meta:
+        line_r = llm_line_reasoning(player_name, stat, line, projection, ev_data, reference_book_meta)
+    else:
+        line_r = _heuristic_line_reasoning(stat, line, projection, ev_data)
 
     return {
         "success": True,

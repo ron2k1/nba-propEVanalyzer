@@ -55,7 +55,13 @@ PROJECTION_CONFIG = {
     "mins_trend":    (0.85, 1.15),   # minutes trend cap
     "combined":      (0.55, 1.60),   # total adjustment compound cap
     "dnp_min_threshold": 1,          # exclude games with min < this (DNP filter)
-    "min_edge_threshold": 0.03,      # minimum edge required for value verdicts
+    "min_edge_threshold": 0.05,      # minimum edge required for value verdicts (no-vig edge)
+}
+
+BETTING_POLICY = {
+    "stat_whitelist": {"pts", "reb", "ast", "pra"},
+    "blocked_prob_bins": {4, 5},       # 40-50% and 50-60% model probOver bins
+    "min_ev_pct": 0.0,                 # evPercent floor
 }
 CURRENT_SEASON = get_season_string()
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".nba_cache")
@@ -81,6 +87,25 @@ ODDS_PLAYER_PROP_MARKET_BY_STAT = {
     "pa": "player_points_assists",
     "ra": "player_rebounds_assists",
 }
+
+def _local_game_log_fallback(player_id, season, last_n=25, as_of_date=None):
+    try:
+        from .nba_local_stats import LocalNBAStats
+        provider = LocalNBAStats(index_path=(os.getenv("NBA_LOCAL_INDEX_PATH") or None))
+        out = provider.get_player_game_log(
+            player_id=player_id,
+            season=season,
+            last_n=last_n,
+            as_of_date=as_of_date,
+        )
+        if out.get("success") and out.get("gameLogs"):
+            out["source"] = "local_index_fallback"
+            out["fallbackReason"] = "nba_api_unavailable"
+            return out, None
+        return None, "local_index_no_games"
+    except Exception as e:
+        return None, f"local_index_error:{type(e).__name__}"
+
 
 def _cache_path(key):
     return os.path.join(_CACHE_DIR, hashlib.md5(key.encode()).hexdigest() + ".json")
@@ -1244,6 +1269,7 @@ def get_player_game_log(player_id, season=None, last_n=25, as_of_date=None):
     - Alt-line sweep at offsets -3.0, -1.5, 0, +1.5, +3.0 from primary line.
     - underRate added alongside overRate (no pushes on .5 lines).
     """
+    cache_key = None
     try:
         if season is None:
             season = CURRENT_SEASON
@@ -1362,6 +1388,16 @@ def get_player_game_log(player_id, season=None, last_n=25, as_of_date=None):
         cache_set(cache_key, out)
         return out
     except Exception as e:
+        fallback, _ = _local_game_log_fallback(
+            player_id=player_id,
+            season=season,
+            last_n=last_n,
+            as_of_date=as_of_date,
+        )
+        if fallback:
+            if cache_key:
+                cache_set(cache_key, fallback)
+            return fallback
         return {"success": False, "error": str(e), "gameLogs": [], "rolling": {},
                 "hitRates": {}, "playerId": player_id, "gamesPlayed": 0,
                 "gamesExcludedDnp": 0}
