@@ -144,9 +144,11 @@ def detect_injury_return(logs: list, excluded_games: list) -> dict:
         if len(active_dates) >= 2:
             gap_days = (most_recent_active - second_active).days
             if gap_days >= _LAYOFF_GAP_DAYS:
-                # Treat the game we're projecting as first game back (conservative).
                 estimated_dnps = max(1, round(gap_days / _AVG_DAYS_PER_DNP))
-                games_since_return = 1
+                # Count active games already played after the gap (comeback games
+                # already in the log). The projected game is one more after those.
+                games_played_after_gap = sum(1 for d in active_dates if d > second_active)
+                games_since_return = games_played_after_gap + 1
                 cap = 1.0
                 for min_dnps, min_gsr, max_gsr, table_cap in _INJURY_CAP_TABLE:
                     if estimated_dnps >= min_dnps and min_gsr <= games_since_return <= max_gsr:
@@ -158,7 +160,7 @@ def detect_injury_return(logs: list, excluded_games: list) -> dict:
                     "approx_days_missed": round(gap_days, 1),
                     "games_since_return": games_since_return,
                     "cap_multiplier":     cap,
-                    "reasoning":          f"injury_return_gap_{gap_days}d_g1_cap_{int(cap * 100)}pct",
+                    "reasoning":          f"injury_return_gap_{gap_days}d_g{games_since_return}_cap_{int(cap * 100)}pct",
                 }
         return _no_cap
 

@@ -34,6 +34,18 @@ def _today_local_str():
     return datetime.now().date().isoformat()
 
 
+def _game_date_from_utc(commence_time_str):
+    """Convert Odds API commenceTime (UTC ISO) to NBA game date using UTC-6 offset.
+    NBA games tip off 7-10 PM ET; UTC-6 keeps the correct calendar date.
+    Falls back to today if parsing fails."""
+    try:
+        s = str(commence_time_str or "").rstrip("Z").replace("T", " ")
+        dt_utc = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+        return (dt_utc - timedelta(hours=6)).date().isoformat()
+    except Exception:
+        return _today_local_str()
+
+
 def _yesterday_local_str():
     return (datetime.now().date() - timedelta(days=1)).isoformat()
 
@@ -196,11 +208,15 @@ def log_prop_ev_entry(
     minutes_cap_reason = minutes_ctx.get("minutesCapReason")
 
     now_local = datetime.now().replace(microsecond=0).isoformat()
+    # Derive pickDate from the game's commenceTime (UTC-6) so late-night games
+    # (10 PM ET = UTC next day) aren't filed under the wrong calendar date.
+    _commence = (prop_result or {}).get("commenceTime")
+    _pick_date = _game_date_from_utc(_commence) if _commence else _today_local_str()
     entry = {
         "entryId": str(uuid.uuid4()),
         "createdAtUtc": _now_utc_iso(),
         "createdAtLocal": now_local,
-        "pickDate": _today_local_str(),
+        "pickDate": _pick_date,
         "source": str(source or "cli"),
         "playerId": int(player_id),
         "playerName": _PLAYERS_BY_ID.get(int(player_id), ""),
