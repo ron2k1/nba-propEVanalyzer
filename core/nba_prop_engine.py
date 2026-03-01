@@ -462,6 +462,19 @@ def compute_auto_line_sweep(
         _median_vig = _statistics.median(_all_vigs) if _all_vigs else None
         _median_line = _statistics.median(_all_lines) if _all_lines else None
 
+        # Gap 8.16: Cross-book line dispersion — identify outlier books whose line
+        # deviates from the median by > 0.4. A soft line is an exploitable edge.
+        # Informational: stored in result for context, not a blocking signal.
+        soft_line_books = (
+            [
+                o.get("bookmaker") for o in offers
+                if o.get("line") is not None and _median_line is not None
+                and abs(float(o["line"]) - _median_line) > 0.4
+            ]
+            if _median_line is not None
+            else []
+        )
+
         ranked = []
         for offer in offers:
             line = offer.get("line")
@@ -574,6 +587,8 @@ def compute_auto_line_sweep(
             "nBooksOffering": n_books_offering,
             # Gap 8.12: stdev of lines across all books (0.0 = identical lines)
             "bookLineStdev": book_line_stdev,
+            # Gap 8.16: books whose line deviates from median by > 0.4 (soft line signal)
+            "softLineBooks": soft_line_books,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
