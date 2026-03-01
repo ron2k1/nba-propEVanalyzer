@@ -60,7 +60,7 @@ PROJECTION_CONFIG = {
 
 BETTING_POLICY = {
     "stat_whitelist": {"pts", "ast"},  # reb removed 2026-02-28: -5.34% ROI; pra removed 2026-03-01: -3.81% ROI on 318 real-line bets
-    "blocked_prob_bins": {4, 5},       # 40-50% and 50-60% model probOver bins
+    "blocked_prob_bins": {2, 3, 4, 5, 6},  # 20-70% calibrated range: 20-30% bin -8.6% ROI on 127 real-line bets; raised 2026-03-01
     "min_ev_pct": 0.0,                 # evPercent floor
 }
 CURRENT_SEASON = get_season_string()

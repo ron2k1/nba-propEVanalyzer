@@ -684,6 +684,18 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
             row["lineMovementQualified"] = True
         # favorable is None (flat/no movement) → no annotation added
 
+    # Sort: CLV-confirmed (conflict=False) first, neutral second, conflicted last.
+    # Within each tier the existing EV rank is preserved (sort is stable).
+    def _clv_tier(row):
+        conflict = row.get("lineMovementConflict")
+        if conflict is False:
+            return 0   # confirmed — line moved with the bet
+        if conflict is True:
+            return 2   # conflicted — market moved against the bet
+        return 1       # no movement data
+
+    top_rows.sort(key=_clv_tier)
+
     positive_edges = sum(1 for e in ranked if (_as_float(e.get("recommendedEvPct"), 0.0) or 0.0) > 0)
     return {
         "success": True,
