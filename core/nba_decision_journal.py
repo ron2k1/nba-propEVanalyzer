@@ -39,7 +39,7 @@ from .nba_bet_tracking import (
 
 SIGNAL_SPEC = {
     "v1": {
-        "eligible_stats":      {"pts", "reb", "ast", "pra"},
+        "eligible_stats":      {"pts", "reb", "ast"},  # pra removed 2026-03-01: -3.81% ROI on 318 real-line bets
         "min_edge":            0.08,   # raised 2026-03-01: 0.05→0.08 (87d real-line data)
         "min_edge_by_stat":    {"reb": 0.08, "ast": 0.09},  # ast: -1.11% ROI on 2,255 bets → higher bar
         "min_confidence":      0.60,   # raised 2026-03-01: 0.55→0.60 (marginal 55-60% bin losing)
