@@ -16,6 +16,9 @@ pip-install-*/
 .DS_Store
 Thumbs.db
 
+# ── Generated / binary report artifacts ──────────────────────────────────────
+docs/reports/*.html
+
 # ── Data / databases / serialized models ─────────────────────────────────────
 # 1.1 GB of historical odds, backtests, journals — never publish
 data/
