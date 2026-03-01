@@ -158,7 +158,7 @@ def _add_combo_projections(projections, logs, rolling):
             "confidence": conf,
             "seasonAvg": s_avg,
             "stdev": s_stdev,
-            "projStdev": s_stdev,
+            "projStdev": safe_round(s_stdev * 0.75, 2),
             "last5Avg": rolling.get(f"{key}_avg5", 0),
             "last10Avg": rolling.get(f"{key}_avg10", 0),
             "median": rolling.get(f"{key}_median", 0),
@@ -372,7 +372,41 @@ def compute_projection(
             blend_line = _extract_blend_line(blend_with_line, stat)
             final_projection = max(0.0, 0.70 * model_projection + 0.30 * blend_line) if blend_line is not None else model_projection
 
-            proj_stdev = safe_round(stdev_val, 2)
+            # --- #5: Recent high-variance detection (role instability signal) ---
+            # If the player's last-5 stdev exceeds 1.5× the full-window stdev,
+            # the player's role/usage is unstable — books are better calibrated
+            # than the model in this case. Flag and widen proj_stdev by 1.2×.
+            _recent_high_variance = False
+            if len(vals) >= 3 and stdev_val > 0:
+                _last5 = vals[:min(5, len(vals))]
+                _l5_mean = sum(_last5) / len(_last5)
+                _l5_stdev = math.sqrt(
+                    sum((v - _l5_mean) ** 2 for v in _last5) / max(len(_last5) - 1, 1)
+                )
+                if _l5_stdev > 1.5 * stdev_val:
+                    _recent_high_variance = True
+
+            # --- #1: Post-regression stdev shrinkage ---
+            # The weighted average already regresses toward the season mean,
+            # resolving ~30-40% of raw outcome variance. proj_stdev should
+            # represent projection error, not raw outcome variance. 0.75× factor
+            # directly fixes the 70-80% bin over-confidence (predicted 73%,
+            # actual 40%) by narrowing the CDF and pushing probabilities toward
+            # calibrated confidence levels.
+            _proj_stdev = stdev_val * 0.75
+
+            # --- #2: Line-blend stdev reduction ---
+            # Blending 30% of the book line anchors 30% of projection uncertainty
+            # to the market consensus. The effective CDF spread is therefore
+            # stdev * sqrt(1 - 0.30) = stdev * sqrt(0.70) ≈ 0.837×.
+            if blend_line is not None:
+                _proj_stdev *= math.sqrt(0.70)
+
+            # --- #5 cont.: Inflate proj_stdev for recent high-variance players ---
+            if _recent_high_variance:
+                _proj_stdev *= 1.20
+
+            proj_stdev = max(safe_round(_proj_stdev, 2), 0.5)
             cv = stdev_val / season_avg if season_avg > 0 else 1.0
             sample_conf = min(1.0, n / 20)
             consist_conf = max(0.0, 1.0 - cv)
@@ -391,6 +425,7 @@ def compute_projection(
                 "median": rolling.get(f"{stat}_median", 0),
                 "stdev": safe_round(stdev_val, 2),
                 "projStdev": proj_stdev,
+                "recentHighVariance": _recent_high_variance,
                 "min": rolling.get(f"{stat}_min", 0),
                 "max": rolling.get(f"{stat}_max", 0),
                 "perMinRate": safe_round(per_min_rate, 4),
@@ -417,6 +452,10 @@ def compute_projection(
             projections[combo_stat]["projectionPreBlend"] = safe_round(model_projection, 1)
             projections[combo_stat]["projection"] = safe_round(final_projection, 1)
             projections[combo_stat]["blendLine"] = safe_round(blend_line, 3)
+            # #2: line-blend stdev reduction for combo stats
+            _cs = projections[combo_stat].get("projStdev") or 0
+            if _cs > 0:
+                projections[combo_stat]["projStdev"] = max(safe_round(_cs * math.sqrt(0.70), 2), 0.5)
 
         opp_context = None
         if opp_def:
