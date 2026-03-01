@@ -311,9 +311,20 @@ class LocalNBAStats:
             # Strategy: for each game, the stats scored by team A = stats *allowed* by team B
             team_allowed = {}  # team_id → list of game stat dicts (what was scored *against* them)
 
+            # Only scan the most recent season window (last ~120 game-days before cutoff).
+            # Opponent defensive ratings stabilize within one season; scanning all history
+            # back to 1946 was correct but ~1s per unique date in backtest loops.
+            cutoff_str = cutoff.isoformat() if cutoff else None
+            all_dates = sorted(self._games_by_date.keys())
+            if cutoff_str:
+                eligible = [d for d in all_dates if d < cutoff_str]
+            else:
+                eligible = all_dates
+            season_dates = set(eligible[-120:]) if len(eligible) > 120 else set(eligible)
+
             # Build a map from game date for filtering
             for date_str, day_games in self._games_by_date.items():
-                if cutoff and date_str >= cutoff.isoformat():
+                if date_str not in season_dates:
                     continue
 
                 for gmeta in day_games:
