@@ -1064,15 +1064,26 @@ def get_todays_event_props_bulk(
             "quota":   events_resp.get("quota"),
         }
 
-    now    = datetime.utcnow()
-    events = [
-        e for e in (events_resp.get("data") or [])
-        if (
-            (lambda c: not c or (now - c.replace(tzinfo=None)).total_seconds() < 4 * 3600)(
-                _parse_iso_datetime(e.get("commence_time"))
-            )
-        )
-    ]
+    # Filter events to today's NBA schedule date (US/Eastern) + allow
+    # live games that started within the last 4 hours.
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("US/Eastern")
+    now      = datetime.now(timezone.utc)
+    today_et = now.astimezone(_ET).date()
+
+    def _event_is_today(e):
+        ct = _parse_iso_datetime(e.get("commence_time"))
+        if not ct:
+            return False                       # no commence_time → skip
+        ct_et = ct.astimezone(_ET)
+        if ct_et.date() != today_et:
+            return False                       # wrong date → skip
+        age = (now - ct).total_seconds()
+        if age > 4 * 3600:
+            return False                       # tipped off > 4 h ago → skip
+        return True
+
+    events = [e for e in (events_resp.get("data") or []) if _event_is_today(e)]
 
     if not events:
         return {
