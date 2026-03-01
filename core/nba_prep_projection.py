@@ -408,6 +408,28 @@ def compute_projection(
             except (ValueError, TypeError):
                 _is_3in4 = False
 
+        # Gap 8.27: High-minutes previous game fatigue
+        # Playing ≥38 min the night before taxes recovery; next-game pts/ast
+        # depressed ~3%, reb ~2%. Effect is independent of B2B — even a
+        # well-rested player who logged 42 min 2 nights ago is fatigued.
+        # Threshold 38 min chosen as top-10% of starter distributions.
+        _prior_mins = float(logs[0].get("min", 0) or 0) if logs else 0.0
+        _high_mins_fatigue = _prior_mins >= 38.0
+
+        # Gap 8.30: Road trip accumulation fatigue
+        # 3+ consecutive away games = travel fatigue (hotel, timezone, no
+        # home practice facilities). Count tonight + recent away streak.
+        # Only fires when tonight is also away (is_home=False).
+        _road_trip_len = 0
+        if not is_home:
+            _road_trip_len = 1  # tonight is away
+            for _rg in logs[:7]:
+                if not _rg.get("isHome", True):
+                    _road_trip_len += 1
+                else:
+                    break
+        _road_trip_fatigue = _road_trip_len >= 3
+
         core_stats = ["pts", "reb", "ast", "stl", "blk", "tov", "fg3m"]
         projections = {}
 
@@ -527,6 +549,19 @@ def compute_projection(
                 if _streak_mult != 1.0:
                     stat_mult = max(lo, min(hi, stat_mult * _streak_mult))
 
+            # Gap 8.27: High-minutes fatigue (≥38 min previous game)
+            # pts/ast: -3% (shot quality and decision-making); reb: -2% (boxing out energy).
+            if _high_mins_fatigue:
+                if stat in ("pts", "ast"):
+                    stat_mult = max(lo, min(hi, stat_mult * 0.97))
+                elif stat == "reb":
+                    stat_mult = max(lo, min(hi, stat_mult * 0.98))
+
+            # Gap 8.30: Road trip fatigue (≥3 consecutive away games including tonight)
+            # Travel accumulation depresses pts/reb/ast by ~2%.
+            if _road_trip_fatigue and stat in ("pts", "reb", "ast"):
+                stat_mult = max(lo, min(hi, stat_mult * 0.98))
+
             model_projection = max(0.0, projected_minutes * per_min_rate * stat_mult)
             blend_line = _extract_blend_line(blend_with_line, stat)
             if blend_line is not None:
@@ -602,6 +637,8 @@ def compute_projection(
                 "altitudeAdj": True if stat in ("pts", "ast") and _altitude_mult != 1.0 else None,
                 "restAdvantageAdj": True if stat in ("pts", "ast") and _rest_advantage else None,
                 "streakMult": safe_round(_streak_mult, 3) if stat in ("pts", "ast") and _streak_mult != 1.0 else None,
+                "highMinsFatigueAdj": True if _high_mins_fatigue and stat in ("pts", "ast", "reb") else None,
+                "roadTripFatigueAdj": True if _road_trip_fatigue and stat in ("pts", "reb", "ast") else None,
                 "min": rolling.get(f"{stat}_min", 0),
                 "max": rolling.get(f"{stat}_max", 0),
                 "perMinRate": safe_round(per_min_rate, 4),
@@ -663,6 +700,10 @@ def compute_projection(
             "isHome": is_home,
             "isB2B": is_b2b,
             "is3in4": _is_3in4,
+            "priorMins": safe_round(_prior_mins, 1),
+            "highMinsFatigue": _high_mins_fatigue,
+            "roadTripLen": _road_trip_len,
+            "roadTripFatigue": _road_trip_fatigue,
             "position": position,
             "gamesPlayed": len(logs),
             "matchupHistory": matchup_history,
