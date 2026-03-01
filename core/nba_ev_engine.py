@@ -171,8 +171,16 @@ def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_thr
 
     # Apply per-stat temperature-scaling calibration (if calibration file loaded).
     # Skipped in reference mode (sharp-book probs are already well-calibrated).
+    # #4: Per-bin temperature takes precedence over global stat temperature.
     if dist_mode != "reference" and stat_key and _PROB_CAL:
-        T = float(_PROB_CAL.get(stat_key, _PROB_CAL.get("_global", 1.0)))
+        # Look up bin-specific temperature first (piecewise calibration, #4)
+        stat_bins = _PROB_CAL.get(f"{stat_key}_bins")
+        if stat_bins:
+            bin_lo = int(prob_over * 10) * 10
+            bin_lbl = f"{bin_lo}-{bin_lo + 10}"
+            T = float(stat_bins.get(bin_lbl, _PROB_CAL.get(stat_key, _PROB_CAL.get("_global", 1.0))))
+        else:
+            T = float(_PROB_CAL.get(stat_key, _PROB_CAL.get("_global", 1.0)))
         if T != 1.0:
             prob_over_cal = _apply_temp_scaling(prob_over, T)
             # Redistribute: preserve push probability, adjust over/under symmetrically.

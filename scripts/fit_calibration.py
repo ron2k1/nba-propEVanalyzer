@@ -6,13 +6,26 @@ Usage:
     python scripts/fit_calibration.py \
         --input  data/backtest_results/2026-01-26_to_2026-02-25_full_local.json \
         --output models/prob_calibration.json \
-        [--min-count 50] [--min-pred 0.10] [--max-pred 0.90]
+        [--min-count 50] [--bin-min-count 30] [--min-pred 0.10] [--max-pred 0.90]
 
 Output: models/prob_calibration.json
-    { "pts": 1.65, "reb": 1.45, ..., "_fitted_on": "...", "_global": 1.50 }
+    {
+      "pts": 1.65,               # global temperature (shrinks all bins equally)
+      "pts_bins": {              # per-bin temperatures (piecewise calibration, #4)
+        "30-40": 1.45,
+        "70-80": 3.10,
+        ...
+      },
+      "_fitted_on": "...", "_global": 1.50
+    }
 
 Temperature T > 1 shrinks probabilities toward 50%:
     p_cal = sigmoid(logit(p_raw) / T)
+
+Per-bin temperatures are fit independently per 10% probability bucket using
+Pool Adjacent Violators (PAV) isotonic regression to ensure monotonicity of
+calibrated outputs. bin-specific T takes precedence over global T in the
+EV engine.
 """
 
 import argparse
@@ -43,6 +56,91 @@ def _logit(p, eps=1e-9):
 
 def _apply_temp(p_raw, T, eps=1e-9):
     return _sigmoid(_logit(p_raw, eps) / T)
+
+
+# ---------------------------------------------------------------------------
+# Piecewise (per-bin) calibration helpers  [#4]
+# ---------------------------------------------------------------------------
+
+def _fit_bin_temp(p_raw, p_actual, min_T=1.0, max_T=8.0):
+    """
+    Grid-search T in [min_T, max_T] that minimises |apply_temp(p_raw, T) - p_actual|.
+    Always shrinks toward 50% (T >= 1); never anti-calibrates.
+    """
+    if p_raw <= 0.01 or p_raw >= 0.99:
+        return 1.0
+    best_T, best_err = 1.0, abs(_apply_temp(p_raw, 1.0) - p_actual)
+    # Coarse pass: step 0.05
+    for t_int in range(int(min_T * 100), int(max_T * 100) + 1, 5):
+        T = t_int / 100.0
+        err = abs(_apply_temp(p_raw, T) - p_actual)
+        if err < best_err:
+            best_err, best_T = err, T
+    # Fine pass: ±0.20 around best, step 0.01
+    lo = max(int(min_T * 100), int((best_T - 0.20) * 100))
+    hi = min(int(max_T * 100), int((best_T + 0.20) * 100))
+    for t_int in range(lo, hi + 1):
+        T = t_int / 100.0
+        err = abs(_apply_temp(p_raw, T) - p_actual)
+        if err < best_err:
+            best_err, best_T = err, T
+    return round(best_T, 2)
+
+
+def _pav_weighted_bins(items):
+    """
+    Pool Adjacent Violators (PAV) isotonic regression — non-decreasing p_actual.
+    items: list of [p_raw, p_actual, count, bin_lbl] sorted by p_raw.
+    Returns: list of blocks, each block being a list of the original items merged into it.
+    """
+    blocks = [[item] for item in items]
+    i = 0
+    while i < len(blocks) - 1:
+        wa = lambda blk: sum(x[1] * x[2] for x in blk) / sum(x[2] for x in blk)
+        if wa(blocks[i]) > wa(blocks[i + 1]):
+            blocks[i:i + 2] = [blocks[i] + blocks[i + 1]]
+            if i > 0:
+                i -= 1
+        else:
+            i += 1
+    return blocks
+
+
+def fit_bin_temperatures(bins, min_count=30):
+    """
+    Fit per-bin temperatures from backtest calibration bins.
+
+    Returns dict like {"70-80": 3.10, "60-70": 1.40, ...} using keys WITHOUT
+    the trailing '%' (matching the EV engine lookup format), or None if < 2 bins
+    have sufficient data.
+    """
+    eligible = []
+    for b in bins:
+        pred_pct = b.get("avgPredOverProbPct")
+        actual_pct = b.get("actualOverHitRatePct")
+        n = b.get("count", 0)
+        bin_lbl = b.get("bin", "").rstrip("%")
+        if pred_pct is None or actual_pct is None or n < min_count:
+            continue
+        eligible.append([pred_pct / 100.0, actual_pct / 100.0, n, bin_lbl])
+
+    if len(eligible) < 2:
+        return None
+
+    eligible.sort(key=lambda x: x[0])
+
+    # Isotonic regression to enforce monotone non-decreasing actuals
+    blocks = _pav_weighted_bins(eligible)
+
+    result = {}
+    for block in blocks:
+        total_count = sum(x[2] for x in block)
+        p_raw_w = sum(x[0] * x[2] for x in block) / total_count
+        p_actual_w = sum(x[1] * x[2] for x in block) / total_count
+        T_bin = _fit_bin_temp(p_raw_w, p_actual_w)
+        for _, _, _, bin_lbl in block:
+            result[bin_lbl] = T_bin
+    return result or None
 
 
 # ---------------------------------------------------------------------------
@@ -142,9 +240,11 @@ def main():
     parser.add_argument("--input", default=os.path.join(ROOT, "data", "backtest_results", "2026-01-26_to_2026-02-25_full_local.json"))
     parser.add_argument("--output", default=os.path.join(ROOT, "models", "prob_calibration.json"))
     parser.add_argument("--min-count", type=int, default=50)
+    parser.add_argument("--bin-min-count", type=int, default=30, help="Min samples per bin for piecewise calibration (#4)")
     parser.add_argument("--min-pred", type=float, default=0.10)
     parser.add_argument("--max-pred", type=float, default=0.90)
     parser.add_argument("--model", default="full", help="Which model report to use (full|simple)")
+    parser.add_argument("--no-piecewise", action="store_true", help="Skip per-bin temperature fitting")
     args = parser.parse_args()
 
     # --- Load backtest result ---
@@ -164,6 +264,8 @@ def main():
 
     print(f"Stats found: {list(cal_by_stat.keys())}")
     print(f"Fitting with: min_count={args.min_count}, pred in [{args.min_pred:.0%}, {args.max_pred:.0%}]")
+    if not args.no_piecewise:
+        print(f"Piecewise (#4): bin_min_count={args.bin_min_count}")
     print()
 
     result = {
@@ -186,6 +288,15 @@ def main():
         mse_str = f"MSE*10^4={mse:.2f}" if mse is not None else "no data"
         print(f"=== {stat.upper():5s}  T={T:.2f}  ({mse_str}, {n_bins} bins) ===")
         _preview_calibration(bins, T, args.min_count, args.min_pred, args.max_pred)
+
+        # Piecewise (per-bin) calibration (#4)
+        if not args.no_piecewise:
+            bin_temps = fit_bin_temperatures(bins, min_count=args.bin_min_count)
+            if bin_temps:
+                result[f"{stat}_bins"] = bin_temps
+                print(f"  bin temps: {bin_temps}")
+            else:
+                print(f"  bin temps: insufficient data (need >= 2 bins with n >= {args.bin_min_count})")
         print()
 
     # Global fallback (median T)
