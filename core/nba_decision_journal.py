@@ -216,6 +216,10 @@ def _qualifies(prop_result: dict, stat: str, used_real_line=None) -> tuple:
         proj_data = (prop_result or {}).get("projection") or {}
         if proj_data.get("recentHighVariance") is True:
             return False, "recent_high_variance"
+    # Gap 8.16: cross-book line dispersion — informational only, no block.
+    # softLineBooks and bookLineStdev are stored in context_json by the caller
+    # when present. max_book_line_dispersion=0.75 is a future threshold for
+    # correlation analysis; dispersion alone is not a gating condition.
     # Gap 8.8: market depth gate.
     # Block if nBooksOffering is present and below min_books_offering.
     # If absent (backtest compat, older result dicts): skip check entirely.

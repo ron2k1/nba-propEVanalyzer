@@ -380,6 +380,34 @@ def compute_projection(
         # this adds the interaction: both conditions true → extra +2.5% on pts/ast.
         _rest_advantage = (not is_b2b) and opponent_is_b2b
 
+        # Gap 8.18: 3-in-4 nights detection
+        # If the player played both 3 days ago AND 1 day ago (relative to logs[0]),
+        # they are on a 3rd game in 4 nights → fatigue compounds beyond simple B2B.
+        _is_3in4 = False
+        if is_b2b and len(logs) >= 2:
+            def _parse_game_date(raw):
+                s = str(raw or "").strip()
+                from datetime import datetime as _dt
+                for _fmt in ("%b %d, %Y", "%Y-%m-%d", "%m/%d/%Y"):
+                    try:
+                        return _dt.strptime(s, _fmt).date()
+                    except ValueError:
+                        continue
+                return None
+            try:
+                from datetime import timedelta as _td
+                _today_date = _parse_game_date(logs[0].get("gameDate", ""))
+                if _today_date:
+                    # logs[0] = D-1 (last night). D-1 - 2 = D-3.
+                    # 3-in-4: played D-3, D-1, and tonight (D) → timedelta(2).
+                    _target_d3 = _today_date - _td(days=2)
+                    _is_3in4 = any(
+                        _parse_game_date(g.get("gameDate", "")) == _target_d3
+                        for g in logs[2:5]  # only look back a few games
+                    )
+            except (ValueError, TypeError):
+                _is_3in4 = False
+
         core_stats = ["pts", "reb", "ast", "stl", "blk", "tov", "fg3m"]
         projections = {}
 
@@ -457,6 +485,11 @@ def compute_projection(
             if opponent_is_b2b and stat in ("pts", "reb", "ast"):
                 stat_mult = stat_mult * 1.015
                 stat_mult = max(lo, min(hi, stat_mult))
+
+            # Gap 8.18: 3-in-4 nights — compounded fatigue (1.5× normal B2B effect).
+            # Normal B2B applies 0.93 rest multiplier. 3-in-4 adds an extra 0.96× on top.
+            if _is_3in4 and stat in ("pts", "reb", "ast"):
+                stat_mult = max(lo, min(hi, stat_mult * 0.96))
 
             # Game total pace adjustment (Phase 4a):
             # Season avg total ≈ 226. Per 5-point deviation: ±0.75% pts at 50% weight.
@@ -629,6 +662,7 @@ def compute_projection(
             "opponent": opponent_abbr,
             "isHome": is_home,
             "isB2B": is_b2b,
+            "is3in4": _is_3in4,
             "position": position,
             "gamesPlayed": len(logs),
             "matchupHistory": matchup_history,
