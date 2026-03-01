@@ -1,17 +1,57 @@
+# ── Python runtime ────────────────────────────────────────────────────────────
 .venv/
 __pycache__/
 *.pyc
-.nba_cache/
-.tmp/
+*.pyo
+*.pyd
+
+# ── Pip build artifacts ────────────────────────────────────────────────────────
 pip-build-tracker-*/
 pip-ephem-wheel-cache-*/
 pip-install-*/
+
+# ── Local caches / temp ───────────────────────────────────────────────────────
+.nba_cache/
+.tmp/
+.DS_Store
+Thumbs.db
+
+# ── Data / databases / serialized models ─────────────────────────────────────
+# 1.1 GB of historical odds, backtests, journals — never publish
 data/
+*.sqlite
+*.db
+*.jsonl
+*.ndjson
+models/*.pkl
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+debug-*.log
+
+# ── Secrets ───────────────────────────────────────────────────────────────────
 .env
 .env.local
 .env.*.local
+
+# ── IDE / tooling ─────────────────────────────────────────────────────────────
+.cursor/
 .claude/
-scratch/
+
+# ── Session / operational planning docs (not for public consumption) ──────────
+PLAN.md
+PLAN_EXECUTE_NOW.md
+STATE.md
+PROMPT_PLAN_BACKTEST_AGENT.md
+PROMPT_PLAN_PHD_CODING_AGENT.md
+PROMPT_backtest_staged.md
 AGENT_MAP.md
+
+# ── Project-private files ─────────────────────────────────────────────────────
 CLAUDE.md
-*.log
+scratch/
+NBA Database (1947 - Present)/
+
+# ── External repos nested here (handle as submodule or keep out entirely) ─────
+Win-CodexBar/
