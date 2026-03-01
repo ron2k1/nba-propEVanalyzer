@@ -21,6 +21,7 @@ Evaluation helpers (minutes_calibration_bins) support the minutes_eval CLI comma
 """
 
 import statistics
+from datetime import datetime
 
 # ---------------------------------------------------------------------------
 # Tunable constants
@@ -38,6 +39,162 @@ _TREND_THRESHOLD   = 0.08    # avg5 vs avg10 % delta to tag as trending
 
 
 # ---------------------------------------------------------------------------
+# Injury-return detection
+# ---------------------------------------------------------------------------
+
+_INJURY_CAP_TABLE = [
+    # (min_dnps, min_games_since_return, max_games_since_return, cap)
+    (6, 1, 1, 0.65),
+    (3, 1, 1, 0.72),
+    (1, 1, 1, 0.82),
+    (1, 2, 2, 0.85),
+    (1, 3, 3, 0.92),
+]
+_AVG_DAYS_PER_DNP = 2.4  # avg NBA schedule density
+_LAYOFF_GAP_DAYS = 4      # gap between games >= this → treat as return from layoff (API omits DNPs)
+
+
+def _parse_game_date(date_str: str):
+    """Parse a game date string to a datetime.date. Returns None on failure.
+    Handles NBA API format (e.g. 'FEB 26, 2026') by normalizing month to title case for %b.
+    """
+    s = (date_str or "").strip()
+    if not s:
+        return None
+    # NBA API often returns "FEB 26, 2026"; %b is locale-sensitive and may need "Feb"
+    for fmt in ("%Y-%m-%d", "%b %d, %Y", "%m/%d/%Y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except (ValueError, AttributeError):
+            pass
+    # Retry with month in title case for "MMM DD, YYYY" (e.g. FEB -> Feb)
+    parts = s.split(None, 2)
+    if len(parts) >= 3 and len(parts[0]) >= 3:
+        normalized = parts[0].title() + " " + parts[1] + ", " + parts[2]
+        try:
+            return datetime.strptime(normalized, "%b %d, %Y").date()
+        except (ValueError, AttributeError):
+            pass
+    return None
+
+
+def detect_injury_return(logs: list, excluded_games: list) -> dict:
+    """
+    Detect return-from-injury by finding a DNP streak immediately before
+    the most recent active game.
+
+    Parameters
+    ----------
+    logs            : list  active game logs (most-recent-first), from get_player_game_log
+    excluded_games  : list  DNP games, each {"gameDate": str, "gameId": str}
+
+    Returns
+    -------
+    {
+      "is_returning":       bool,
+      "consecutive_dnps":   int,
+      "approx_days_missed": float,
+      "games_since_return": int,
+      "cap_multiplier":     float,
+      "reasoning":          str,
+    }
+    """
+    _no_cap = {
+        "is_returning": False, "consecutive_dnps": 0,
+        "approx_days_missed": 0.0, "games_since_return": 0,
+        "cap_multiplier": 1.0, "reasoning": "no_injury_cap",
+    }
+
+    if not logs:
+        return _no_cap
+
+    # Parse active game dates (most-recent-first assumed)
+    active_dates = []
+    for g in logs:
+        d = _parse_game_date(g.get("gameDate", ""))
+        if d:
+            active_dates.append(d)
+
+    if not active_dates:
+        return _no_cap
+
+    # Parse DNP dates
+    dnp_dates = []
+    for g in (excluded_games or []):
+        d = _parse_game_date(g.get("gameDate", ""))
+        if d:
+            dnp_dates.append(d)
+
+    most_recent_active = active_dates[0]
+
+    # Count consecutive DNPs that all occurred AFTER the second-most-recent
+    # active game (i.e., immediately before the most recent active game)
+    second_active = active_dates[1] if len(active_dates) > 1 else None
+
+    consecutive_dnps = sum(
+        1 for d in dnp_dates
+        if d > (second_active or most_recent_active)
+        and d < most_recent_active
+    ) if second_active is not None else sum(
+        1 for d in dnp_dates if d < most_recent_active
+    )
+
+    if consecutive_dnps == 0:
+        # NBA API omits DNP games — only games played appear. Use calendar gap as fallback.
+        if len(active_dates) >= 2:
+            gap_days = (most_recent_active - second_active).days
+            if gap_days >= _LAYOFF_GAP_DAYS:
+                # Treat the game we're projecting as first game back (conservative).
+                estimated_dnps = max(1, round(gap_days / _AVG_DAYS_PER_DNP))
+                games_since_return = 1
+                cap = 1.0
+                for min_dnps, min_gsr, max_gsr, table_cap in _INJURY_CAP_TABLE:
+                    if estimated_dnps >= min_dnps and min_gsr <= games_since_return <= max_gsr:
+                        cap = table_cap
+                        break
+                return {
+                    "is_returning":       True,
+                    "consecutive_dnps":   estimated_dnps,
+                    "approx_days_missed": round(gap_days, 1),
+                    "games_since_return": games_since_return,
+                    "cap_multiplier":     cap,
+                    "reasoning":          f"injury_return_gap_{gap_days}d_g1_cap_{int(cap * 100)}pct",
+                }
+        return _no_cap
+
+    # Last DNP date in the streak (between second_active and most_recent_active)
+    try:
+        last_dnp = max(
+            d for d in dnp_dates
+            if d < most_recent_active and (second_active is None or d > second_active)
+        )
+    except ValueError:
+        return _no_cap
+
+    # Count active games strictly after the last DNP (= games since return).
+    # games_since_return = 1 means the most-recent game is the first game back.
+    games_since_return = sum(1 for d in active_dates if d > last_dnp)
+
+    approx_days_missed = round(consecutive_dnps * _AVG_DAYS_PER_DNP, 1)
+
+    # Look up cap from table
+    cap = 1.0
+    for min_dnps, min_gsr, max_gsr, table_cap in _INJURY_CAP_TABLE:
+        if consecutive_dnps >= min_dnps and min_gsr <= games_since_return <= max_gsr:
+            cap = table_cap
+            break
+
+    return {
+        "is_returning":       True,
+        "consecutive_dnps":   consecutive_dnps,
+        "approx_days_missed": approx_days_missed,
+        "games_since_return": games_since_return,
+        "cap_multiplier":     cap,
+        "reasoning":          f"injury_return_g{games_since_return}:{int(cap * 100)}pct",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -46,6 +203,7 @@ def compute_minutes_multiplier(
     logs: list,
     is_b2b: bool = False,
     splits: dict = None,
+    excluded_games: list = None,
 ) -> dict:
     """
     Compute a multiplier and confidence score for minutes projection.
@@ -139,7 +297,19 @@ def compute_minutes_multiplier(
         reasoning.append("b2b")
 
     # ------------------------------------------------------------------
-    # Signal 5 — Sample size confidence
+    # Signal 5 — Starter-inferred role stability
+    # Players averaging 28+ min with low CV are likely starters with
+    # predictable minutes; boost their confidence.
+    # ------------------------------------------------------------------
+    if avg_s >= 28.0 and cv < _VOLATILITY_HIGH:
+        confidence += 0.06
+        reasoning.append("likely_starter")
+    elif avg_s < 15.0:
+        confidence -= 0.06
+        reasoning.append("deep_bench")
+
+    # ------------------------------------------------------------------
+    # Signal 6 — Sample size confidence
     # ------------------------------------------------------------------
     n = len(logs or [])
     if n < 5:
@@ -150,9 +320,19 @@ def compute_minutes_multiplier(
         reasoning.append("large_sample")
 
     # ------------------------------------------------------------------
+    # Signal 7 — Injury-return cap (hard ceiling; overrides streak/volatility)
+    # ------------------------------------------------------------------
+    if excluded_games is not None:
+        injury = detect_injury_return(logs or [], excluded_games)
+        if injury["is_returning"] and injury["cap_multiplier"] < 1.0:
+            multiplier = min(multiplier, injury["cap_multiplier"])
+            confidence = max(0.10, confidence - 0.12)
+            reasoning.append(injury["reasoning"])
+
+    # ------------------------------------------------------------------
     # Bounds
     # ------------------------------------------------------------------
-    multiplier = max(_MULTIPLIER_MIN, min(_MULTIPLIER_MAX, multiplier))
+    multiplier = max(0.50, min(_MULTIPLIER_MAX, multiplier))
     confidence = max(0.10, min(0.95, confidence))
 
     return {

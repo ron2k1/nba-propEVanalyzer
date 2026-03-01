@@ -146,13 +146,14 @@ class LocalNBAStats:
     """
 
     def __init__(self, index_path=None):
-        path = index_path or _DEFAULT_INDEX
-        if not os.path.exists(path):
+        path = index_path or os.getenv("NBA_LOCAL_INDEX_PATH") or _DEFAULT_INDEX
+        self.index_path = os.path.abspath(path)
+        if not os.path.exists(self.index_path):
             raise FileNotFoundError(
-                f"Local NBA index not found at {path}. "
+                f"Local NBA index not found at {self.index_path}. "
                 "Run: .venv/Scripts/python.exe scripts/index_local_data.py"
             )
-        with open(path, "rb") as fh:
+        with open(self.index_path, "rb") as fh:
             self._index = pickle.load(fh)
 
         self._games_by_date    = self._index.get("games_by_date", {})

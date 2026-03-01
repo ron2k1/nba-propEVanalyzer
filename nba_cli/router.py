@@ -8,6 +8,7 @@ from .llm_commands import handle_llm_command
 from .ml_commands import handle_ml_command
 from .shared import no_command_payload
 from .tracking_commands import handle_tracking_command
+from .journal_commands import handle_journal_command
 
 _HANDLERS = (
     handle_core_command,
@@ -16,6 +17,7 @@ _HANDLERS = (
     handle_llm_command,
     handle_ml_command,
     handle_tracking_command,
+    handle_journal_command,
 )
 
 

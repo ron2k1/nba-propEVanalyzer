@@ -27,6 +27,7 @@ NBA_SCRIPT = ROOT / "nba_mod.py"
 DEFAULT_TIMEOUT_SEC = 300
 LONG_TIMEOUT_SEC = 1800
 DEFAULT_ODDS_MARKETS = "h2h,spreads,totals"
+DEFAULT_MAIN_BOOKMAKERS = "betmgm,draftkings,fanduel"
 
 
 def _run_nba_command(args, timeout_sec=None):
@@ -180,7 +181,7 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/odds":
                 regions = (query.get("regions") or ["us"])[0].strip() or "us"
                 markets = (query.get("markets") or [DEFAULT_ODDS_MARKETS])[0].strip() or DEFAULT_ODDS_MARKETS
-                bookmakers = (query.get("bookmakers") or [""])[0].strip()
+                bookmakers = (query.get("bookmakers") or [DEFAULT_MAIN_BOOKMAKERS])[0].strip() or DEFAULT_MAIN_BOOKMAKERS
                 sport = (query.get("sport") or ["basketball_nba"])[0].strip() or "basketball_nba"
                 args = ["odds", regions, markets, bookmakers, sport]
                 return self._send_json(200, _run_nba_command(args))
@@ -188,7 +189,7 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
             if path == "/api/odds_live":
                 regions = (query.get("regions") or ["us"])[0].strip() or "us"
                 markets = (query.get("markets") or [DEFAULT_ODDS_MARKETS])[0].strip() or DEFAULT_ODDS_MARKETS
-                bookmakers = (query.get("bookmakers") or [""])[0].strip()
+                bookmakers = (query.get("bookmakers") or [DEFAULT_MAIN_BOOKMAKERS])[0].strip() or DEFAULT_MAIN_BOOKMAKERS
                 sport = (query.get("sport") or ["basketball_nba"])[0].strip() or "basketball_nba"
                 max_events = (query.get("maxEvents") or ["8"])[0].strip() or "8"
                 args = ["odds_live", regions, markets, bookmakers, sport, max_events]
@@ -212,7 +213,7 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
 
             if path == "/api/starter_accuracy":
                 date_str = (query.get("date") or [""])[0].strip()
-                bookmakers = (query.get("bookmakers") or ["draftkings,fanduel"])[0].strip() or "draftkings,fanduel"
+                bookmakers = (query.get("bookmakers") or [DEFAULT_MAIN_BOOKMAKERS])[0].strip() or DEFAULT_MAIN_BOOKMAKERS
                 regions = (query.get("regions") or ["us"])[0].strip() or "us"
                 sport = (query.get("sport") or ["basketball_nba"])[0].strip() or "basketball_nba"
                 model_variant = (query.get("modelVariant") or ["full"])[0].strip() or "full"
@@ -339,7 +340,7 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     return self._send_json(400, {"success": False, "error": "Provide playerId or playerName."})
 
                 regions = str(body.get("regions", "us")).strip() or "us"
-                bookmakers = str(body.get("bookmakers", "")).strip()
+                bookmakers = str(body.get("bookmakers", "")).strip() or DEFAULT_MAIN_BOOKMAKERS
                 sport = str(body.get("sport", "basketball_nba")).strip() or "basketball_nba"
                 top_n = body.get("topN", 15)
                 try:
@@ -399,13 +400,27 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                 return self._send_json(200, _run_nba_command(args))
 
             if path == "/api/llm_analyze":
-                required = ["playerName", "teamAbbr", "opponentAbbr", "isHome", "stat", "line"]
+                required = ["teamAbbr", "opponentAbbr", "isHome", "stat", "line"]
                 missing = [k for k in required if k not in body]
                 if missing:
                     return self._send_json(400, {"success": False, "error": f"Missing fields: {', '.join(missing)}"})
+
+                raw_player_id = body.get("playerId")
+                raw_player_name = str(body.get("playerName", "")).strip()
+                player_arg = None
+                if raw_player_id is not None and str(raw_player_id).strip() != "":
+                    try:
+                        player_arg = str(int(raw_player_id))
+                    except (TypeError, ValueError):
+                        return self._send_json(400, {"success": False, "error": "playerId must be numeric if provided."})
+                elif raw_player_name:
+                    player_arg = raw_player_name
+                else:
+                    return self._send_json(400, {"success": False, "error": "Provide playerId or playerName."})
+
                 args = [
                     "llm_analyze",
-                    str(body["playerName"]).strip(),
+                    player_arg,
                     str(body["teamAbbr"]).upper(),
                     str(body["opponentAbbr"]).upper(),
                     "1" if bool(body["isHome"]) else "0",

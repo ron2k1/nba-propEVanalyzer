@@ -231,7 +231,7 @@ def _project_minutes(logs, rolling, splits, is_home, is_b2b):
     # High-minutes soft cap: above 33 min, diminishing returns account for
     # load management, blowout rest, and foul trouble that affect stars.
     _SOFT_CAP = 33.0
-    _DECAY = 0.55
+    _DECAY = 0.30
     if projected > _SOFT_CAP:
         projected = _SOFT_CAP + (projected - _SOFT_CAP) * _DECAY
 
@@ -302,10 +302,18 @@ def compute_projection(
         base_projected_minutes = minutes_ctx["projectedMinutes"] or 0.0
 
         # --- Minutes model: enrich minutesProjection with confidence + reasoning ---
-        _mm = compute_minutes_multiplier(rolling, logs, is_b2b=is_b2b, splits=splits)
+        _excluded = log_data.get("excludedGames") or []
+        _mm = compute_minutes_multiplier(rolling, logs, is_b2b=is_b2b, splits=splits,
+                                         excluded_games=_excluded)
         minutes_ctx["minutesMultiplier"]  = _mm["multiplier"]
         minutes_ctx["minutesConfidence"]  = _mm["minutesConfidence"]
         minutes_ctx["minutesReasoning"]   = _mm["minutesReasoning"]
+        minutes_ctx["minutesCapApplied"]  = any(
+            "injury_return" in r for r in _mm["minutesReasoning"]
+        )
+        minutes_ctx["minutesCapReason"]   = next(
+            (r for r in _mm["minutesReasoning"] if "injury_return" in r), None
+        )
 
         # Effective multiplier: external caller override takes precedence over model
         if minutes_multiplier is not None:

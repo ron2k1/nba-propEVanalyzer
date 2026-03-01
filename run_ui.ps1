@@ -1,7 +1,9 @@
 param(
     [string]$HostAddress = "127.0.0.1",
     [int]$Port = 8787,
-    [string]$OddsApiKey = ""
+    [string]$OddsApiKey = "",
+    [string]$AnthropicApiKey = "",
+    [string]$LlmProviderOrder = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,16 +21,34 @@ function Test-IsAdministrator {
 }
 
 if (-not (Test-IsAdministrator)) {
+    if (-not $OddsApiKey -and $env:ODDS_API_KEY) {
+        $OddsApiKey = "$env:ODDS_API_KEY"
+    }
+    if (-not $AnthropicApiKey -and $env:ANTHROPIC_API_KEY) {
+        $AnthropicApiKey = "$env:ANTHROPIC_API_KEY"
+    }
+    if (-not $LlmProviderOrder -and $env:LLM_PROVIDER_ORDER) {
+        $LlmProviderOrder = "$env:LLM_PROVIDER_ORDER"
+    }
+
     if ($OddsApiKey) {
         # Defensive cleanup in case caller wrapped the key in quotes.
         $OddsApiKey = $OddsApiKey.Trim().Trim('"').Trim("'")
+    }
+    if ($AnthropicApiKey) {
+        $AnthropicApiKey = $AnthropicApiKey.Trim().Trim('"').Trim("'")
+    }
+    if ($LlmProviderOrder) {
+        $LlmProviderOrder = $LlmProviderOrder.Trim().Trim('"').Trim("'")
     }
     $args = @(
         "-ExecutionPolicy", "Bypass",
         "-File", $PSCommandPath,
         "-HostAddress", $HostAddress,
         "-Port", "$Port",
-        "-OddsApiKey", "$OddsApiKey"
+        "-OddsApiKey", "$OddsApiKey",
+        "-AnthropicApiKey", "$AnthropicApiKey",
+        "-LlmProviderOrder", "$LlmProviderOrder"
     )
     Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $args | Out-Null
     Write-Host "Relaunching as Administrator..."
@@ -38,6 +58,14 @@ if (-not (Test-IsAdministrator)) {
 if ($OddsApiKey) {
     $OddsApiKey = $OddsApiKey.Trim().Trim('"').Trim("'")
     $env:ODDS_API_KEY = $OddsApiKey
+}
+if ($AnthropicApiKey) {
+    $AnthropicApiKey = $AnthropicApiKey.Trim().Trim('"').Trim("'")
+    $env:ANTHROPIC_API_KEY = $AnthropicApiKey
+}
+if ($LlmProviderOrder) {
+    $LlmProviderOrder = $LlmProviderOrder.Trim().Trim('"').Trim("'").ToLower()
+    $env:LLM_PROVIDER_ORDER = $LlmProviderOrder
 }
 
 Write-Host "Starting NBA Prop Engine UI at http://$HostAddress`:$Port"

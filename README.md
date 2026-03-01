@@ -37,10 +37,12 @@ core/              ← all 19 engine modules (data, projection, EV, ML, tracking
   nba_llm_engine.py        LLM reasoning (Ollama-first, Claude fallback)
   nba_injury_news.py       injury signal ingestion + usage overlay
   nba_starter_accuracy.py  historical starter prop accuracy eval
+  nba_odds_store.py        SQLite store for historical Odds API snapshots + closing lines
+  nba_decision_journal.py  SQLite signal logger + paper-trading forward validator
 
 nba_cli/           ← CLI command handlers (import from core.*)
   router.py, ev_commands.py, core_commands.py, tracking_commands.py
-  ml_commands.py, llm_commands.py, line_commands.py, shared.py
+  ml_commands.py, llm_commands.py, line_commands.py, journal_commands.py, shared.py
 
 scripts/           ← standalone workflow scripts (import from core.*)
   betmgm_scan.py, collect_lines.py, injury_monitor.py
@@ -78,6 +80,7 @@ Copy-Item .env.example .env
 Optional keys:
 
 - `ODDS_API_KEY`: enables sportsbook odds, auto sweep, starter accuracy
+- `SPORTSDATA_API_KEY`: enables SportsDataIO NBA backfill into local files
 - `NEWS_API_KEY`: enables injury/news features
 - `ANTHROPIC_API_KEY`: optional Claude access
 - `LLM_PROVIDER_ORDER`: `ollama_first` (default) or `claude_first`
@@ -172,7 +175,54 @@ Run local-mode backtest:
 .\.venv\Scripts\python.exe .\nba_mod.py backtest 2022-01-01 2022-12-31 --model full --local --save
 ```
 
+Use an explicit local index path (recommended for reproducible runs):
+
+```powershell
+.\.venv\Scripts\python.exe .\nba_mod.py backtest 2022-01-01 2022-12-31 --model full --local --local-index "data\reference\kaggle_nba\index.pkl" --save
+.\.venv\Scripts\python.exe .\nba_mod.py minutes_eval 2022-01-01 2022-01-07 --local --local-index "data\reference\kaggle_nba\index.pkl"
+```
+
 If the requested date range exceeds local index coverage, backtest falls back to NBA API and prints a warning.
+
+## External Parquet Staging (Controlled Integration)
+
+If you have a parquet dataset outside the repo (for example in `Downloads`), stage it into the project first:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\stage_local_parquet.py "C:\Users\thegr\Downloads\full_dataset_clean.parquet"
+```
+
+This copies it under `data\reference\local_parquet\raw\` and writes a manifest:
+- `data\reference\local_parquet\manifest.json`
+- `data\reference\local_parquet\latest.json`
+
+Then run your existing local index build against your canonical CSV source, and use `--local-index` in backtests.
+
+Before trusting a new local build, run a small parity check:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\parity_local_vs_nba.py 2022-01-01 2022-01-02 --model simple --local-index "data\reference\kaggle_nba\index.pkl" --save
+```
+
+This compares local vs NBA API outputs on the same date window and writes a JSON report in `data\backtest_results\`.
+
+## SportsDataIO Local Backfill
+
+If you have SportsDataIO NBA feed access, pull supported feeds into local files:
+
+```powershell
+.\.venv\Scripts\python.exe .\scripts\backfill_sportsdataio.py --date-from 2026-02-01 --date-to 2026-02-28 --seasons 2023,2024,2025,2026 --max-requests 100 --resume
+```
+
+Or run through the main CLI:
+
+```powershell
+.\.venv\Scripts\python.exe .\nba_mod.py sportsdata_backfill 2026-02-01 2026-02-28 --seasons 2023,2024,2025,2026 --max-requests 100
+```
+
+Local output root:
+- `data\reference\sportsdataio\raw\`
+- Run manifests: `data\reference\sportsdataio\raw\manifests\`
 
 ## Quality Gate (Recommended)
 

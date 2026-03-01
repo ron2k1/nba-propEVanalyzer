@@ -4,7 +4,7 @@
 import json
 import math
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 from nba_api.stats.static import players as nba_players_static
 
@@ -370,17 +370,17 @@ def handle_ev_command(command, argv):
                 result["journalError"] = journal_res.get("error")
 
             # Decision Journal signal logging
-            _qualifies_ok, _skip = _qualifies(result, stat)
+            _ls  = result.get("lineShopping") or {}
+            _url = (
+                _ls.get("matchedLine") is not None
+                and _ls.get("bestOverOdds") is not None
+            )
+            _qualifies_ok, _skip = _qualifies(result, stat, used_real_line=_url)
             if _qualifies_ok:
                 _ev  = result.get("ev") or {}
                 _eo  = float((_ev.get("over")  or {}).get("edge") or 0.0)
                 _eu  = float((_ev.get("under") or {}).get("edge") or 0.0)
                 _rec = "over" if _eo >= _eu else "under"
-                _ls  = result.get("lineShopping") or {}
-                _url = (
-                    _ls.get("matchedLine") is not None
-                    and _ls.get("bestOverOdds") is not None
-                )
                 _book = (
                     result.get("bestOverBook") if _rec == "over"
                     else result.get("bestUnderBook")
@@ -516,7 +516,7 @@ def handle_ev_command(command, argv):
             # Decision Journal signal logging for auto_sweep
             _best    = result.get("bestRecommendation") or {}
             _best_ev = _best.get("ev") or {}
-            _qs, _   = _qualifies({"ev": _best_ev, "success": True}, stat)
+            _qs, _   = _qualifies({"ev": _best_ev, "success": True}, stat, used_real_line=True)
             if _qs and _best_ev:
                 _eo2  = float((_best_ev.get("over")  or {}).get("edge") or 0.0)
                 _eu2  = float((_best_ev.get("under") or {}).get("edge") or 0.0)
@@ -675,7 +675,8 @@ def handle_ev_command(command, argv):
                     "Usage: backtest <date_from:YYYY-MM-DD> [date_to:YYYY-MM-DD] "
                     "[--model full|simple|both] [--save] [--fast] "
                     "[--data-source nba|bref|local] [--local] [--bref-dir <path>] "
-                    "[--local-index <path>] [--odds-source local_history] [--odds-db <path>]"
+                    "[--local-index <path>] [--odds-source local_history] [--odds-db <path>] "
+                    "[--real-only]"
                 )
             }
         date_from = argv[2]
@@ -693,6 +694,7 @@ def handle_ev_command(command, argv):
         odds_source = None
         odds_db = None
         local_index = None
+        odds_only = False
         while idx < len(argv):
             token = str(argv[idx]).strip().lower()
             if token == "--model" and idx + 1 < len(argv):
@@ -731,20 +733,129 @@ def handle_ev_command(command, argv):
                 odds_db = str(argv[idx + 1]).strip()
                 idx += 2
                 continue
+            if token == "--real-only":
+                odds_only = True
+                idx += 1
+                continue
             return {
                 "error": (
                     "Invalid backtest arguments. "
                     "Usage: backtest <date_from> [date_to] [--model full|simple|both] "
                     "[--save] [--fast] [--data-source nba|bref|local] [--local] "
                     "[--bref-dir <path>] [--local-index <path>] "
-                    "[--odds-source local_history] [--odds-db <path>]"
+                    "[--odds-source local_history] [--odds-db <path>] [--real-only]"
                 )
             }
         return run_backtest(date_from=date_from, date_to=date_to, model=model,
                             save_results=save_results, fast=fast,
                             data_source=data_source, bref_dir=bref_dir,
                             odds_source=odds_source, odds_db=odds_db,
-                            local_index=local_index)
+                            local_index=local_index, odds_only=odds_only)
+
+    # -----------------------------------------------------------------------
+    # backtest_60d — run 60-day (configurable) backtest and log summary row
+    # -----------------------------------------------------------------------
+    if command == "backtest_60d":
+        import os as _os
+        from datetime import date as _date, timedelta as _td
+
+        # Defaults
+        window_days = 60
+        date_to_str = None
+        log_file = None
+        odds_db = None
+
+        idx = 2
+        while idx < len(argv):
+            tok = str(argv[idx]).strip()
+            if tok == "--window-days" and idx + 1 < len(argv):
+                try:
+                    window_days = int(argv[idx + 1])
+                except ValueError:
+                    pass
+                idx += 2
+            elif tok == "--log-file" and idx + 1 < len(argv):
+                log_file = str(argv[idx + 1]).strip()
+                idx += 2
+            elif tok == "--odds-db" and idx + 1 < len(argv):
+                odds_db = str(argv[idx + 1]).strip()
+                idx += 2
+            elif not tok.startswith("-") and date_to_str is None:
+                date_to_str = tok
+                idx += 1
+            else:
+                idx += 1
+
+        # Resolve date_to (default: yesterday)
+        if date_to_str is None:
+            date_to_str = (_date.today() - _td(days=1)).isoformat()
+        try:
+            date_to_obj = _date.fromisoformat(date_to_str)
+        except ValueError:
+            return {"success": False, "error": f"Invalid date_to: {date_to_str}. Use YYYY-MM-DD."}
+
+        date_from_obj = date_to_obj - _td(days=window_days - 1)
+        date_from_str = date_from_obj.isoformat()
+
+        result = run_backtest(
+            date_from=date_from_str,
+            date_to=date_to_str,
+            model="full",
+            save_results=True,
+            data_source="local",
+            odds_source="local_history",
+            odds_db=odds_db,
+        )
+
+        if not result.get("success", True) or "error" in result:
+            return result
+
+        # Extract "full" model report (response["reports"]["full"])
+        rpt = (result.get("reports") or {}).get("full", {})
+        roi_real = rpt.get("roiReal") or {}
+        roi_sim  = rpt.get("roiSimulation") or {}
+
+        log_entry = {
+            "runAt":              datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "dateFrom":           date_from_str,
+            "dateTo":             date_to_str,
+            "windowDays":         window_days,
+            "model":              "full",
+            "sampleCount":        rpt.get("sampleCount"),
+            "realLineSamples":    rpt.get("realLineSamples"),
+            "missingLineSamples": rpt.get("missingLineSamples"),
+            "roiRealBets":        roi_real.get("betsPlaced"),
+            "roiRealHitPct":      roi_real.get("hitRatePct"),
+            "roiRealPctPerBet":   roi_real.get("roiPctPerBet"),
+            "roiSimBets":         roi_sim.get("betsPlaced"),
+            "roiSimHitPct":       roi_sim.get("hitRatePct"),
+            "roiSimPctPerBet":    roi_sim.get("roiPctPerBet"),
+            "oddsSource":         result.get("oddsSource"),
+            "savedTo":            result.get("savedTo"),
+        }
+
+        # Append to log file
+        _root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        if log_file is None:
+            log_file = _os.path.join(_root, "data", "backtest_60d_log.jsonl")
+        _os.makedirs(_os.path.dirname(log_file), exist_ok=True)
+        with open(log_file, "a", encoding="utf-8") as _lf:
+            _lf.write(json.dumps(log_entry) + "\n")
+
+        return {
+            "success":         True,
+            "logEntry":        log_entry,
+            "logFile":         log_file,
+            "backtest":        {
+                "dateFrom":          date_from_str,
+                "dateTo":            date_to_str,
+                "windowDays":        window_days,
+                "sampleCount":       rpt.get("sampleCount"),
+                "realLineSamples":   rpt.get("realLineSamples"),
+                "roiReal":           roi_real,
+                "roiSimulation":     roi_sim,
+            },
+        }
 
     if command == "starter_accuracy":
         # starter_accuracy [date_yyyy-mm-dd] [bookmakers_csv] [regions] [sport] [model_variant]

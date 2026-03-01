@@ -13,7 +13,7 @@ from pathlib import Path
 from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.static import players as nba_players_static
 
-from .nba_data_collection import HEADERS, API_DELAY, retry_api_call, safe_round, safe_div
+from .nba_data_collection import HEADERS, API_DELAY, retry_api_call, safe_round, safe_div, BETTING_POLICY
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
@@ -191,6 +191,10 @@ def log_prop_ev_entry(
     effective_under_odds = _as_int((prop_result or {}).get("bestUnderOdds"), _as_int(under_odds))
     recommended_odds = effective_over_odds if recommended_side == "over" else effective_under_odds
 
+    minutes_ctx = (prop_result or {}).get("minutesProjection") or {}
+    minutes_cap_applied = minutes_ctx.get("minutesCapApplied")
+    minutes_cap_reason = minutes_ctx.get("minutesCapReason")
+
     now_local = datetime.now().replace(microsecond=0).isoformat()
     entry = {
         "entryId": str(uuid.uuid4()),
@@ -242,6 +246,10 @@ def log_prop_ev_entry(
         "result": None,
         "pnl1u": None,
     }
+    if minutes_cap_applied is not None:
+        entry["minutesCapApplied"] = bool(minutes_cap_applied)
+    if minutes_cap_reason is not None:
+        entry["minutesCapReason"] = str(minutes_cap_reason)
 
     try:
         _append_journal_entry(entry)
@@ -518,7 +526,7 @@ def settle_yesterday():
     return settle_entries_for_date(_yesterday_local_str())
 
 
-def best_plays_for_date(date_str=None, limit=15):
+def best_plays_for_date(date_str=None, limit=15, unique_props=True):
     target = str(date_str or _today_local_str())
     entries = _load_journal_entries()
     filtered = [e for e in entries if str(e.get("pickDate")) == target]
@@ -536,8 +544,38 @@ def best_plays_for_date(date_str=None, limit=15):
         reverse=True,
     )
 
+    # One row per (player, stat, line, side): keep highest EV
+    if unique_props:
+        seen_prop = set()
+        unique_ranked = []
+        for e in ranked:
+            prop_key = (
+                _as_int(e.get("playerId"), 0),
+                str(e.get("stat", "")).lower(),
+                safe_round(_as_float(e.get("line"), 0.0), 3),
+                str(e.get("recommendedSide", "over")).lower(),
+            )
+            if prop_key in seen_prop:
+                continue
+            seen_prop.add(prop_key)
+            unique_ranked.append(e)
+        ranked = unique_ranked
+
     limit_val = max(1, _as_int(limit, 15))
     top = ranked[:limit_val]
+    _bp = BETTING_POLICY
+    _wl = _bp.get("stat_whitelist", set())
+    _bb = _bp.get("blocked_prob_bins", set())
+
+    def _policy_ok(e):
+        if _wl and str(e.get("stat", "")).lower() not in _wl:
+            return False
+        po = _as_float(e.get("probOver"), 0.5)
+        bin_idx = max(0, min(9, int(po * 10)))
+        if bin_idx in _bb:
+            return False
+        return True
+
     top_rows = [
         {
             "entryId": e.get("entryId"),
@@ -554,9 +592,15 @@ def best_plays_for_date(date_str=None, limit=15):
             "recommendedOdds": e.get("recommendedOdds"),
             "settled": e.get("settled"),
             "result": e.get("result"),
+            "policyQualified": _policy_ok(e),
         }
         for e in top
     ]
+    for row, e in zip(top_rows, top):
+        if e.get("minutesCapApplied") is not None:
+            row["minutesCapApplied"] = bool(e["minutesCapApplied"])
+        if e.get("minutesCapReason") is not None:
+            row["minutesCapReason"] = str(e["minutesCapReason"])
 
     positive_edges = sum(1 for e in ranked if (_as_float(e.get("recommendedEvPct"), 0.0) or 0.0) > 0)
     return {

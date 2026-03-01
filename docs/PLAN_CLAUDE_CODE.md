@@ -379,6 +379,8 @@ nba_mod.py odds_build_closes 2026-02-01 2026-02-25
 
 **Pass:** `realLineSamples / sampleCount >= 70%` on next backtest.
 
+See **docs/COVERAGE_IMPROVEMENT.md** for step-by-step backfill + build_closes to raise coverage.
+
 **Credit math:** `--max-requests 1950` per chunk ≈ 19,500 credits. Stay within 20K plan.
 
 ---

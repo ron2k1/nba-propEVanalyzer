@@ -175,8 +175,51 @@ def _fit_projection_estimator(X_train, y_train, model_type="gradient_boosting", 
         est.fit(X_train, y_train)
         return est, None
 
+    # XGBoost (optional dep)
+    if mt in {"xgboost", "xgb"}:
+        try:
+            import xgboost as xgb
+        except ImportError:
+            return None, (
+                "xgboost is required for model_type='xgboost'. "
+                "Install with: .\\.venv\\Scripts\\python.exe -m pip install xgboost"
+            )
+        est = xgb.XGBRegressor(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.1,
+            random_state=random_state,
+            n_jobs=-1,
+        )
+        est.fit(X_train, y_train)
+        return est, None
+
+    # LightGBM (optional dep)
+    if mt in {"lightgbm", "lgb"}:
+        try:
+            import lightgbm as lgb
+        except ImportError:
+            return None, (
+                "lightgbm is required for model_type='lightgbm'. "
+                "Install with: .\\.venv\\Scripts\\python.exe -m pip install lightgbm"
+            )
+        est = lgb.LGBMRegressor(
+            n_estimators=200,
+            max_depth=6,
+            learning_rate=0.1,
+            random_state=random_state,
+            n_jobs=-1,
+            verbose=-1,
+        )
+        est.fit(X_train, y_train)
+        return est, None
+
     try:
-        from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
+        from sklearn.ensemble import (
+            GradientBoostingRegressor,
+            HistGradientBoostingRegressor,
+            RandomForestRegressor,
+        )
         from sklearn.linear_model import LinearRegression
     except Exception:
         return None, (
@@ -186,6 +229,14 @@ def _fit_projection_estimator(X_train, y_train, model_type="gradient_boosting", 
 
     if mt in {"gbr", "gradient_boosting", "gb"}:
         est = GradientBoostingRegressor(random_state=random_state)
+    elif mt in {"hist_gbr", "hgb", "histogram_gb"}:
+        est = HistGradientBoostingRegressor(
+            max_iter=200,
+            learning_rate=0.1,
+            max_leaf_nodes=31,
+            min_samples_leaf=20,
+            random_state=random_state,
+        )
     elif mt in {"rf", "random_forest"}:
         est = RandomForestRegressor(
             n_estimators=400,
@@ -196,7 +247,10 @@ def _fit_projection_estimator(X_train, y_train, model_type="gradient_boosting", 
     elif mt in {"linear", "linreg"}:
         est = LinearRegression()
     else:
-        return None, f"Unsupported model_type '{model_type}'. Use gradient_boosting|random_forest|linear|tabpfn."
+        return None, (
+            f"Unsupported model_type '{model_type}'. Use gradient_boosting|hist_gbr|"
+            "xgboost|lightgbm|random_forest|linear|tabpfn."
+        )
 
     est.fit(X_train, y_train)
     return est, None
@@ -283,6 +337,121 @@ def train_projection_ml_from_file(
     }
 
 
+def train_projection_ml_per_stat_from_file(
+    data_path,
+    stat_key="stat",
+    target_key="actual",
+    feature_keys=None,
+    holdout_frac=0.2,
+    min_holdout=25,
+    min_train=100,
+    model_type="gradient_boosting",
+    date_key="pickDate",
+    output_model_path=None,
+):
+    """Train separate ML models per stat (pts, reb, ast, etc.). Rows must include stat_key column."""
+    rows_result = load_training_rows(data_path)
+    if not rows_result.get("success"):
+        return rows_result
+    rows = rows_result["rows"]
+
+    # Group rows by stat
+    by_stat = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        stat_val = r.get(stat_key)
+        if stat_val is None or (isinstance(stat_val, str) and not stat_val.strip()):
+            continue
+        stat_val = str(stat_val).strip().lower()
+        by_stat.setdefault(stat_val, []).append(r)
+
+    if not by_stat:
+        return {"success": False, "error": f"No rows with valid '{stat_key}' column."}
+
+    # Shared feature keys inferred from all rows (excluding stat_key from features)
+    if not feature_keys:
+        feature_keys = infer_projection_feature_keys(
+            rows, target_key=target_key, min_non_null=30
+        )
+        if stat_key in feature_keys:
+            feature_keys = [k for k in feature_keys if k != stat_key]
+    if not feature_keys:
+        return {"success": False, "error": "Could not infer usable feature keys."}
+
+    estimators_by_stat = {}
+    metrics_by_stat = {}
+
+    for stat_val, stat_rows in sorted(by_stat.items()):
+        if len(stat_rows) < min_train + min_holdout:
+            continue
+        train_rows, hold_rows = _time_split_rows(
+            stat_rows, date_key=date_key, holdout_frac=holdout_frac, min_holdout=min_holdout
+        )
+        X_train, y_train, kept_train = _prepare_xy(train_rows, feature_keys, target_key)
+        X_hold, y_hold, kept_hold = _prepare_xy(hold_rows, feature_keys, target_key)
+        if len(y_train) < min_train or len(y_hold) < min_holdout:
+            continue
+
+        est, err = _fit_projection_estimator(X_train, y_train, model_type=model_type)
+        if err:
+            continue
+
+        train_pred = est.predict(X_train)
+        hold_pred = est.predict(X_hold)
+        train_metrics = _regression_metrics(y_train, train_pred)
+        hold_metrics = _regression_metrics(y_hold, hold_pred)
+
+        estimators_by_stat[stat_val] = {
+            "estimator": est,
+            "featureKeys": list(feature_keys),
+            "metrics": {
+                "train": train_metrics,
+                "holdout": hold_metrics,
+                "nRowsTrainUsed": int(len(kept_train)),
+                "nRowsHoldoutUsed": int(len(kept_hold)),
+            },
+        }
+        metrics_by_stat[stat_val] = hold_metrics
+
+    if not estimators_by_stat:
+        return {
+            "success": False,
+            "error": (
+                f"No stat had enough rows (min {min_train} train, {min_holdout} hold). "
+                f"Stats found: {list(by_stat.keys())}"
+            ),
+        }
+
+    if output_model_path is None:
+        base = Path(data_path).resolve().with_suffix("")
+        output_model_path = str(base) + "_projection_ml_per_stat.pkl"
+    out_path = Path(output_model_path).expanduser().resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "perStat": True,
+        "statKey": stat_key,
+        "modelType": str(model_type),
+        "targetKey": target_key,
+        "dateKey": date_key,
+        "trainedAtUtc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "estimatorsByStat": estimators_by_stat,
+        "metricsByStat": metrics_by_stat,
+    }
+    with open(out_path, "wb") as f:
+        pickle.dump(payload, f)
+
+    return {
+        "success": True,
+        "outputModelPath": str(out_path),
+        "perStat": True,
+        "statsTrained": list(estimators_by_stat.keys()),
+        "modelType": payload["modelType"],
+        "metricsByStat": metrics_by_stat,
+    }
+
+
 def load_projection_ml_bundle(model_path):
     p = Path(model_path).expanduser().resolve()
     if not p.exists():
@@ -310,6 +479,19 @@ def predict_projection_ml(bundle, feature_row):
     arr = np.array([vec], dtype=float)
     pred = est.predict(arr)
     return float(pred[0]) if len(pred) else None
+
+
+def predict_projection_ml_per_stat(bundle, feature_row, stat):
+    """Predict using per-stat bundle. stat should match the key used at training (e.g. 'pts', 'reb')."""
+    if not bundle or not bundle.get("perStat"):
+        return None
+    stat_key = str(stat or "").strip().lower()
+    if not stat_key:
+        return None
+    sub = (bundle.get("estimatorsByStat") or {}).get(stat_key)
+    if not sub:
+        return None
+    return predict_projection_ml(sub, feature_row)
 
 
 def _build_projection_feature_row_for_prop(prop_data):
@@ -361,6 +543,7 @@ def compute_prop_ev_with_ml(
     is_b2b=False,
     season=None,
     model_path=DEFAULT_PROJECTION_ML_MODEL_PATH,
+    per_stat_model_path=None,
 ):
     base = compute_prop_ev(
         player_id=player_id,
@@ -379,13 +562,17 @@ def compute_prop_ev_with_ml(
     base["overOdds"] = over_odds
     base["underOdds"] = under_odds
 
-    loaded = load_projection_ml_bundle(model_path)
+    path_to_load = per_stat_model_path if per_stat_model_path else model_path
+    loaded = load_projection_ml_bundle(path_to_load)
     if not loaded.get("success"):
         return {**base, "mlProjection": None, "mlEv": None, "mlModelError": loaded.get("error")}
 
     bundle = loaded["bundle"]
     feature_row = _build_projection_feature_row_for_prop(base)
-    ml_projection = predict_projection_ml(bundle, feature_row)
+    if bundle.get("perStat") and stat:
+        ml_projection = predict_projection_ml_per_stat(bundle, feature_row, stat)
+    else:
+        ml_projection = predict_projection_ml(bundle, feature_row)
     if ml_projection is None:
         return {**base, "mlProjection": None, "mlEv": None, "mlModelError": "ML prediction failed for feature row."}
 
@@ -394,7 +581,10 @@ def compute_prop_ev_with_ml(
     )
     ml_over_odds = int(base.get("bestOverOdds") or over_odds)
     ml_under_odds = int(base.get("bestUnderOdds") or under_odds)
-    ml_ev = compute_ev(ml_projection, line, ml_over_odds, ml_under_odds, stdev_val)
+    ml_ev = compute_ev(
+        ml_projection, line, ml_over_odds, ml_under_odds,
+        stdev_val, stat=stat,
+    )
 
     return {
         **base,
@@ -466,6 +656,131 @@ def promote_projection_ml_model(
         decision["action"] = "rejected"
         decision["reason"] = "below_thresholds"
     return {"success": True, "decision": decision}
+
+
+def train_quantile_projection_from_file(
+    data_path,
+    quantiles=(0.1, 0.25, 0.5, 0.75, 0.9),
+    target_key="actual",
+    feature_keys=None,
+    holdout_frac=0.2,
+    min_holdout=50,
+    date_key="pickDate",
+    output_model_path=None,
+):
+    """Train quantile regressors to estimate full distribution. Use prob_over_from_quantiles for P(stat > line)."""
+    rows_result = load_training_rows(data_path)
+    if not rows_result.get("success"):
+        return rows_result
+    rows = rows_result["rows"]
+    if len(rows) < 200:
+        return {"success": False, "error": f"Need at least 200 rows, found {len(rows)}."}
+
+    if not feature_keys:
+        feature_keys = infer_projection_feature_keys(rows, target_key=target_key, min_non_null=50)
+    if not feature_keys:
+        return {"success": False, "error": "Could not infer usable feature keys."}
+
+    train_rows, hold_rows = _time_split_rows(
+        rows, date_key=date_key, holdout_frac=holdout_frac, min_holdout=min_holdout
+    )
+    X_train, y_train, _ = _prepare_xy(train_rows, feature_keys, target_key)
+    X_hold, y_hold, _ = _prepare_xy(hold_rows, feature_keys, target_key)
+    if len(y_train) < 100 or len(y_hold) < 25:
+        return {
+            "success": False,
+            "error": "Insufficient valid rows after NA filtering.",
+        }
+
+    try:
+        from sklearn.ensemble import GradientBoostingRegressor
+    except Exception:
+        return {"success": False, "error": "scikit-learn required for quantile regression."}
+
+    estimators = []
+    qs = sorted(set(float(q) for q in quantiles))
+    for q in qs:
+        est = GradientBoostingRegressor(
+            loss="quantile",
+            alpha=q,
+            n_estimators=150,
+            max_depth=5,
+            random_state=42,
+        )
+        est.fit(X_train, y_train)
+        estimators.append((q, est))
+
+    if output_model_path is None:
+        base = Path(data_path).resolve().with_suffix("")
+        output_model_path = str(base) + "_quantile_projection.pkl"
+    out_path = Path(output_model_path).expanduser().resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "quantile": True,
+        "quantiles": qs,
+        "estimators": estimators,
+        "featureKeys": list(feature_keys),
+        "targetKey": target_key,
+        "trainedAtUtc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+    }
+    with open(out_path, "wb") as f:
+        pickle.dump(payload, f)
+
+    # Evaluate: median prediction MAE
+    med_idx = next((i for i, (q, _) in enumerate(estimators) if q >= 0.5), len(estimators) - 1)
+    med_est = estimators[min(med_idx, len(estimators) - 1)][1]
+    hold_pred = med_est.predict(X_hold)
+    hold_mae = float(np.mean(np.abs(np.array(y_hold) - hold_pred)))
+
+    return {
+        "success": True,
+        "outputModelPath": str(out_path),
+        "quantiles": qs,
+        "holdoutMaeMedian": safe_round(hold_mae, 4),
+    }
+
+
+def predict_quantile_projection(bundle, feature_row):
+    """Return dict of quantile -> predicted value. Bundle must have quantile=True."""
+    if not bundle or not bundle.get("quantile"):
+        return None
+    keys = bundle.get("featureKeys") or []
+    estimators = bundle.get("estimators") or []
+    if not keys or not estimators:
+        return None
+    vec = []
+    for k in keys:
+        v = _to_float((feature_row or {}).get(k))
+        if v is None:
+            return None
+        vec.append(v)
+    arr = np.array([vec], dtype=float)
+    out = {}
+    for q, est in estimators:
+        pred = est.predict(arr)
+        out[float(q)] = float(pred[0]) if len(pred) else None
+    return out
+
+
+def prob_over_from_quantiles(line, quantile_preds):
+    """Interpolate CDF at line from quantile predictions; return P(stat > line) = 1 - CDF(line)."""
+    if not quantile_preds or len(quantile_preds) < 2:
+        return None
+    qs = sorted(quantile_preds.keys())
+    vals = [quantile_preds[q] for q in qs]
+    line_val = float(line)
+    if line_val <= vals[0]:
+        return 1.0 - qs[0]
+    if line_val >= vals[-1]:
+        return 1.0 - qs[-1]
+    for i in range(len(qs) - 1):
+        if vals[i] <= line_val <= vals[i + 1]:
+            # Linear interpolate CDF between qs[i] and qs[i+1]
+            t = (line_val - vals[i]) / (vals[i + 1] - vals[i]) if vals[i + 1] != vals[i] else 1.0
+            cdf = qs[i] + t * (qs[i + 1] - qs[i])
+            return 1.0 - cdf
+    return None
 
 
 def train_ridge_calibrator(rows, feature_keys, target_key="actual", ridge_alpha=0.5):

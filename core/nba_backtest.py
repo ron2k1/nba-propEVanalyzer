@@ -10,6 +10,7 @@ from nba_api.stats.static import players as nba_players_static
 
 from .nba_data_collection import (
     API_DELAY,
+    BETTING_POLICY,
     HEADERS,
     PROJECTION_CONFIG,
     retry_api_call,
@@ -22,6 +23,27 @@ from .nba_model_training import compute_ev
 TRACKED_STATS = ["pts", "reb", "ast", "fg3m", "pra", "stl", "blk", "tov"]
 DEFAULT_SYNTHETIC_OVER_ODDS = -110
 DEFAULT_SYNTHETIC_UNDER_ODDS = -110
+
+# Version summary for comparing backtest runs across model changes.
+# Update this when adding no-vig, regression-to-mean, etc.
+MODEL_VERSION_SUMMARY = {
+    "version": "v1",
+    "projection": {
+        "full": "defense (position-weighted), matchup history, position-vs-team, home/away, rest, pace factor",
+        "simple": "defense only; no matchup or position-vs-team",
+        "perMinRate": "60% weighted recent + 40% season rate",
+        "statMultiplier": "defense * matchup, capped by PROJECTION_CONFIG.combined",
+        "minutes": "base = weighted recent; adj = home/away, rest, trend; minutesMultiplier from nba_minutes_model (streak, volatility, B2B)",
+    },
+    "ev": {
+        "distribution": "Poisson for stl,blk,fg3m,tov; Normal for pts,reb,ast,pra",
+        "stdev": "rolling stdev or 20% of projection",
+        "calibration": "per-stat temperature scaling from models/prob_calibration.json",
+        "edge": "model probOver vs no-vig implied (over_implied / (over+under))",
+        "noVigImplied": True,
+    },
+    "bettingPolicy": "statWhitelist, blockedProbBins, minEdgeThreshold from nba_data_collection",
+}
 
 
 def _parse_date(value):
@@ -237,6 +259,26 @@ def _new_accumulator():
         "minutesSampleCount": 0,
         "minutesMaeSum": 0.0,
         "minutesBiasSum": 0.0,
+        "realLineSamples": 0,
+        "missingLineSamples": 0,
+        "roiReal":  {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
+        "roiSynth": {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
+        "realLineStatRoi": {s: {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0}
+                            for s in TRACKED_STATS},
+        "realLineCalibBins": {i: {"count": 0, "wins": 0, "pnlUnits": 0.0} for i in range(10)},
+    }
+
+
+def _finalize_roi_seg(seg):
+    b = seg["betsPlaced"]
+    return {
+        "betsPlaced":   b,
+        "wins":         seg["wins"],
+        "losses":       seg["losses"],
+        "pushes":       seg["pushes"],
+        "pnlUnits":     safe_round(seg["pnlUnits"], 4),
+        "hitRatePct":   safe_round(seg["wins"] / b * 100.0, 3) if b else None,
+        "roiPctPerBet": safe_round(seg["pnlUnits"] / b * 100.0, 3) if b else None,
     }
 
 
@@ -285,6 +327,29 @@ def _finalize_accumulator(acc):
         "minutesMae": minutes_mae,
         "minutesBias": minutes_bias,
         "minutesSampleCount": mins_n,
+        "realLineSamples": acc["realLineSamples"],
+        "missingLineSamples": acc["missingLineSamples"],
+        "roiReal":           _finalize_roi_seg(acc["roiReal"]),
+        "roiSynth":          _finalize_roi_seg(acc["roiSynth"]),
+        "realLineStatRoi":   {s: _finalize_roi_seg(acc["realLineStatRoi"][s])
+                              for s in TRACKED_STATS},
+        "realLineCalibBins": [
+            {
+                "bin":          f"{i*10}-{(i+1)*10}%",
+                "betsPlaced":   acc["realLineCalibBins"][i]["count"],
+                "wins":         acc["realLineCalibBins"][i]["wins"],
+                "pnlUnits":     safe_round(acc["realLineCalibBins"][i]["pnlUnits"], 4),
+                "hitRatePct":   safe_round(
+                    acc["realLineCalibBins"][i]["wins"] /
+                    acc["realLineCalibBins"][i]["count"] * 100.0, 2)
+                    if acc["realLineCalibBins"][i]["count"] > 0 else None,
+                "roiPctPerBet": safe_round(
+                    acc["realLineCalibBins"][i]["pnlUnits"] /
+                    acc["realLineCalibBins"][i]["count"] * 100.0, 3)
+                    if acc["realLineCalibBins"][i]["count"] > 0 else None,
+            }
+            for i in range(10)
+        ],
     }
 
 
@@ -302,6 +367,10 @@ def run_backtest(
     fast=False,
     data_source="nba",
     bref_dir=None,
+    odds_source=None,
+    odds_db=None,
+    local_index=None,
+    odds_only=False,
 ):
     """
     Backtest projection + EV quality for one day or a date range.
@@ -310,6 +379,12 @@ def run_backtest(
     fast: if True, uses a reduced API delay (~2x speed, slightly higher ban risk)
     data_source: "nba" (default), "bref", or "local"
     bref_dir: optional override for BRef curated file directory
+    odds_source: None (synthetic lines) or "local_history" (use OddsStore closing lines)
+    odds_db: optional path override for the OddsStore SQLite database
+    local_index: optional path override for LocalNBAStats index pickle
+    odds_only: if True, skip any player-stat pair without a real closing line
+               (no synthetic ±0.5 fallback). Requires odds_source="local_history".
+               missingLineSamples will be 0 in the output.
     """
     import copy as _copy
     import json as _json
@@ -338,6 +413,21 @@ def run_backtest(
     if source_key not in {"nba", "bref", "local"}:
         return {"success": False, "error": "data_source must be one of: nba, bref, local"}
 
+    odds_key = str(odds_source or "").lower().strip()
+    if odds_key and odds_key not in {"local_history"}:
+        return {"success": False, "error": "odds_source must be 'local_history' or None"}
+
+    odds_store = None
+    _odds_stat_to_market = {}
+    if odds_key == "local_history":
+        try:
+            from .nba_odds_store import OddsStore as _OddsStore
+            from .nba_odds_store import STAT_TO_MARKET as _STM
+            odds_store = _OddsStore(db_path=odds_db)
+            _odds_stat_to_market = _STM
+        except Exception as e:
+            return {"success": False, "error": f"Failed to init OddsStore: {e}"}
+
     bref_store = None
     bref_summary = None
     if source_key == "bref":
@@ -351,7 +441,7 @@ def run_backtest(
     if source_key == "local":
         try:
             from .nba_local_stats import LocalNBAStats
-            local_provider = LocalNBAStats()
+            local_provider = LocalNBAStats(index_path=local_index)
         except FileNotFoundError as e:
             return {"success": False, "error": str(e)}
         except Exception as e:
@@ -372,6 +462,8 @@ def run_backtest(
     accumulators = {m: _new_accumulator() for m in models}
     projection_cache = {}
     schedule_cache = {}
+    event_id_cache = {}   # (date_str, homeAbbr, awayAbbr) -> odds event_id or None
+    player_name_cache = {}  # player_id -> full_name string
 
     print(
         f"[backtest] {start} -> {end}  model={model_key}  delay={_delay:.2f}s  "
@@ -455,6 +547,17 @@ def run_backtest(
                 game_id = game.get("gameId")
                 if not game_id:
                     continue
+
+                # Resolve Odds API event_id for this game (used for real-line lookup).
+                odds_event_id = None
+                if odds_store is not None:
+                    _ev_key = (day.isoformat(), game["homeAbbr"], game["awayAbbr"])
+                    if _ev_key not in event_id_cache:
+                        event_id_cache[_ev_key] = odds_store.find_event_for_game(
+                            game["homeAbbr"], game["awayAbbr"], day.isoformat()
+                        )
+                    odds_event_id = event_id_cache.get(_ev_key)
+
                 rows = _fetch_boxscore_players(
                     game_id,
                     data_source=source_key,
@@ -473,6 +576,14 @@ def run_backtest(
                     team_id = int(row.get("TEAM_ID", 0) or 0)
                     if player_id <= 0 or team_id <= 0:
                         continue
+
+                    # Cache player full name for odds line lookup.
+                    if player_id not in player_name_cache:
+                        _pobj = nba_players_static.find_player_by_id(player_id)
+                        player_name_cache[player_id] = (
+                            _pobj.get("full_name", "") if _pobj else ""
+                        )
+                    _player_full_name = player_name_cache[player_id]
 
                     if team_id == game["homeTeamId"]:
                         is_home = True
@@ -541,13 +652,44 @@ def run_backtest(
                                 continue
 
                             projected = float(proj_stat.get("projection") or 0.0)
-                            line = _synthetic_line(proj_stat)
                             stdev_val = proj_stat.get("projStdev") or proj_stat.get("stdev") or 0
+
+                            # Determine line source: real closing line or synthetic.
+                            over_odds  = DEFAULT_SYNTHETIC_OVER_ODDS
+                            under_odds = DEFAULT_SYNTHETIC_UNDER_ODDS
+                            line       = _synthetic_line(proj_stat)
+                            _used_real_line = False
+                            if (
+                                odds_store is not None
+                                and odds_event_id
+                                and _player_full_name
+                            ):
+                                _market = _odds_stat_to_market.get(stat)
+                                if _market:
+                                    _cl = odds_store.get_closing_line(
+                                        odds_event_id, _market, _player_full_name
+                                    )
+                                    if _cl and _cl.get("close_line") is not None:
+                                        line = _cl["close_line"]
+                                        if _cl.get("close_over_odds"):
+                                            over_odds = _cl["close_over_odds"]
+                                        if _cl.get("close_under_odds"):
+                                            under_odds = _cl["close_under_odds"]
+                                        acc["realLineSamples"] += 1
+                                        _used_real_line = True
+                                    else:
+                                        if not odds_only:
+                                            acc["missingLineSamples"] += 1
+
+                            # --real-only: skip samples without a real closing line
+                            if odds_only and not _used_real_line:
+                                continue
+
                             ev = compute_ev(
                                 projected,
                                 line,
-                                DEFAULT_SYNTHETIC_OVER_ODDS,
-                                DEFAULT_SYNTHETIC_UNDER_ODDS,
+                                over_odds,
+                                under_odds,
                                 stdev=stdev_val,
                                 stat=stat,
                             )
@@ -577,17 +719,25 @@ def run_backtest(
                             if over_ev >= under_ev:
                                 chosen_side = "over"
                                 chosen = over_side
-                                chosen_odds = DEFAULT_SYNTHETIC_OVER_ODDS
+                                chosen_odds = over_odds
                             else:
                                 chosen_side = "under"
                                 chosen = under_side
-                                chosen_odds = DEFAULT_SYNTHETIC_UNDER_ODDS
+                                chosen_odds = under_odds
 
                             edge = abs(float(chosen.get("edge") or 0.0))
                             meets_threshold = bool(chosen.get("meetsThreshold")) or (
-                                edge >= float(PROJECTION_CONFIG.get("min_edge_threshold", 0.03))
+                                edge >= float(PROJECTION_CONFIG.get("min_edge_threshold", 0.05))
                             )
-                            if float(chosen.get("evPercent") or 0.0) > 0.0 and meets_threshold:
+                            _bp = BETTING_POLICY
+                            _stat_ok = stat in _bp.get("stat_whitelist", TRACKED_STATS)
+                            _bin_ok = bin_idx not in _bp.get("blocked_prob_bins", set())
+                            if (
+                                float(chosen.get("evPercent") or 0.0) > 0.0
+                                and meets_threshold
+                                and _stat_ok
+                                and _bin_ok
+                            ):
                                 outcome = _grade_side(actual_val, line, chosen_side)
                                 pnl = _pnl_for_american(outcome, chosen_odds)
                                 roi = acc["roiSimulation"]
@@ -599,6 +749,32 @@ def run_backtest(
                                     roi["losses"] += 1
                                 else:
                                     roi["pushes"] += 1
+
+                                # Segmented ROI tracking
+                                seg = acc["roiReal"] if _used_real_line else acc["roiSynth"]
+                                seg["betsPlaced"] += 1
+                                seg["pnlUnits"]   += pnl
+                                if outcome == "win":
+                                    seg["wins"] += 1
+                                elif outcome == "loss":
+                                    seg["losses"] += 1
+                                else:
+                                    seg["pushes"] += 1
+                                if _used_real_line:
+                                    sr = acc["realLineStatRoi"][stat]
+                                    sr["betsPlaced"] += 1
+                                    sr["pnlUnits"]   += pnl
+                                    if outcome == "win":
+                                        sr["wins"] += 1
+                                    elif outcome == "loss":
+                                        sr["losses"] += 1
+                                    else:
+                                        sr["pushes"] += 1
+                                    cb = acc["realLineCalibBins"][bin_idx]
+                                    cb["count"]    += 1
+                                    cb["pnlUnits"] += pnl
+                                    if outcome == "win":
+                                        cb["wins"] += 1
 
             # End-of-day summary + checkpoint.
             day_samples = sum(accumulators[m]["sampleCount"] for m in models) - day_samples_start
@@ -620,7 +796,8 @@ def run_backtest(
                     "dateTo": day.isoformat(),
                     "modelsEvaluated": models,
                     "stats": TRACKED_STATS,
-                    "minEdgeThreshold": PROJECTION_CONFIG.get("min_edge_threshold", 0.03),
+                    "minEdgeThreshold": PROJECTION_CONFIG.get("min_edge_threshold", 0.05),
+                    "modelVersion": MODEL_VERSION_SUMMARY,
                     "reports": _ckpt_reports,
                 }
                 _ckpt_fname = (
@@ -640,13 +817,24 @@ def run_backtest(
             "dataSource": source_key,
             "modelsEvaluated": models,
             "stats": TRACKED_STATS,
-            "minEdgeThreshold": PROJECTION_CONFIG.get("min_edge_threshold", 0.03),
+            "minEdgeThreshold": PROJECTION_CONFIG.get("min_edge_threshold", 0.05),
+            "bettingPolicy": {
+                "statWhitelist": sorted(BETTING_POLICY.get("stat_whitelist", set())),
+                "blockedProbBins": sorted(BETTING_POLICY.get("blocked_prob_bins", set())),
+            },
+            "modelVersion": MODEL_VERSION_SUMMARY,
             "reports": model_reports,
         }
         if source_key == "bref" and bref_summary:
             response["brefCoverage"] = bref_summary
+        if source_key == "local" and local_provider:
+            response["localIndexPath"] = getattr(local_provider, "index_path", None)
 
         response["fast"] = fast
+        if odds_key:
+            response["oddsSource"] = odds_key
+        if odds_only:
+            response["oddsOnly"] = True
 
         if save_results:
             results_dir = _os.path.join(
@@ -654,7 +842,8 @@ def run_backtest(
             )
             _os.makedirs(results_dir, exist_ok=True)
             model_tag = model_key.replace(",", "-")
-            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}.json"
+            realonly_tag = "_realonly" if odds_only else ""
+            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}.json"
             fpath = _os.path.join(results_dir, fname)
             with open(fpath, "w", encoding="utf-8") as fh:
                 _json.dump(response, fh, indent=2)
@@ -711,8 +900,11 @@ def run_backtest(
         _pp.get_position_vs_team = _orig_pp_pvt
         _pp.API_DELAY = _orig_pp_api_delay
 
+        if odds_store is not None:
+            odds_store.close()
 
-def run_minutes_eval(date_from, date_to=None, data_source="nba", bref_dir=None):
+
+def run_minutes_eval(date_from, date_to=None, data_source="nba", bref_dir=None, local_index=None):
     """
     Evaluate minutes projection accuracy over a date range.
 
@@ -721,6 +913,8 @@ def run_minutes_eval(date_from, date_to=None, data_source="nba", bref_dir=None):
 
     Returns MAE, bias, sample count, and calibration buckets
     (from nba_minutes_model.minutes_calibration_bins).
+
+    local_index: optional path override for LocalNBAStats index pickle.
     """
     from .nba_minutes_model import minutes_calibration_bins
 
@@ -750,7 +944,7 @@ def run_minutes_eval(date_from, date_to=None, data_source="nba", bref_dir=None):
     if source_key == "local":
         try:
             from .nba_local_stats import LocalNBAStats
-            local_provider = LocalNBAStats()
+            local_provider = LocalNBAStats(index_path=local_index)
         except FileNotFoundError as e:
             return {"success": False, "error": str(e)}
         except Exception as e:
@@ -879,6 +1073,7 @@ def run_minutes_eval(date_from, date_to=None, data_source="nba", bref_dir=None):
         "dateFrom":         start.isoformat(),
         "dateTo":           end.isoformat(),
         "dataSource":       source_key,
+        "localIndexPath":   getattr(local_provider, "index_path", None) if local_provider else None,
         "projectionErrors": errors,
         **cal,
     }

@@ -59,7 +59,7 @@ PROJECTION_CONFIG = {
 }
 
 BETTING_POLICY = {
-    "stat_whitelist": {"pts", "reb", "ast", "pra"},
+    "stat_whitelist": {"pts", "ast", "pra"},  # reb removed 2026-02-28: -5.34% ROI on 436 real-line bets
     "blocked_prob_bins": {4, 5},       # 40-50% and 50-60% model probOver bins
     "min_ev_pct": 0.0,                 # evPercent floor
 }
@@ -1338,9 +1338,9 @@ def get_player_game_log(player_id, season=None, last_n=25, as_of_date=None):
 
         # DNP filter — exclude games with min below threshold (distorts averages)
         dnp_threshold = PROJECTION_CONFIG.get("dnp_min_threshold", 1)
-        games_before = len(result)
+        excluded_games = [g for g in result if (g.get("min") or 0) < dnp_threshold]
         result = [g for g in result if (g.get("min") or 0) >= dnp_threshold]
-        games_excluded_dnp = games_before - len(result)
+        games_excluded_dnp = len(excluded_games)
 
         # Rolling averages
         stat_keys = ["pts", "reb", "ast", "stl", "blk", "tov", "fg3m",
@@ -1384,6 +1384,10 @@ def get_player_game_log(player_id, season=None, last_n=25, as_of_date=None):
             "success": True, "gameLogs": result, "rolling": rolling,
             "hitRates": hit_rates, "playerId": player_id, "gamesPlayed": len(result),
             "gamesExcludedDnp": games_excluded_dnp,
+            "excludedGames": [
+                {"gameDate": g.get("gameDate", ""), "gameId": g.get("gameId", "")}
+                for g in excluded_games
+            ],
         }
         cache_set(cache_key, out)
         return out
@@ -1400,7 +1404,7 @@ def get_player_game_log(player_id, season=None, last_n=25, as_of_date=None):
             return fallback
         return {"success": False, "error": str(e), "gameLogs": [], "rolling": {},
                 "hitRates": {}, "playerId": player_id, "gamesPlayed": 0,
-                "gamesExcludedDnp": 0}
+                "gamesExcludedDnp": 0, "excludedGames": []}
 
 def get_player_splits(player_id, season=None, as_of_date=None):
     """

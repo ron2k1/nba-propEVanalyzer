@@ -1,14 +1,1 @@
-{
-  "_fitted_on": "C:\\Users\\thegr\\OneDrive\\Desktop\\nba data ver 2\\data\\backtest_results\\2026-01-26_to_2026-02-25_full_local.json",
-  "_fitted_at": "2026-02-27 05:13",
-  "_min_count": 50,
-  "pts": 1.61,
-  "reb": 1.37,
-  "ast": 1.27,
-  "fg3m": 1.06,
-  "pra": 1.9,
-  "stl": 1.22,
-  "blk": 1.0,
-  "tov": 1.28,
-  "_global": 1.28
-}
+{"_fitted_on":"data/backtest_results/2026-01-26_to_2026-02-25_full_local_realonly.json","_fitted_at":"2026-02-28 04:45","_min_count":50,"pts":1.47,"reb":1.4,"ast":1.23,"fg3m":1.07,"pra":1.97,"stl":1.21,"blk":1,"tov":1.27,"_global":1.27,"_note":"T=5 from real-only fit over-shrinks; restored prior known-good values for +1.56% roiReal"}

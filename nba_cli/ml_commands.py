@@ -6,6 +6,8 @@ import os
 from core.nba_model_training import (
     promote_projection_ml_model,
     train_projection_ml_from_file,
+    train_projection_ml_per_stat_from_file,
+    train_quantile_projection_from_file,
     train_ridge_calibrator_from_file,
 )
 
@@ -16,7 +18,8 @@ def handle_ml_command(command, argv):
             return {
                 "error": (
                     "Usage: train_projection_ml <data_path> [target_key] [feature_keys_csv|auto] "
-                    "[holdout_frac] [min_holdout] [model_type] [date_key] [output_model_path]"
+                    "[holdout_frac] [min_holdout] [model_type] [date_key] [output_model_path]\n"
+                    "model_type: gradient_boosting|hist_gbr|xgboost|lightgbm|random_forest|linear|tabpfn"
                 )
             }
         data_path = argv[2]
@@ -40,6 +43,52 @@ def handle_ml_command(command, argv):
             min_holdout=min_holdout,
             model_type=model_type,
             date_key=date_key,
+            output_model_path=output_model_path,
+        )
+
+    if command == "train_projection_ml_per_stat":
+        if len(argv) < 3:
+            return {
+                "error": (
+                    "Usage: train_projection_ml_per_stat <data_path> [stat_key] [target_key] "
+                    "[holdout_frac] [min_holdout] [model_type] [output_model_path]\n"
+                    "Rows must have stat_key column (e.g. 'stat' with values pts, reb, ast)."
+                )
+            }
+        data_path = argv[2]
+        stat_key = argv[3] if len(argv) > 3 else "stat"
+        target_key = argv[4] if len(argv) > 4 else "actual"
+        holdout_frac = float(argv[5]) if len(argv) > 5 else 0.2
+        min_holdout = int(argv[6]) if len(argv) > 6 else 25
+        model_type = argv[7] if len(argv) > 7 else "gradient_boosting"
+        output_model_path = argv[8] if len(argv) > 8 else None
+        return train_projection_ml_per_stat_from_file(
+            data_path=data_path,
+            stat_key=stat_key,
+            target_key=target_key,
+            holdout_frac=holdout_frac,
+            min_holdout=min_holdout,
+            model_type=model_type,
+            output_model_path=output_model_path,
+        )
+
+    if command == "train_quantile_projection":
+        if len(argv) < 3:
+            return {
+                "error": (
+                    "Usage: train_quantile_projection <data_path> [quantiles_csv] [output_model_path]\n"
+                    "quantiles_csv default: 0.1,0.25,0.5,0.75,0.9"
+                )
+            }
+        data_path = argv[2]
+        quantiles_arg = argv[3] if len(argv) > 3 else "0.1,0.25,0.5,0.75,0.9"
+        output_model_path = argv[4] if len(argv) > 4 else None
+        quantiles = tuple(float(q.strip()) for q in quantiles_arg.split(",") if q.strip())
+        if not quantiles:
+            quantiles = (0.1, 0.25, 0.5, 0.75, 0.9)
+        return train_quantile_projection_from_file(
+            data_path=data_path,
+            quantiles=quantiles,
             output_model_path=output_model_path,
         )
 

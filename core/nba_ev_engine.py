@@ -186,7 +186,7 @@ def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_thr
     no_vig_over = p1 / total if total > 0 else 0.5
     no_vig_under = p2 / total if total > 0 else 0.5
 
-    def _side_ev(p_side, p_lose, p_push, odds, implied_p):
+    def _side_ev(p_side, p_lose, p_push, odds, no_vig_p, raw_implied_p):
         dec = american_to_decimal(odds)
         if dec is None or dec <= 1.0:
             return None
@@ -194,24 +194,25 @@ def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_thr
         p_side_no_push = safe_div(p_side, action_prob, default=0.0) if action_prob > 0 else 0.0
         ev_unit = p_side * (dec - 1.0) - p_lose
         ev_pct = ev_unit * 100.0
-        edge = p_side_no_push - implied_p
+        edge = p_side_no_push - no_vig_p
         b = dec - 1.0
         kelly = max(0.0, (p_side_no_push * b - (1.0 - p_side_no_push)) / b) if b > 0 else 0.0
         fair = prob_to_american(p_side_no_push)
-        implied_adj = implied_p * action_prob
-        meets_threshold = abs(edge) >= float(min_edge_threshold)
+        implied_adj = raw_implied_p * action_prob
+        meets_threshold = edge >= float(min_edge_threshold)
 
         if ev_pct <= 0 or edge <= 0:
             verdict = "Negative EV"
         elif not meets_threshold:
             verdict = "Thin Edge"
-        elif edge < 0.05:
+        elif edge < 0.08:
             verdict = "Good Value"
         else:
             verdict = "Strong Value"
 
         return {
-            "impliedProb": safe_round(implied_p, 4),
+            "impliedProb": safe_round(raw_implied_p, 4),
+            "noVigImplied": safe_round(no_vig_p, 4),
             "impliedProbAdj": safe_round(implied_adj, 4),
             "pSide": safe_round(p_side, 4),
             "pSideNoPush": safe_round(p_side_no_push, 4),
@@ -240,6 +241,6 @@ def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_thr
         "noVigUnder": safe_round(no_vig_under, 4),
         "vig": safe_round(vig, 4),
         "minEdgeThreshold": safe_round(min_edge_threshold, 4),
-        "over": _side_ev(prob_over, prob_under, prob_push, over_odds, p1),
-        "under": _side_ev(prob_under, prob_over, prob_push, under_odds, p2),
+        "over": _side_ev(prob_over, prob_under, prob_push, over_odds, no_vig_over, p1),
+        "under": _side_ev(prob_under, prob_over, prob_push, under_odds, no_vig_under, p2),
     }
