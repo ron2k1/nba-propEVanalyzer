@@ -667,6 +667,23 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
                         "snapshotCount": len(snaps),
                     }
 
+    # #3/#9: Line movement conflict — raise effective edge threshold to 0.10 when
+    # market moved AGAINST the recommended side (conflicting signal from sharp money).
+    _conflict_threshold = 0.10
+    for row in top_rows:
+        lm = row.get("lineMovement")
+        if lm is None:
+            continue
+        favorable = lm.get("favorable")
+        if favorable is False:
+            ev_pct = _as_float(row.get("recommendedEvPct"), 0.0) or 0.0
+            row["lineMovementConflict"] = True
+            row["lineMovementQualified"] = ev_pct >= _conflict_threshold
+        elif favorable is True:
+            row["lineMovementConflict"] = False
+            row["lineMovementQualified"] = True
+        # favorable is None (flat/no movement) → no annotation added
+
     positive_edges = sum(1 for e in ranked if (_as_float(e.get("recommendedEvPct"), 0.0) or 0.0) > 0)
     return {
         "success": True,
