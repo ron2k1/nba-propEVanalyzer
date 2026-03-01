@@ -336,18 +336,24 @@ class DecisionJournal:
                     stat_key = str(sig.get("stat") or "").lower()
                     market = STAT_TO_MARKET.get(stat_key)
                     if market:
+                        player_name_sig = sig.get("player_name", "")
                         event_id = odds_store.find_event_for_game(
                             sig.get("team_abbr", ""), sig.get("opponent_abbr", ""), date_str
                         )
                         if event_id:
                             cl = odds_store.get_closing_line(
-                                event_id, market, sig.get("player_name", "")
+                                event_id, market, player_name_sig
                             )
-                            if cl:
-                                close_line = cl.get("close_line")
-                                close_over_odds = cl.get("close_over_odds")
-                                close_under_odds = cl.get("close_under_odds")
-                                clv_delta = _clv_line_delta(rec_side, line, close_line)
+                        else:
+                            # Snapshots missing for this game — look up by player+date directly
+                            cl = odds_store.get_closing_line_by_player_date(
+                                player_name_sig, market, date_str
+                            )
+                        if cl:
+                            close_line = cl.get("close_line")
+                            close_over_odds = cl.get("close_over_odds")
+                            close_under_odds = cl.get("close_under_odds")
+                            clv_delta = _clv_line_delta(rec_side, line, close_line)
                 except Exception:
                     pass
 
@@ -621,13 +627,16 @@ class DecisionJournal:
                     skipped += 1
                     continue
                 date_str = str(rec.get("settle_date") or "")
+                player_name_rec = rec.get("player_name", "")
                 event_id = odds_store.find_event_for_game(
                     rec.get("team_abbr", ""), rec.get("opponent_abbr", ""), date_str
                 )
-                if not event_id:
-                    skipped += 1
-                    continue
-                cl = odds_store.get_closing_line(event_id, market, rec.get("player_name", ""))
+                if event_id:
+                    cl = odds_store.get_closing_line(event_id, market, player_name_rec)
+                else:
+                    cl = odds_store.get_closing_line_by_player_date(
+                        player_name_rec, market, date_str
+                    )
                 if not cl:
                     skipped += 1
                     continue

@@ -302,6 +302,42 @@ class OddsStore:
             "close_ts_utc":     row[4],
         }
 
+    def get_closing_line_by_player_date(self, player_name, market, date_str, book=None):
+        """
+        Fallback lookup: find closing line by player name + market + NBA date,
+        without requiring a known event_id.  Used when find_event_for_game
+        returns None (e.g. game snapshots missing but closing lines present).
+        Returns the same dict shape as get_closing_line(), or None.
+        """
+        book_clause = "AND book=?" if book else ""
+        book_param  = [book] if book else []
+
+        def _run(name_clause, name_val):
+            return self._conn.execute(
+                f"SELECT book,close_line,close_over_odds,close_under_odds,close_ts_utc "
+                f"FROM closing_lines "
+                f"WHERE market=? AND {name_clause} "
+                f"AND date(datetime(substr(commence_time,1,19), '-6 hours'))=? "
+                f"{book_clause} "
+                f"ORDER BY book LIMIT 1",
+                [market, name_val, date_str] + book_param,
+            ).fetchone()
+
+        row = _run("player_name=?", player_name)
+        if not row and player_name:
+            last = player_name.strip().split()[-1]
+            if len(last) > 2:
+                row = _run("player_name LIKE ?", f"%{last}%")
+        if not row:
+            return None
+        return {
+            "book":             row[0],
+            "close_line":       row[1],
+            "close_over_odds":  row[2],
+            "close_under_odds": row[3],
+            "close_ts_utc":     row[4],
+        }
+
     def get_closing_lines_for_date(self, date_str, market=None, book=None):
         """Return all closing lines for events that commenced on date_str (NBA local time)."""
         clauses = ["date(datetime(substr(commence_time,1,19), '-6 hours'))=?"]
