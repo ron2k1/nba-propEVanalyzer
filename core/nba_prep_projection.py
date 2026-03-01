@@ -159,6 +159,7 @@ def _add_combo_projections(projections, logs, rolling):
             "seasonAvg": s_avg,
             "stdev": s_stdev,
             "projStdev": safe_round(s_stdev * 0.75, 2),
+            "recentHighVariance": False,
             "last5Avg": rolling.get(f"{key}_avg5", 0),
             "last10Avg": rolling.get(f"{key}_avg10", 0),
             "median": rolling.get(f"{key}_median", 0),
