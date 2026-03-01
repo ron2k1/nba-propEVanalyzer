@@ -21,6 +21,23 @@ from .nba_data_collection import (
 )
 from .nba_minutes_model import compute_minutes_multiplier
 
+# ---------------------------------------------------------------------------
+# Named projection constants (used in multiple places below)
+# ---------------------------------------------------------------------------
+# Fraction of the stdev to use as proj_stdev (post-regression shrinkage).
+_PROJ_STDEV_SHRINK = 0.75
+
+# When blending 30% of the book line into the model projection, the model
+# receives this weight; the complementary book-line weight is 1 - this value.
+_LINE_BLEND_MODEL_WEIGHT = 0.70
+
+# Stdev reduction factor when a book-line blend is applied: sqrt(1 - blend_weight).
+# Pre-computed once since math.sqrt is called at every stat iteration otherwise.
+_LINE_BLEND_STDEV_FACTOR = math.sqrt(1.0 - _LINE_BLEND_MODEL_WEIGHT)
+
+# Reference window for variance-inflation scaling (max games fetched per player).
+_N_GAMES_REF = 25
+
 _DEF_WEIGHTS = {
     "G": {
         "pts": ("defPtsMult", 0.50, "defFg3mMult", 0.25, 0.25),
@@ -158,7 +175,7 @@ def _add_combo_projections(projections, logs, rolling):
             "confidence": conf,
             "seasonAvg": s_avg,
             "stdev": s_stdev,
-            "projStdev": safe_round(s_stdev * 0.75, 2),
+            "projStdev": safe_round(s_stdev * _PROJ_STDEV_SHRINK, 2),
             "recentHighVariance": False,
             "last5Avg": rolling.get(f"{key}_avg5", 0),
             "last10Avg": rolling.get(f"{key}_avg10", 0),
@@ -259,6 +276,8 @@ def compute_projection(
     model_variant="full",
     as_of_date=None,
     minutes_multiplier=None,
+    opponent_is_b2b=False,
+    game_total=None,
 ):
     try:
         if season is None:
@@ -327,6 +346,40 @@ def compute_projection(
         projected_minutes = max(0.0, base_projected_minutes * _eff_mult)
         minutes_ctx["projectedMinutes"] = safe_round(projected_minutes, 2)
 
+        # --- Pre-loop: derived context signals (computed once, used per-stat) ---
+
+        # Gap 8.15: Recent role change — last-3 min avg vs season min avg
+        # If the player's last 3 games avg minutes deviate >5 from season avg,
+        # their role has shifted (new starter, bench demotion, minutes restriction).
+        # In that case we bias the projection base toward the recent last-5 window.
+        _season_mins_base = float(rolling.get("min_avg_season", 0) or 0) or 1.0
+        _last3_mins = [max(0.0, float(logs[i].get("min", 0) or 0)) for i in range(min(3, len(logs)))]
+        _last3_min_avg = sum(_last3_mins) / len(_last3_mins) if _last3_mins else _season_mins_base
+        _role_change_delta = _last3_min_avg - _season_mins_base
+        _role_change_detected = abs(_role_change_delta) > 5.0 and len(logs) >= 3
+
+        # Gap 8.17: Post-blowout urgency — player plus/minus as blowout proxy
+        # Player on court during a blowout will have a large +/-; this correlates
+        # with next-game motivation/urgency (prior loss) or coasting (prior win).
+        _prior_plusminus = float(logs[1].get("plusMinus", 0) or 0) if len(logs) >= 2 else 0.0
+        _blowout_adj_pts_ast = 1.0
+        if _prior_plusminus <= -20:
+            _blowout_adj_pts_ast = 1.04   # urgency after blowout loss
+        elif _prior_plusminus >= 25:
+            _blowout_adj_pts_ast = 0.97   # coasting after blowout win
+
+        # Gap 8.19: Denver altitude boost — visiting player only
+        # Ball Arena (5,280 ft) produces measurable fatigue for visiting defenses;
+        # visiting players historically score ~2.5% more in Denver home games.
+        # DEN home players already have this baked into their season averages.
+        _altitude_mult = 1.025 if (not is_home and str(opponent_abbr or "").upper() == "DEN") else 1.0
+
+        # Gap 8.22: Rest advantage interaction term
+        # Well-rested player (not B2B) vs fatigued opponent (B2B) = compounding edge.
+        # The individual effects of player rest and opponent B2B are modeled separately;
+        # this adds the interaction: both conditions true → extra +2.5% on pts/ast.
+        _rest_advantage = (not is_b2b) and opponent_is_b2b
+
         core_stats = ["pts", "reb", "ast", "stl", "blk", "tov", "fg3m"]
         projections = {}
 
@@ -343,6 +396,36 @@ def compute_projection(
             season_mins = float(rolling.get("min_avg_season", 0) or weighted_mins or 1.0)
             stdev_val = float(rolling.get(f"{stat}_stdev", 0) or 0.0)
 
+            # Gap 8.14: Home/Away stat split calibration
+            # Replace season_avg with location-specific avg when:
+            #   - split has ≥8 games (sufficient sample)
+            #   - split differs from season avg by >8% (avoids noise for stable players)
+            # Impact: players with large home/away splits (e.g., +10% away scorer)
+            # get more accurate base projections. Blending and per-min rate still apply.
+            _loc_key = "home" if is_home else "away"
+            _split_data = (splits or {}).get(_loc_key, {})
+            _split_val = _split_data.get(stat)
+            _split_gp = int(_split_data.get("gp", 0) or 0)
+            _home_away_split_used = False
+            if (
+                _split_val is not None
+                and _split_gp >= 8
+                and season_avg > 0
+                and abs(float(_split_val) - season_avg) / season_avg > 0.08
+            ):
+                season_avg = float(_split_val)
+                _home_away_split_used = True
+
+            # Gap 8.15: Role change — bias projection base to last-5 window.
+            # Rebind season_avg and season_mins locally so regression-to-mean
+            # targets the recent role, not the stale season-wide average.
+            _stat_role_change = _role_change_detected
+            if _stat_role_change and len(vals) >= 3:
+                _last5_vals = vals[:min(5, len(vals))]
+                _last5_mins = [max(0.0, float(logs[i].get("min", 0) or 0)) for i in range(len(_last5_vals))]
+                season_avg = sum(_last5_vals) / len(_last5_vals)
+                season_mins = (sum(_last5_mins) / len(_last5_mins)) if _last5_mins else season_mins
+
             # Regression to mean: dampen extreme recent performance toward
             # season average. Activates above 1.5 stdev; linear shrinkage to
             # max 50%.  Prevents last-5 hot/cold streaks from dominating.
@@ -355,9 +438,8 @@ def compute_projection(
             # Variance inflation for small samples: widen CDF tails when we
             # have fewer games, reflecting higher uncertainty.  No effect at
             # n >= 25 (our max fetch window).
-            _N_REF = 25
-            if n < _N_REF and n > 0:
-                stdev_val = stdev_val * (1 + 2.0 * (1.0 / math.sqrt(n) - 1.0 / math.sqrt(_N_REF)))
+            if n < _N_GAMES_REF and n > 0:
+                stdev_val = stdev_val * (1 + 2.0 * (1.0 / math.sqrt(n) - 1.0 / math.sqrt(_N_GAMES_REF)))
 
             weighted_rate = safe_div(weighted_avg, weighted_mins, default=0.0)
             season_rate = safe_div(season_avg, season_mins, default=0.0)
@@ -369,9 +451,58 @@ def compute_projection(
             lo, hi = PROJECTION_CONFIG["combined"]
             stat_mult = max(lo, min(hi, stat_mult))
 
+            # Opponent B2B pace adjustment (Phase 3b):
+            # Opponent on B2B → faster pace, less rested defense → slight boost for pts/reb/ast.
+            # Net effect: +1.5% at 50% weight = +0.75% boost; capped by combined range.
+            if opponent_is_b2b and stat in ("pts", "reb", "ast"):
+                stat_mult = stat_mult * 1.015
+                stat_mult = max(lo, min(hi, stat_mult))
+
+            # Game total pace adjustment (Phase 4a):
+            # Season avg total ≈ 226. Per 5-point deviation: ±0.75% pts at 50% weight.
+            # Applied to pts only; capped at ±7%.
+            if game_total is not None and stat == "pts":
+                _total_deviation = (float(game_total) - 226.0) / 5.0
+                _total_mult = 1.0 + _total_deviation * 0.0075
+                _total_mult = max(0.93, min(1.07, _total_mult))
+                stat_mult = stat_mult * _total_mult
+                stat_mult = max(lo, min(hi, stat_mult))
+
+            # Gap 8.17: Post-blowout urgency (pts/ast only)
+            if stat in ("pts", "ast") and _blowout_adj_pts_ast != 1.0:
+                stat_mult = max(lo, min(hi, stat_mult * _blowout_adj_pts_ast))
+
+            # Gap 8.19: Denver altitude — visiting player boost (pts/ast only)
+            if stat in ("pts", "ast") and _altitude_mult != 1.0:
+                stat_mult = max(lo, min(hi, stat_mult * _altitude_mult))
+
+            # Gap 8.22: Rest advantage interaction (player rested × opponent B2B)
+            if stat in ("pts", "ast") and _rest_advantage:
+                stat_mult = max(lo, min(hi, stat_mult * 1.025))
+
+            # Gap 8.23: Hot/cold streak persistence (pts/ast only, need ≥8 logs)
+            # High-usage scorers in hot streaks (≥6 of last 8 over) continue at 56-60%.
+            # Cold streaks (≤2 of last 8 over) mean-revert; apply small fade.
+            _streak_mult = 1.0
+            if stat in ("pts", "ast") and len(vals) >= 8 and season_avg > 0:
+                _over_count_l8 = sum(1 for v in vals[:8] if v >= season_avg)
+                _over_rate_l8 = _over_count_l8 / 8.0
+                if _over_rate_l8 >= 0.75:    # ≥6/8: hot streak — continue
+                    _streak_mult = 1.03
+                elif _over_rate_l8 <= 0.25:  # ≤2/8: cold streak — mean revert
+                    _streak_mult = 0.98
+                if _streak_mult != 1.0:
+                    stat_mult = max(lo, min(hi, stat_mult * _streak_mult))
+
             model_projection = max(0.0, projected_minutes * per_min_rate * stat_mult)
             blend_line = _extract_blend_line(blend_with_line, stat)
-            final_projection = max(0.0, 0.70 * model_projection + 0.30 * blend_line) if blend_line is not None else model_projection
+            if blend_line is not None:
+                final_projection = max(
+                    0.0,
+                    _LINE_BLEND_MODEL_WEIGHT * model_projection + (1.0 - _LINE_BLEND_MODEL_WEIGHT) * blend_line,
+                )
+            else:
+                final_projection = model_projection
 
             # --- #5: Recent high-variance detection (role instability signal) ---
             # If the player's last-5 stdev exceeds 1.5× the full-window stdev,
@@ -394,14 +525,14 @@ def compute_projection(
             # directly fixes the 70-80% bin over-confidence (predicted 73%,
             # actual 40%) by narrowing the CDF and pushing probabilities toward
             # calibrated confidence levels.
-            _proj_stdev = stdev_val * 0.75
+            _proj_stdev = stdev_val * _PROJ_STDEV_SHRINK
 
             # --- #2: Line-blend stdev reduction ---
-            # Blending 30% of the book line anchors 30% of projection uncertainty
-            # to the market consensus. The effective CDF spread is therefore
-            # stdev * sqrt(1 - 0.30) = stdev * sqrt(0.70) ≈ 0.837×.
+            # Blending (1 - _LINE_BLEND_MODEL_WEIGHT) of the book line anchors that
+            # fraction of projection uncertainty to the market consensus. The effective
+            # CDF spread is stdev * sqrt(_LINE_BLEND_MODEL_WEIGHT) ≈ 0.837×.
             if blend_line is not None:
-                _proj_stdev *= math.sqrt(0.70)
+                _proj_stdev *= _LINE_BLEND_STDEV_FACTOR
 
             # --- #5 cont.: Inflate proj_stdev for recent high-variance players ---
             if _recent_high_variance:
@@ -427,6 +558,17 @@ def compute_projection(
                 "stdev": safe_round(stdev_val, 2),
                 "projStdev": proj_stdev,
                 "recentHighVariance": _recent_high_variance,
+                "homeAwaySplitUsed": _home_away_split_used,
+                "recentRoleChange": _stat_role_change,
+                "roleChangeDelta": safe_round(_role_change_delta, 1) if _stat_role_change else None,
+                "blowoutAdj": (
+                    safe_round(_blowout_adj_pts_ast, 3)
+                    if stat in ("pts", "ast") and _blowout_adj_pts_ast != 1.0
+                    else None
+                ),
+                "altitudeAdj": True if stat in ("pts", "ast") and _altitude_mult != 1.0 else None,
+                "restAdvantageAdj": True if stat in ("pts", "ast") and _rest_advantage else None,
+                "streakMult": safe_round(_streak_mult, 3) if stat in ("pts", "ast") and _streak_mult != 1.0 else None,
                 "min": rolling.get(f"{stat}_min", 0),
                 "max": rolling.get(f"{stat}_max", 0),
                 "perMinRate": safe_round(per_min_rate, 4),
@@ -448,7 +590,10 @@ def compute_projection(
             if blend_line is None:
                 continue
             model_projection = float(projections[combo_stat]["projection"])
-            final_projection = max(0.0, 0.70 * model_projection + 0.30 * blend_line)
+            final_projection = max(
+                0.0,
+                _LINE_BLEND_MODEL_WEIGHT * model_projection + (1.0 - _LINE_BLEND_MODEL_WEIGHT) * blend_line,
+            )
             projections[combo_stat]["projectionModel"] = safe_round(model_projection, 1)
             projections[combo_stat]["projectionPreBlend"] = safe_round(model_projection, 1)
             projections[combo_stat]["projection"] = safe_round(final_projection, 1)
@@ -456,7 +601,7 @@ def compute_projection(
             # #2: line-blend stdev reduction for combo stats
             _cs = projections[combo_stat].get("projStdev") or 0
             if _cs > 0:
-                projections[combo_stat]["projStdev"] = max(safe_round(_cs * math.sqrt(0.70), 2), 0.5)
+                projections[combo_stat]["projStdev"] = max(safe_round(_cs * _LINE_BLEND_STDEV_FACTOR, 2), 0.5)
 
         opp_context = None
         if opp_def:
@@ -504,6 +649,8 @@ def compute_projection_simple(
     season=None,
     blend_with_line=None,
     as_of_date=None,
+    opponent_is_b2b=False,
+    game_total=None,
 ):
     return compute_projection(
         player_id=player_id,
@@ -514,4 +661,6 @@ def compute_projection_simple(
         blend_with_line=blend_with_line,
         model_variant="simple",
         as_of_date=as_of_date,
+        opponent_is_b2b=opponent_is_b2b,
+        game_total=game_total,
     )

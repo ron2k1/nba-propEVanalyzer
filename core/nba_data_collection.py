@@ -1714,6 +1714,27 @@ def get_matchup_history(logs, opponent_abbr):
         }
     return result
 
+def get_game_total(home_abbr: str, away_abbr: str, date_str: str = None):
+    """
+    Look up the game O/U total from LineStore h2h snapshots.
+    Returns float or None. Season average is ~226.
+
+    Currently returns None because LineStore only stores player props (pts/reb/ast/pra),
+    not h2h totals. Callers may pass game_total explicitly to compute_projection()
+    instead. Safe fallback — no API credit spend.
+    """
+    try:
+        from .nba_line_store import LineStore
+        from datetime import datetime, timezone
+        ds = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # LineStore snapshots are player props only; h2h totals not yet collected.
+        # Future: add collect_lines --markets h2h and parse "total" stat rows.
+        _ = LineStore()  # ensure module importable; no-op
+        return None
+    except Exception:
+        return None
+
+
 def get_position_vs_team(opponent_team_id, season=None, as_of_date=None):
     """
     How do players collectively perform against this specific team vs their

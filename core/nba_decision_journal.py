@@ -46,6 +46,30 @@ SIGNAL_SPEC = {
         "blocked_prob_bins":   {2, 3, 4, 5, 6},  # 20-70% calibrated range: 20-30% bin -8.6% ROI on 127 real-line bets; raised 2026-03-01
         "real_line_required_stats": {"reb"},    # skip reb if no real Odds API line
         "paper_mode":          True,
+        # Pinnacle confirmation gate (Phase 1a)
+        # require_pinnacle=True: if referenceBook present, enforce threshold.
+        # If referenceBook absent (backtest, no Pinnacle call), gate is skipped.
+        "require_pinnacle":    True,
+        "pinnacle_thresholds": {0: 0.75, 1: 0.65},  # global bin → min no-vig for rec side
+        # Per-stat Pinnacle threshold (overrides global when set; gap #7)
+        # ast is a sharper market — raise bar; pts is broader distribution — lower bar
+        "pinnacle_min_no_vig_by_stat": {"pts": 0.62, "ast": 0.67, "reb": 0.62},
+        # High-variance role-instability block (Phase 2b)
+        "block_high_variance": True,
+        # Intraday CLV: informational only — stored in context_json (Phase 1c)
+        # Only set when ≥2 distinct timestamps exist for (player, stat, book, date)
+        "min_intraday_clv_pct": 0,
+        # reb: signal-eligible (for research/CLV tracking) but BETTING_POLICY blocks
+        # betting on it. Signals are still journaled for calibration data collection.
+        # Source tracking: all signals include context_json["source"] for ROI by source
+        # Gap 8.8: minimum number of books posting this prop for market validation.
+        # A prop offered by only 1 book may be a pricing error or test line — not consensus.
+        # Absent (backtest / older result dicts): gate is skipped for backward compat.
+        "min_books_offering": 2,
+        # Gap 8.12: maximum allowed cross-book line stdev (diagnostic, not a blocker yet).
+        # bookLineStdev=0 means all books quote identical lines (stale consensus risk).
+        # Stored in context_json for future CLV correlation analysis.
+        "max_book_line_dispersion": 0.75,
     }
 }
 CURRENT_SIGNAL_VERSION = "v1"
@@ -166,6 +190,41 @@ def _qualifies(prop_result: dict, stat: str, used_real_line=None) -> tuple:
                 pass
         if pct is not None and pct <= 72:
             return False, f"injury_return_g1_blocked:{tag}"
+    # Pinnacle confirmation gate (Phase 1a):
+    # Use the recommended side's no-vig probability. If require_pinnacle is True
+    # but no Pinnacle data was fetched (referenceBook absent), pass through — the
+    # caller is responsible for fetching Pinnacle (backtests legitimately skip this).
+    if spec.get("require_pinnacle"):
+        ref = (prop_result or {}).get("referenceBook") or {}
+        if ref:
+            # Determine recommended side from edge magnitudes
+            rec_side = "over" if eo >= eu else "under"
+            no_vig_rec = ref.get("noVigOver") if rec_side == "over" else ref.get("noVigUnder")
+            if no_vig_rec is None:
+                return False, f"no_pinnacle_no_vig_{rec_side}"
+            bin_idx = max(0, min(9, int(prob_over * 10)))
+            # Per-stat threshold (falls back to global pinnacle_thresholds)
+            _pinn_by_stat = spec.get("pinnacle_min_no_vig_by_stat", {})
+            _pinn_global  = spec.get("pinnacle_thresholds", {})
+            min_nv = _pinn_by_stat.get(stat_key) or _pinn_global.get(bin_idx)
+            if min_nv is not None and float(no_vig_rec) < min_nv:
+                return False, f"pinnacle_{rec_side}_too_low:{no_vig_rec:.3f}<{min_nv}"
+        # No referenceBook → Pinnacle not fetched (backtest or caller omitted) → pass through
+    # High-variance block (Phase 2b):
+    # If last-5 stdev > 1.5× full-window stdev, role/usage is unstable.
+    if spec.get("block_high_variance"):
+        proj_data = (prop_result or {}).get("projection") or {}
+        if proj_data.get("recentHighVariance") is True:
+            return False, "recent_high_variance"
+    # Gap 8.8: market depth gate.
+    # Block if nBooksOffering is present and below min_books_offering.
+    # If absent (backtest compat, older result dicts): skip check entirely.
+    _n_books_raw = (prop_result or {}).get("nBooksOffering")
+    if _n_books_raw is not None:
+        _n_books = int(_n_books_raw)
+        _min_books = int(spec.get("min_books_offering", 1))
+        if _n_books > 0 and _n_books < _min_books:
+            return False, f"only_one_book:{_n_books}"
     return True, ""
 
 

@@ -92,7 +92,16 @@ def _poisson_cdf(k, lam):
     return sum(_poisson_pmf(i, lam) for i in range(0, max(0, k) + 1))
 
 
-def compute_ev(projection, line, over_odds, under_odds, stdev=None, min_edge_threshold=None, stat=None, reference_probs=None):
+def compute_ev(
+    projection,
+    line,
+    over_odds,
+    under_odds,
+    stdev=None,
+    min_edge_threshold=None,
+    stat=None,
+    reference_probs=None,
+):
     if not over_odds or not under_odds:
         return None
     if min_edge_threshold is None:

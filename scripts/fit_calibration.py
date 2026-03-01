@@ -87,6 +87,11 @@ def _fit_bin_temp(p_raw, p_actual, min_T=1.0, max_T=8.0):
     return round(best_T, 2)
 
 
+def _weighted_avg(block):
+    """Count-weighted average of p_actual across a PAV block."""
+    return sum(x[1] * x[2] for x in block) / sum(x[2] for x in block)
+
+
 def _pav_weighted_bins(items):
     """
     Pool Adjacent Violators (PAV) isotonic regression — non-decreasing p_actual.
@@ -96,8 +101,7 @@ def _pav_weighted_bins(items):
     blocks = [[item] for item in items]
     i = 0
     while i < len(blocks) - 1:
-        wa = lambda blk: sum(x[1] * x[2] for x in blk) / sum(x[2] for x in blk)
-        if wa(blocks[i]) > wa(blocks[i + 1]):
+        if _weighted_avg(blocks[i]) > _weighted_avg(blocks[i + 1]):
             blocks[i:i + 2] = [blocks[i] + blocks[i + 1]]
             if i > 0:
                 i -= 1
@@ -106,13 +110,16 @@ def _pav_weighted_bins(items):
     return blocks
 
 
-def fit_bin_temperatures(bins, min_count=30):
+def fit_bin_temperatures(bins, min_count=30, min_pred=0.10, max_pred=0.90):
     """
     Fit per-bin temperatures from backtest calibration bins.
 
     Returns dict like {"70-80": 3.10, "60-70": 1.40, ...} using keys WITHOUT
     the trailing '%' (matching the EV engine lookup format), or None if < 2 bins
     have sufficient data.
+
+    min_pred / max_pred: filter out bins whose average predicted probability
+    falls outside this range (mirrors the same filter in fit_temperature).
     """
     eligible = []
     for b in bins:
@@ -122,7 +129,10 @@ def fit_bin_temperatures(bins, min_count=30):
         bin_lbl = b.get("bin", "").rstrip("%")
         if pred_pct is None or actual_pct is None or n < min_count:
             continue
-        eligible.append([pred_pct / 100.0, actual_pct / 100.0, n, bin_lbl])
+        p_pred = pred_pct / 100.0
+        if not (min_pred <= p_pred <= max_pred):
+            continue
+        eligible.append([p_pred, actual_pct / 100.0, n, bin_lbl])
 
     if len(eligible) < 2:
         return None
@@ -291,7 +301,12 @@ def main():
 
         # Piecewise (per-bin) calibration (#4)
         if not args.no_piecewise:
-            bin_temps = fit_bin_temperatures(bins, min_count=args.bin_min_count)
+            bin_temps = fit_bin_temperatures(
+                bins,
+                min_count=args.bin_min_count,
+                min_pred=args.min_pred,
+                max_pred=args.max_pred,
+            )
             if bin_temps:
                 result[f"{stat}_bins"] = bin_temps
                 print(f"  bin temps: {bin_temps}")
