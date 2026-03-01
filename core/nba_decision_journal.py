@@ -40,9 +40,9 @@ from .nba_bet_tracking import (
 SIGNAL_SPEC = {
     "v1": {
         "eligible_stats":      {"pts", "reb", "ast", "pra"},
-        "min_edge":            0.05,
-        "min_edge_by_stat":    {"reb": 0.08},   # reb calibration gap → higher bar
-        "min_confidence":      0.55,
+        "min_edge":            0.08,   # raised 2026-03-01: 0.05→0.08 (87d real-line data)
+        "min_edge_by_stat":    {"reb": 0.08, "ast": 0.09},  # ast: -1.11% ROI on 2,255 bets → higher bar
+        "min_confidence":      0.60,   # raised 2026-03-01: 0.55→0.60 (marginal 55-60% bin losing)
         "blocked_prob_bins":   {4, 5},          # 40-50% and 50-60% model probOver bins
         "real_line_required_stats": {"reb"},    # skip reb if no real Odds API line
         "paper_mode":          True,
@@ -272,7 +272,7 @@ class DecisionJournal:
                       s.stat, s.line, s.book, s.over_odds, s.under_odds,
                       s.recommended_side, s.recommended_edge
                FROM signals s
-               WHERE date(s.ts_utc,'localtime') = ?
+               WHERE date(datetime(substr(s.ts_utc,1,19), '-6 hours')) = ?
                AND s.signal_id NOT IN (SELECT signal_id FROM outcomes)""",
             (date_str,),
         )
@@ -388,7 +388,8 @@ class DecisionJournal:
                       o.result, o.pnl_units, o.clv_delta
                FROM signals s
                LEFT JOIN outcomes o ON s.signal_id = o.signal_id
-               WHERE date(s.ts_utc,'localtime') >= ? AND date(s.ts_utc,'localtime') <= ?""",
+               WHERE date(datetime(substr(s.ts_utc,1,19), '-6 hours')) >= ?
+                 AND date(datetime(substr(s.ts_utc,1,19), '-6 hours')) <= ?""",
             (date_from, date_to),
         )
         rows = cur.fetchall()
@@ -589,6 +590,76 @@ class DecisionJournal:
         }
 
     # ------------------------------------------------------------------
+    # CLV backfill — retroactively populate clv_delta for old outcomes
+    # ------------------------------------------------------------------
+
+    def backfill_clv(self, odds_store) -> dict:
+        """Retroactively compute CLV for all settled outcomes with clv_delta IS NULL."""
+        from .nba_odds_store import STAT_TO_MARKET
+        cur = self._conn.execute(
+            """SELECT o.outcome_id, o.settle_date,
+                      s.player_name, s.team_abbr, s.opponent_abbr,
+                      s.stat, s.line, s.recommended_side
+               FROM outcomes o
+               JOIN signals s ON s.signal_id = o.signal_id
+               WHERE o.clv_delta IS NULL AND o.result IS NOT NULL""",
+        )
+        rows = cur.fetchall()
+        cols = [
+            "outcome_id", "settle_date", "player_name", "team_abbr", "opponent_abbr",
+            "stat", "line", "recommended_side",
+        ]
+        records = [dict(zip(cols, r)) for r in rows]
+
+        filled = 0
+        skipped = 0
+        for rec in records:
+            try:
+                stat_key = str(rec.get("stat") or "").lower()
+                market = STAT_TO_MARKET.get(stat_key)
+                if not market:
+                    skipped += 1
+                    continue
+                date_str = str(rec.get("settle_date") or "")
+                event_id = odds_store.find_event_for_game(
+                    rec.get("team_abbr", ""), rec.get("opponent_abbr", ""), date_str
+                )
+                if not event_id:
+                    skipped += 1
+                    continue
+                cl = odds_store.get_closing_line(event_id, market, rec.get("player_name", ""))
+                if not cl:
+                    skipped += 1
+                    continue
+                close_line = cl.get("close_line")
+                clv_delta = _clv_line_delta(
+                    str(rec.get("recommended_side") or ""),
+                    _as_float(rec.get("line")),
+                    close_line,
+                )
+                self._conn.execute(
+                    """UPDATE outcomes
+                       SET clv_delta=?, close_line=?, close_over_odds=?, close_under_odds=?
+                       WHERE outcome_id=?""",
+                    (
+                        clv_delta, close_line,
+                        cl.get("close_over_odds"), cl.get("close_under_odds"),
+                        rec["outcome_id"],
+                    ),
+                )
+                filled += 1
+            except Exception:
+                skipped += 1
+
+        self._conn.commit()
+        return {
+            "success": True,
+            "totalOutcomes": len(records),
+            "filled": filled,
+            "skipped": skipped,
+        }
+
+    # ------------------------------------------------------------------
     # Signal listing
     # ------------------------------------------------------------------
 
@@ -596,7 +667,7 @@ class DecisionJournal:
         """Read-only signal listing."""
         clauses, vals = [], []
         if date_str:
-            clauses.append("date(s.ts_utc,'localtime')=?")
+            clauses.append("date(datetime(substr(s.ts_utc,1,19), '-6 hours'))=?")
             vals.append(date_str)
         if stat:
             clauses.append("s.stat=?")

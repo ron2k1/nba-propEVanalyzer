@@ -37,18 +37,15 @@ def handle_journal_command(command, argv):
             else:
                 idx += 1
 
-        odds_store = None
-        if odds_db_path:
-            from core.nba_odds_store import OddsStore
-            odds_store = OddsStore(db_path=odds_db_path)
+        from core.nba_odds_store import OddsStore
+        odds_store = OddsStore(db_path=odds_db_path or None)  # auto-loads default DB
 
         dj = DecisionJournal(db_path=db_path)
         try:
             result = dj.settle_signals_for_date(date_str, odds_store=odds_store)
         finally:
             dj.close()
-            if odds_store is not None:
-                odds_store.close()
+            odds_store.close()
         return result
 
     # -----------------------------------------------------------------------
@@ -210,11 +207,8 @@ def handle_journal_command(command, argv):
                 idx += 1
 
         from core.nba_bet_tracking import settle_entries_for_date
-
-        odds_store = None
-        if odds_db_path:
-            from core.nba_odds_store import OddsStore
-            odds_store = OddsStore(db_path=odds_db_path)
+        from core.nba_odds_store import OddsStore
+        odds_store = OddsStore(db_path=odds_db_path or None)  # auto-loads default DB
 
         jsonl_result = settle_entries_for_date(date_str)
         dj = DecisionJournal(db_path=db_path)
@@ -222,8 +216,7 @@ def handle_journal_command(command, argv):
             sqlite_result = dj.settle_signals_for_date(date_str, odds_store=odds_store)
         finally:
             dj.close()
-            if odds_store is not None:
-                odds_store.close()
+            odds_store.close()
 
         return {
             "success": True,
@@ -232,4 +225,43 @@ def handle_journal_command(command, argv):
             "decisionJournal": sqlite_result,
         }
 
+    # -----------------------------------------------------------------------
+    # journal_clv_backfill [--db <path>] [--odds-db <path>]
+    # Retroactively populate clv_delta for all settled outcomes with NULL CLV.
+    # -----------------------------------------------------------------------
+    if command == "journal_clv_backfill":
+        db_path = None
+        odds_db_path = None
+        idx = 2
+        while idx < len(argv):
+            if argv[idx] == "--db" and idx + 1 < len(argv):
+                db_path = argv[idx + 1]
+                idx += 2
+            elif argv[idx] == "--odds-db" and idx + 1 < len(argv):
+                odds_db_path = argv[idx + 1]
+                idx += 2
+            else:
+                idx += 1
+
+        from core.nba_odds_store import OddsStore
+        odds_store = OddsStore(db_path=odds_db_path or None)
+        dj = DecisionJournal(db_path=db_path)
+        try:
+            result = dj.backfill_clv(odds_store)
+        finally:
+            dj.close()
+            odds_store.close()
+        return result
+
     return None
+
+
+_COMMANDS = {
+    "journal_settle":        lambda argv: handle_journal_command("journal_settle", argv),
+    "journal_report":        lambda argv: handle_journal_command("journal_report", argv),
+    "journal_gate":          lambda argv: handle_journal_command("journal_gate", argv),
+    "journal_signals":       lambda argv: handle_journal_command("journal_signals", argv),
+    "journal_clv_backfill":  lambda argv: handle_journal_command("journal_clv_backfill", argv),
+    "paper_summary":         lambda argv: handle_journal_command("paper_summary", argv),
+    "paper_settle":          lambda argv: handle_journal_command("paper_settle", argv),
+}

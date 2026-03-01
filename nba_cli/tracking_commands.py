@@ -68,3 +68,12 @@ def handle_tracking_command(command, argv):
         return record_closing_values(date_str, updates)
 
     return None
+
+
+_COMMANDS = {
+    "settle_yesterday":     lambda argv: handle_tracking_command("settle_yesterday", argv),
+    "best_today":           lambda argv: handle_tracking_command("best_today", argv),
+    "results_yesterday":    lambda argv: handle_tracking_command("results_yesterday", argv),
+    "export_training_rows": lambda argv: handle_tracking_command("export_training_rows", argv),
+    "record_closing":       lambda argv: handle_tracking_command("record_closing", argv),
+}

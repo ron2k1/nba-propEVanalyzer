@@ -164,3 +164,12 @@ def handle_ml_command(command, argv):
         return result
 
     return None
+
+
+_COMMANDS = {
+    "train_projection_ml":           lambda argv: handle_ml_command("train_projection_ml", argv),
+    "train_projection_ml_per_stat":  lambda argv: handle_ml_command("train_projection_ml_per_stat", argv),
+    "train_quantile_projection":     lambda argv: handle_ml_command("train_quantile_projection", argv),
+    "promote_projection_ml":         lambda argv: handle_ml_command("promote_projection_ml", argv),
+    "train_model":                   lambda argv: handle_ml_command("train_model", argv),
+}

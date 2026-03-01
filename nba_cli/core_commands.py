@@ -149,3 +149,23 @@ def handle_core_command(command, argv):
         )
 
     return None
+
+
+_COMMANDS = {
+    "games":             lambda argv: handle_core_command("games", argv),
+    "teams":             lambda argv: handle_core_command("teams", argv),
+    "players":           lambda argv: handle_core_command("players", argv),
+    "player_log":        lambda argv: handle_core_command("player_log", argv),
+    "player_splits":     lambda argv: handle_core_command("player_splits", argv),
+    "defense":           lambda argv: handle_core_command("defense", argv),
+    "team_players":      lambda argv: handle_core_command("team_players", argv),
+    "player_position":   lambda argv: handle_core_command("player_position", argv),
+    "position_vs_team":  lambda argv: handle_core_command("position_vs_team", argv),
+    "roster_status":     lambda argv: handle_core_command("roster_status", argv),
+    "usage_adjust":      lambda argv: handle_core_command("usage_adjust", argv),
+    "usage_adjust_news": lambda argv: handle_core_command("usage_adjust_news", argv),
+    "injury_news":       lambda argv: handle_core_command("injury_news", argv),
+    "player_lookup":     lambda argv: handle_core_command("player_lookup", argv),
+    "odds":              lambda argv: handle_core_command("odds", argv),
+    "odds_live":         lambda argv: handle_core_command("odds_live", argv),
+}

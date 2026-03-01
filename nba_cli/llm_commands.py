@@ -140,3 +140,10 @@ def handle_llm_command(command, argv):
         return llm_line_reasoning(player_name, stat, line, projection)
 
     return None
+
+
+_COMMANDS = {
+    "llm_analyze": lambda argv: handle_llm_command("llm_analyze", argv),
+    "llm_injury":  lambda argv: handle_llm_command("llm_injury", argv),
+    "llm_line":    lambda argv: handle_llm_command("llm_line", argv),
+}

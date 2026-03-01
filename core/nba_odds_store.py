@@ -345,7 +345,8 @@ class OddsStore:
         for event_id, home_team, away_team in cur.fetchall():
             ht = (home_team or "").lower()
             at = (away_team or "").lower()
-            if home_frag in ht and away_frag in at:
+            # Try both orderings — signal may store team as "home" when DB has them reversed
+            if (home_frag in ht and away_frag in at) or (home_frag in at and away_frag in ht):
                 return event_id
         return None
 

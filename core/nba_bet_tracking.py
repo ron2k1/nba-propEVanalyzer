@@ -526,6 +526,34 @@ def settle_yesterday():
     return settle_entries_for_date(_yesterday_local_str())
 
 
+def _load_line_history(date_str):
+    """Load line-history JSONL for date_str → {(player_name_lower, stat_lower): [snapshots]}."""
+    import json as _json
+    path = DATA_DIR / "line_history" / f"{date_str}.jsonl"
+    if not path.exists():
+        return {}
+    lookup = {}
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                try:
+                    row = _json.loads(raw)
+                except Exception:
+                    continue
+                name = str(row.get("player_name") or "").lower()
+                stat = str(row.get("stat") or "").lower()
+                if name and stat:
+                    lookup.setdefault((name, stat), []).append(row)
+    except Exception:
+        return {}
+    for key in lookup:
+        lookup[key].sort(key=lambda r: str(r.get("timestamp_utc") or ""))
+    return lookup
+
+
 def best_plays_for_date(date_str=None, limit=15, unique_props=True):
     target = str(date_str or _today_local_str())
     entries = _load_journal_entries()
@@ -601,6 +629,43 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
             row["minutesCapApplied"] = bool(e["minutesCapApplied"])
         if e.get("minutesCapReason") is not None:
             row["minutesCapReason"] = str(e["minutesCapReason"])
+
+    # Enrich with line movement from today's collected snapshots
+    line_history = _load_line_history(target)
+    if line_history:
+        for row in top_rows:
+            p_name = str(row.get("playerName") or "").lower()
+            stat   = str(row.get("stat") or "").lower()
+            snaps  = line_history.get((p_name, stat))
+            # Fallback: last-name partial match
+            if not snaps and p_name:
+                last = p_name.strip().split()[-1]
+                if len(last) > 2:
+                    for (n, s), v in line_history.items():
+                        if s == stat and last in n:
+                            snaps = v
+                            break
+            if snaps:
+                open_line = _as_float(snaps[0].get("line"))
+                curr_line = _as_float(snaps[-1].get("line"))
+                if open_line is not None and curr_line is not None:
+                    delta = safe_round(curr_line - open_line, 2)
+                    side  = str(row.get("recommendedSide") or "").lower()
+                    if delta == 0:
+                        favorable = None          # flat — no movement
+                    elif side == "over":
+                        favorable = delta > 0     # line rose = market agrees with over = positive CLV direction
+                    elif side == "under":
+                        favorable = delta < 0     # line dropped = market agrees with under = positive CLV direction
+                    else:
+                        favorable = None
+                    row["lineMovement"] = {
+                        "openLine":      open_line,
+                        "currentLine":   curr_line,
+                        "lineDelta":     delta,
+                        "favorable":     favorable,
+                        "snapshotCount": len(snaps),
+                    }
 
     positive_edges = sum(1 for e in ranked if (_as_float(e.get("recommendedEvPct"), 0.0) or 0.0) > 0)
     return {

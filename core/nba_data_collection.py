@@ -55,7 +55,7 @@ PROJECTION_CONFIG = {
     "mins_trend":    (0.85, 1.15),   # minutes trend cap
     "combined":      (0.55, 1.60),   # total adjustment compound cap
     "dnp_min_threshold": 1,          # exclude games with min < this (DNP filter)
-    "min_edge_threshold": 0.05,      # minimum edge required for value verdicts (no-vig edge)
+    "min_edge_threshold": 0.08,      # raised 2026-03-01: 0.05→0.08 (30-40%/60-80% bins losing on 87d real-line data)
 }
 
 BETTING_POLICY = {

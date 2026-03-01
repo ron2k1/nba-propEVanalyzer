@@ -1,34 +1,28 @@
 #!/usr/bin/env python3
-"""CLI command routing."""
+"""CLI command routing — O(1) registry-based dispatch."""
 
-from .core_commands import handle_core_command
-from .ev_commands import handle_ev_command
-from .line_commands import handle_line_command
-from .llm_commands import handle_llm_command
-from .ml_commands import handle_ml_command
-from .shared import no_command_payload
-from .tracking_commands import handle_tracking_command
-from .journal_commands import handle_journal_command
+from .backtest_commands   import _COMMANDS as _BACKTEST
+from .core_commands       import _COMMANDS as _CORE
+from .ev_commands         import _COMMANDS as _EV
+from .journal_commands    import _COMMANDS as _JOURNAL
+from .line_commands       import _COMMANDS as _LINE
+from .llm_commands        import _COMMANDS as _LLM
+from .ml_commands         import _COMMANDS as _ML
+from .odds_commands       import _COMMANDS as _ODDS
+from .projection_commands import _COMMANDS as _PROJ
+from .tracking_commands   import _COMMANDS as _TRACKING
+from .shared              import no_command_payload
 
-_HANDLERS = (
-    handle_core_command,
-    handle_ev_command,
-    handle_line_command,
-    handle_llm_command,
-    handle_ml_command,
-    handle_tracking_command,
-    handle_journal_command,
-)
+_REGISTRY = {
+    **_CORE, **_EV, **_PROJ, **_BACKTEST,
+    **_LINE, **_ODDS, **_LLM, **_ML, **_TRACKING, **_JOURNAL,
+}
 
 
 def dispatch_cli(argv):
     if len(argv) < 2:
         return no_command_payload(), 1
-
-    command = argv[1]
-    for handler in _HANDLERS:
-        payload = handler(command, argv)
-        if payload is not None:
-            return payload, 0
-
-    return {"error": f"Unknown command: {command}"}, 0
+    handler = _REGISTRY.get(argv[1])
+    if handler is None:
+        return {"error": f"Unknown command: {argv[1]}"}, 0
+    return handler(argv), 0
