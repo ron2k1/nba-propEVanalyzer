@@ -26,7 +26,15 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements.txt 2>&1 || { echo "PIP INSTALL FAILED"; pip install -r requirements.txt --dry-run 2>&1 | tail -20; exit 1; }
+
+      - name: Verify environment
+        run: |
+          python --version
+          node --version
+          python -c "import sys; print('Python path:', sys.executable)"
+          python -m pip list --format=columns | grep -E "numpy|pandas|tabpfn|nba|scikit|xgboost|lightgbm"
+          ls web/app.js && echo "web/app.js EXISTS" || echo "web/app.js MISSING"
 
       - name: Run quality gate (quick)
         run: |
