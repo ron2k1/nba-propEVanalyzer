@@ -49,6 +49,7 @@ const PROP_MARKETS_PRESET = [
   "player_points_assists",
   "player_rebounds_assists",
 ].join(",");
+const DEFAULT_MAIN_BOOKMAKERS = "betmgm,draftkings,fanduel";
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -946,7 +947,7 @@ async function runStarterAccuracy() {
   if (d) {
     params.set("date", d);
   }
-  params.set("bookmakers", starterAccBookmakersInput.value.trim() || "draftkings,fanduel");
+  params.set("bookmakers", starterAccBookmakersInput.value.trim() || DEFAULT_MAIN_BOOKMAKERS);
   params.set("regions", starterAccRegionsInput.value.trim() || "us");
   params.set("sport", starterAccSportInput.value.trim() || "basketball_nba");
   params.set("modelVariant", starterAccModelInput.value.trim() || "full");
@@ -1029,7 +1030,7 @@ async function loadOdds(liveMode = false) {
   const params = new URLSearchParams({
     regions: $("oddsRegions").value.trim() || "us",
     markets: $("oddsMarkets").value.trim() || "h2h,spreads,totals",
-    bookmakers: $("oddsBookmakers").value.trim(),
+    bookmakers: $("oddsBookmakers").value.trim() || DEFAULT_MAIN_BOOKMAKERS,
     sport: $("oddsSport").value.trim() || "basketball_nba",
   });
   if (liveMode) {
@@ -1244,7 +1245,7 @@ autoSweepBtn.addEventListener("click", async () => {
     stat: $("stat").value,
     isB2b: $("isB2b").checked,
     regions: $("oddsRegions").value.trim() || "us",
-    bookmakers: $("oddsBookmakers").value.trim(),
+    bookmakers: $("oddsBookmakers").value.trim() || DEFAULT_MAIN_BOOKMAKERS,
     sport: $("oddsSport").value.trim() || "basketball_nba",
     topN: Math.max(1, Number(sweepTopNInput.value) || 15),
   };
