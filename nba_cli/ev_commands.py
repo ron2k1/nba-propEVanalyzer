@@ -376,8 +376,3 @@ _COMMANDS = {
     "auto_sweep": _handle_auto_sweep,
     "parlay_ev":  _handle_parlay_ev,
 }
-
-
-def handle_ev_command(command, argv):  # shim — router no longer calls this
-    h = _COMMANDS.get(command)
-    return h(argv) if h else None
