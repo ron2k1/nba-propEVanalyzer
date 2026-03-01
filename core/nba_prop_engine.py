@@ -102,11 +102,25 @@ def compute_prop_ev(
     sport="basketball_nba",
     model_variant="full",
     reference_book=None,
+    auto_pinnacle=True,
 ):
     stat_key = str(stat or "").lower().strip()
     line_val = float(line)
     preferred_books_csv = ",".join(PREFERRED_BOOKMAKERS)
     books_filter = _clean_bookmaker_csv(bookmakers, default_csv=preferred_books_csv)
+
+    # #7: Auto-Pinnacle — include pinnacle in the same fetch so we get its no-vig
+    # probability as a reference in one API call (no extra credit cost).
+    # Only added when the user hasn't specified an explicit reference_book.
+    _auto_pin = auto_pinnacle and not reference_book
+    if _auto_pin:
+        _existing_books = {_normalize_book_key(b) for b in books_filter.split(",") if b.strip()}
+        if "pinnacle" not in _existing_books:
+            books_filter_for_fetch = books_filter + ",pinnacle"
+        else:
+            books_filter_for_fetch = books_filter
+    else:
+        books_filter_for_fetch = books_filter
 
     proj_data = compute_projection(
         player_id=player_id,
@@ -145,12 +159,47 @@ def compute_prop_ev(
             is_home=is_home,
             stat=stat_key,
             regions=regions,
-            bookmakers=books_filter,
+            bookmakers=books_filter_for_fetch,
             sport=sport,
             odds_format="american",
         )
         if offers_data.get("success"):
             offers = offers_data.get("offers", []) or []
+
+            # #7: Auto-Pinnacle reference — extract Pinnacle offers within ±0.5 of
+            # target line and use their no-vig probability instead of the Normal CDF.
+            # Pinnacle is the sharpest book; their implied prob is more reliable than
+            # the model's 70% that actually hits at 40%.
+            if _auto_pin:
+                pin_offers = [
+                    o for o in offers
+                    if _normalize_book_key(o.get("bookmaker", "")) == "pinnacle"
+                ]
+                pin_over, pin_under = _best_side_prices_for_line(
+                    pin_offers, line_val, tolerance=0.501
+                )
+                if pin_over and pin_under:
+                    po = american_to_implied_prob(pin_over["odds"])
+                    pu = american_to_implied_prob(pin_under["odds"])
+                    total = (po or 0.0) + (pu or 0.0)
+                    if total > 0:
+                        reference_probs = {
+                            "over": po / total,
+                            "under": pu / total,
+                            "push": 0.0,
+                        }
+                        pin_line = float(pin_over.get("line", line_val))
+                        reference_book_meta = {
+                            "book": "pinnacle",
+                            "line": pin_line,
+                            "overOdds": pin_over["odds"],
+                            "underOdds": pin_under["odds"],
+                            "noVigOver": safe_round(po / total, 4),
+                            "noVigUnder": safe_round(pu / total, 4),
+                            "auto": True,
+                            "lineDelta": safe_round(abs(pin_line - line_val), 2),
+                        }
+
             best_over, best_under = _best_side_prices_for_line(offers, line_val, tolerance=0.051)
             if best_over:
                 best_over_odds = int(best_over["odds"])
