@@ -1725,25 +1725,88 @@ def get_matchup_history(logs, opponent_abbr):
         }
     return result
 
-def get_game_total(home_abbr: str, away_abbr: str, date_str: str = None):
+def get_yesterdays_team_abbrs(date_str: str = None) -> set:
     """
-    Look up the game O/U total from LineStore h2h snapshots.
-    Returns float or None. Season average is ~226.
-
-    Currently returns None because LineStore only stores player props (pts/reb/ast/pra),
-    not h2h totals. Callers may pass game_total explicitly to compute_projection()
-    instead. Safe fallback — no API credit spend.
+    Return the set of team abbreviations that played YESTERDAY relative to date_str.
+    Used for back-to-back detection: if a team played yesterday they are on a B2B today.
+    Uses NBA Stats API scoreboardv3 (free — no Odds API credits).
+    Falls back to empty set on any error.
     """
     try:
-        from .nba_line_store import LineStore
-        from datetime import datetime, timezone
-        ds = date_str or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        # LineStore snapshots are player props only; h2h totals not yet collected.
-        # Future: add collect_lines --markets h2h and parse "total" stat rows.
-        _ = LineStore()  # ensure module importable; no-op
-        return None
+        from datetime import datetime, timedelta
+        ds = date_str or datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.strptime(ds, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        data = retry_api_call(
+            lambda: scoreboardv3.ScoreboardV3(
+                game_date=yesterday, league_id="00", timeout=30
+            ).get_dict()
+        )
+        abbrs = set()
+        for g in (data.get("scoreboard", {}).get("games", []) or []):
+            ht = (g.get("homeTeam") or {}).get("teamTricode", "")
+            at = (g.get("awayTeam") or {}).get("teamTricode", "")
+            if ht: abbrs.add(ht.upper())
+            if at: abbrs.add(at.upper())
+        return abbrs
     except Exception:
-        return None
+        return set()
+
+
+def get_todays_game_totals(date_str: str = None) -> dict:
+    """
+    Fetch O/U game totals for all of today's NBA games via Odds API totals market.
+    Returns dict keyed by frozenset({home_abbr, away_abbr}) -> float.
+    One API call covers all games. Falls back to {} on error or missing key.
+    Season average is ~226; deviations drive pts projection multiplier.
+    """
+    try:
+        resp = _odds_api_get(
+            "sports/basketball_nba/odds",
+            params={
+                "regions": ODDS_DEFAULT_REGIONS,
+                "markets": "totals",
+                "oddsFormat": "american",
+                "dateFormat": "iso",
+            },
+        )
+        if not resp.get("success"):
+            return {}
+        totals = {}
+        for event in (resp.get("data") or []):
+            home_name = event.get("home_team", "")
+            away_name = event.get("away_team", "")
+            home_abbr = _abbr_from_team_name(home_name)
+            away_abbr = _abbr_from_team_name(away_name)
+            if not home_abbr or not away_abbr:
+                continue
+            # Take the first bookmaker that has a totals market
+            total_pt = None
+            for bm in (event.get("bookmakers") or []):
+                for mkt in (bm.get("markets") or []):
+                    if mkt.get("key") != "totals":
+                        continue
+                    for outcome in (mkt.get("outcomes") or []):
+                        if str(outcome.get("name", "")).lower() == "over":
+                            total_pt = float(outcome["point"])
+                            break
+                    if total_pt is not None:
+                        break
+                if total_pt is not None:
+                    break
+            if total_pt is not None:
+                totals[frozenset({home_abbr, away_abbr})] = total_pt
+        return totals
+    except Exception:
+        return {}
+
+
+def get_game_total(home_abbr: str, away_abbr: str, date_str: str = None) -> float | None:
+    """
+    Convenience wrapper: look up a single game's O/U total.
+    Returns float or None. Uses get_todays_game_totals() internally.
+    """
+    totals = get_todays_game_totals(date_str)
+    return totals.get(frozenset({home_abbr.upper(), away_abbr.upper()}))
 
 
 def get_position_vs_team(opponent_team_id, season=None, as_of_date=None):

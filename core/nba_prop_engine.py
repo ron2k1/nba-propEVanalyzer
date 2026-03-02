@@ -104,6 +104,8 @@ def compute_prop_ev(
     reference_book=None,
     auto_pinnacle=True,
     no_blend=False,
+    opponent_is_b2b=False,
+    game_total=None,
 ):
     stat_key = str(stat or "").lower().strip()
     line_val = float(line)
@@ -131,6 +133,8 @@ def compute_prop_ev(
         season=season,
         blend_with_line=None if no_blend else {stat_key: line_val},
         model_variant=model_variant,
+        opponent_is_b2b=opponent_is_b2b,
+        game_total=game_total,
     )
     if not proj_data.get("success"):
         return proj_data

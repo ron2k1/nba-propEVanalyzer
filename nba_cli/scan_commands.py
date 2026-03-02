@@ -16,10 +16,14 @@ def _handle_roster_sweep(argv):
     from core.nba_line_store import LineStore
     from core.nba_decision_journal import DecisionJournal, _qualifies
     from core.nba_model_training import american_to_implied_prob, compute_prop_ev
-    from core.nba_data_collection import safe_round
+    from core.nba_data_collection import safe_round, get_yesterdays_team_abbrs, get_todays_game_totals
     from nba_api.stats.static import players as nba_players_static
 
     date_str = argv[2] if len(argv) > 2 else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    # Build game context once before the loop (one scoreboard call + one Odds API call).
+    yesterday_teams = get_yesterdays_team_abbrs(date_str)   # free — NBA scoreboard
+    game_totals     = get_todays_game_totals(date_str)       # 1 Odds API credit for all games
 
     ls = LineStore()
     snaps = ls.get_snapshots(date_str)
@@ -93,6 +97,11 @@ def _handle_roster_sweep(argv):
                 skipped_list.append({"player": pname, "stat": stat, "reason": "missing_line_or_opponent"})
                 continue
 
+            opp_is_b2b  = opp_abbr.upper() in yesterday_teams
+            gtotal      = game_totals.get(frozenset({
+                (team_abbr or "").upper(), opp_abbr.upper()
+            }))
+
             result = compute_prop_ev(
                 player_id=player_id,
                 opponent_abbr=opp_abbr,
@@ -103,6 +112,8 @@ def _handle_roster_sweep(argv):
                 under_odds=int(under_odds or -110),
                 is_b2b=False,
                 player_team_abbr=team_abbr or None,
+                opponent_is_b2b=opp_is_b2b,
+                game_total=gtotal,
             )
 
             if not result.get("success"):
@@ -145,7 +156,10 @@ def _handle_roster_sweep(argv):
                 "source": "roster_sweep",
                 "book": book,
                 "snapshotTs": snap.get("timestamp_utc"),
+                "oppIsB2B": opp_is_b2b,
             }
+            if gtotal is not None:
+                ctx["gameTotal"] = gtotal
             ref_book = result.get("referenceBook")
             if ref_book:
                 ctx["referenceBook"] = ref_book
