@@ -37,6 +37,26 @@ def _handle_roster_sweep(argv):
             "message": "No snapshots found for date",
         }
 
+    # Filter out stale events: late-night games from yesterday bleed into
+    # today's UTC-dated JSONL file.  Only keep snapshots whose event matchup
+    # appears in today's actual NBA schedule.
+    from core.nba_data_collection import get_todays_games
+    _today_games = get_todays_games()
+    _today_matchups = set()
+    for _g in _today_games.get("games", []):
+        _h = _g.get("homeTeam", {}).get("abbreviation", "").upper()
+        _a = _g.get("awayTeam", {}).get("abbreviation", "").upper()
+        if _h and _a:
+            _today_matchups.add(frozenset({_h, _a}))
+    if _today_matchups:
+        snaps = [
+            s for s in snaps
+            if frozenset({
+                s.get("home_team_abbr", "").upper(),
+                s.get("away_team_abbr", "").upper(),
+            }) in _today_matchups
+        ]
+
     # Deduplicate: keep latest snapshot per (player, stat, book)
     latest = {}
     for s in sorted(snaps, key=lambda x: x.get("timestamp_utc", "")):
@@ -61,6 +81,50 @@ def _handle_roster_sweep(argv):
         else:
             if BOOK_PRIO.get(book, 99) < BOOK_PRIO.get(existing.get("book", ""), 99):
                 best_per_player_stat[key2] = snap
+
+    # Build player_name → team_abbr mapping from current rosters of today's
+    # playing teams only.  CommonTeamRoster reflects trades immediately,
+    # unlike LeagueDashPlayerStats which aggregates across the full season.
+    import re as _re
+
+    def _norm_name(n):
+        """Normalize player name for matching: strip periods, hyphens, lowercase."""
+        return _re.sub(r"[.\-'']", "", str(n)).lower().strip()
+
+    _player_team_map = {}  # normalized player name → uppercase team abbr
+    try:
+        from nba_api.stats.endpoints import commonteamroster as _ctr
+        from nba_api.stats.static import teams as _nba_teams
+        from core.nba_data_collection import CURRENT_SEASON, retry_api_call, API_DELAY
+        import time as _time
+
+        # Collect unique team abbreviations from today's snapshots
+        _playing_abbrs = set()
+        for _s in snaps:
+            for _k in ("home_team_abbr", "away_team_abbr"):
+                _v = (_s.get(_k) or "").upper()
+                if _v:
+                    _playing_abbrs.add(_v)
+
+        for _abbr in _playing_abbrs:
+            _tinfo = _nba_teams.find_team_by_abbreviation(_abbr)
+            if not _tinfo:
+                continue
+            try:
+                _time.sleep(API_DELAY)
+                _roster = retry_api_call(
+                    lambda tid=str(_tinfo["id"]): _ctr.CommonTeamRoster(
+                        team_id=tid, season=CURRENT_SEASON, timeout=30,
+                    )
+                ).get_normalized_dict().get("CommonTeamRoster", [])
+                for _row in _roster:
+                    _pn = _norm_name(_row.get("PLAYER", ""))
+                    if _pn:
+                        _player_team_map[_pn] = _abbr
+            except Exception:
+                continue
+    except Exception:
+        pass  # fallback: skip enrichment, rely on snapshot fields
 
     scanned = 0
     logged = 0
@@ -92,6 +156,24 @@ def _handle_roster_sweep(argv):
             team_abbr = snap.get("player_team_abbr", "")
             opp_abbr = snap.get("opponent_abbr", "")
             is_home = snap.get("is_home")
+
+            # Enrich missing team/opponent from player→team map + event context
+            if not team_abbr:
+                team_abbr = _player_team_map.get(_norm_name(pname), "")
+            h = snap.get("home_team_abbr", "").upper()
+            a = snap.get("away_team_abbr", "").upper()
+            if team_abbr and not opp_abbr:
+                if team_abbr.upper() == h:
+                    opp_abbr = a
+                    is_home = True
+                elif team_abbr.upper() == a:
+                    opp_abbr = h
+                    is_home = False
+
+            # Skip phantom players: team not in this event's matchup
+            if team_abbr and h and a and team_abbr.upper() not in (h, a):
+                skipped_list.append({"player": pname, "stat": stat, "reason": "team_not_in_event"})
+                continue
 
             if line is None or not opp_abbr:
                 skipped_list.append({"player": pname, "stat": stat, "reason": "missing_line_or_opponent"})
@@ -220,6 +302,131 @@ def _handle_roster_sweep(argv):
     }
 
 
+def _handle_top_picks(argv):
+    """
+    top_picks [limit]
+
+    Show top N policy-qualified picks for today + best 2-leg parlay.
+    Default limit is 5.
+    """
+    from itertools import combinations
+    from core.nba_bet_tracking import best_plays_for_date
+    from core.nba_parlay_engine import compute_parlay_ev
+    from core.nba_data_collection import safe_round
+
+    limit = int(argv[2]) if len(argv) > 2 else 5
+
+    result = best_plays_for_date(limit=max(limit, 20))
+    if not result.get("success"):
+        return {"success": False, "error": result.get("error", "best_plays_for_date failed")}
+
+    all_offers = result.get("topOffers") or []
+    qualified = [r for r in all_offers if r.get("policyQualified")]
+
+    # Load full journal entries for enrichment (probOver, odds, book not in topOffers)
+    from core.nba_bet_tracking import _load_journal_entries, _today_local_str
+    target = result.get("date") or _today_local_str()
+    entries = _load_journal_entries()
+    journal_by_key = {}
+    for e in entries:
+        if str(e.get("pickDate")) != target:
+            continue
+        key = (e.get("playerId"), str(e.get("stat", "")).lower())
+        journal_by_key[key] = e  # latest wins (entries are time-sorted)
+
+    top = qualified[:limit]
+
+    top_picks = []
+    for i, r in enumerate(top, 1):
+        ev_pct = r.get("recommendedEvPct") or 0.0
+        pid = r.get("playerId")
+        stat = str(r.get("stat", "")).lower()
+        je = journal_by_key.get((pid, stat)) or {}
+        top_picks.append({
+            "rank": i,
+            "playerName": r.get("playerName"),
+            "stat": r.get("stat"),
+            "line": r.get("line"),
+            "side": r.get("recommendedSide"),
+            "evPct": safe_round(float(ev_pct), 2),
+            "projection": r.get("projection"),
+            "odds": r.get("recommendedOdds"),
+            "probOver": je.get("probOver"),
+            "book": je.get("bestOverBook") or je.get("bestUnderBook") or "",
+            "opponentAbbr": r.get("opponentAbbr"),
+        })
+
+    # --- Best 2-leg parlay from top picks ---
+    best_parlay = None
+    if len(qualified) >= 2:
+        parlay_candidates = qualified[:min(len(qualified), 8)]  # cap combos
+        best_ev = -999
+        for a, b in combinations(parlay_candidates, 2):
+            # Skip same-player parlays (correlated, most books reject)
+            if a.get("playerId") == b.get("playerId"):
+                continue
+            legs = []
+            for pick in (a, b):
+                pid = pick.get("playerId")
+                stat = str(pick.get("stat", "")).lower()
+                je = journal_by_key.get((pid, stat)) or {}
+                side = str(pick.get("recommendedSide", "over")).lower()
+                legs.append({
+                    "probOver": je.get("probOver", 0.5),
+                    "side": side,
+                    "overOdds": je.get("overOdds", -110),
+                    "underOdds": je.get("underOdds", -110),
+                    "playerId": pid or 0,
+                    "playerTeam": je.get("playerTeamAbbr", ""),
+                    "stat": stat,
+                    "line": pick.get("line", 0),
+                })
+            pr = compute_parlay_ev(legs)
+            if pr.get("success") and (pr.get("evPercent", -999) > best_ev):
+                best_ev = pr["evPercent"]
+                best_parlay = {
+                    "leg1": {
+                        "playerName": a.get("playerName"),
+                        "stat": a.get("stat"),
+                        "line": a.get("line"),
+                        "side": a.get("recommendedSide"),
+                    },
+                    "leg2": {
+                        "playerName": b.get("playerName"),
+                        "stat": b.get("stat"),
+                        "line": b.get("line"),
+                        "side": b.get("recommendedSide"),
+                    },
+                    "jointProb": pr.get("jointProb"),
+                    "parlayOdds": pr.get("parlayAmericanOdds"),
+                    "evPercent": pr.get("evPercent"),
+                    "correlationImpact": pr.get("correlationImpact"),
+                    "verdict": pr.get("verdict"),
+                }
+
+    out = {
+        "success": True,
+        "date": result.get("date"),
+        "topPicks": top_picks,
+        "bestParlay": best_parlay,
+        "message": f"Top {len(top_picks)} picks" + (" + best 2-leg parlay" if best_parlay else ""),
+    }
+
+    # Human-readable summary
+    print(f"\n=== TOP PICKS  {out['date']} ===")
+    for p in top_picks:
+        print(f"  #{p['rank']}  {p['playerName']}  {p['stat']} {p['side']} {p['line']}  EV={p['evPct']:.1f}%  proj={p['projection']}  odds={p['odds']}")
+    if best_parlay:
+        l1, l2 = best_parlay["leg1"], best_parlay["leg2"]
+        print(f"\n  PARLAY: {l1['playerName']} {l1['stat']} {l1['side']} {l1['line']}")
+        print(f"       + {l2['playerName']} {l2['stat']} {l2['side']} {l2['line']}")
+        print(f"       EV={best_parlay['evPercent']:.1f}%  odds={best_parlay['parlayOdds']}  verdict={best_parlay['verdict']}")
+    print()
+
+    return out
+
+
 _COMMANDS = {
     "roster_sweep": _handle_roster_sweep,
+    "top_picks": _handle_top_picks,
 }

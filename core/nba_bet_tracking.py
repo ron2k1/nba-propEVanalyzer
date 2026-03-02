@@ -570,11 +570,43 @@ def _load_line_history(date_str):
     return lookup
 
 
+def _get_playing_teams_today():
+    """Return set of uppercase team abbreviations with a game today."""
+    try:
+        from .nba_data_collection import get_todays_games
+        result = get_todays_games()
+        teams = set()
+        for g in result.get("games", []):
+            h = g.get("homeTeam", {}).get("abbreviation", "")
+            a = g.get("awayTeam", {}).get("abbreviation", "")
+            if h:
+                teams.add(h.upper())
+            if a:
+                teams.add(a.upper())
+        return teams
+    except Exception:
+        return None  # graceful fallback — skip filter
+
+
 def best_plays_for_date(date_str=None, limit=15, unique_props=True):
     target = str(date_str or _today_local_str())
     entries = _load_journal_entries()
     filtered = [e for e in entries if str(e.get("pickDate")) == target]
     deduped = _dedupe_latest(filtered)
+
+    # Filter out phantom signals: players whose teams aren't playing today
+    playing_teams = _get_playing_teams_today()
+    if playing_teams is not None:
+        valid = []
+        for e in deduped:
+            team = str(e.get("playerTeamAbbr") or e.get("teamAbbr") or "").upper()
+            opp = str(e.get("opponentAbbr") or "").upper()
+            if team and team in playing_teams:
+                valid.append(e)
+            elif opp and opp in playing_teams:
+                valid.append(e)
+            # else: phantom signal — team not playing today, skip
+        deduped = valid
 
     ranked = []
     for e in deduped:
