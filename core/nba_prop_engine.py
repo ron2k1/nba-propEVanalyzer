@@ -103,6 +103,7 @@ def compute_prop_ev(
     model_variant="full",
     reference_book=None,
     auto_pinnacle=True,
+    no_blend=False,
 ):
     stat_key = str(stat or "").lower().strip()
     line_val = float(line)
@@ -128,7 +129,7 @@ def compute_prop_ev(
         is_home=is_home,
         is_b2b=is_b2b,
         season=season,
-        blend_with_line={stat_key: line_val},
+        blend_with_line=None if no_blend else {stat_key: line_val},
         model_variant=model_variant,
     )
     if not proj_data.get("success"):

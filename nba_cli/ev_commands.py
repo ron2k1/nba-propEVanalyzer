@@ -167,15 +167,18 @@ def _handle_prop_ev(argv):
     if err:
         return err
 
-    opponent = argv[3]
-    is_home = argv[4] == "1"
-    stat = argv[5]
-    line = float(argv[6])
-    over_odds = int(argv[7])
-    under_odds = int(argv[8])
-    is_b2b = (argv[9] == "1") if len(argv) > 9 else False
-    player_team_abbr = argv[10] if len(argv) > 10 else None
-    reference_book = argv[11] if len(argv) > 11 else None
+    no_blend = "--no-blend" in argv
+    clean_argv = [a for a in argv if a != "--no-blend"]
+
+    opponent = clean_argv[3]
+    is_home = clean_argv[4] == "1"
+    stat = clean_argv[5]
+    line = float(clean_argv[6])
+    over_odds = int(clean_argv[7])
+    under_odds = int(clean_argv[8])
+    is_b2b = (clean_argv[9] == "1") if len(clean_argv) > 9 else False
+    player_team_abbr = clean_argv[10] if len(clean_argv) > 10 else None
+    reference_book = clean_argv[11] if len(clean_argv) > 11 else None
     player_name = str(argv[2])
 
     result = compute_prop_ev(
@@ -189,6 +192,7 @@ def _handle_prop_ev(argv):
         is_b2b=is_b2b,
         player_team_abbr=player_team_abbr,
         reference_book=reference_book,
+        no_blend=no_blend,
     )
 
     result = _apply_usage_adjustment(
