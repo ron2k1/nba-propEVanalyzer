@@ -144,13 +144,67 @@ def _interpolate(args, ctx):
 
 # ── GPT-OSS summarization ─────────────────────────────────────────────────────
 
+def _trim_for_summary(step_results):
+    """Build a compact summary dict — GPT-OSS doesn't need full arrays."""
+    out = []
+    for s in step_results:
+        r = s.get("result") or {}
+        name = s["step"]
+        if name == "best_today":
+            out.append({
+                "step": name,
+                "ok": s["ok"],
+                "totalRanked": r.get("totalRanked"),
+                "positiveEdgeCount": r.get("positiveEdgeCount"),
+                "policyQualified": [
+                    {k: v for k, v in e.items()
+                     if k in ("playerName", "stat", "line", "recommendedSide",
+                               "recommendedEvPct", "recommendedOdds", "projection",
+                               "lineMovementConflict")}
+                    for e in (r.get("policyQualified") or [])
+                ],
+                "top5": [
+                    {k: v for k, v in e.items()
+                     if k in ("playerName", "stat", "line", "recommendedSide",
+                               "recommendedEvPct", "recommendedOdds", "projection",
+                               "policyQualified", "lineMovementConflict")}
+                    for e in (r.get("topOffers") or [])[:5]
+                ],
+            })
+        elif name == "roster_sweep":
+            out.append({
+                "step": name,
+                "ok": s["ok"],
+                "scanned": r.get("scanned"),
+                "logged": r.get("logged"),
+                "skipped": r.get("skipped"),
+                "top5": r.get("top5", []),
+            })
+        elif name == "collect_lines":
+            out.append({
+                "step": name,
+                "ok": s["ok"],
+                "eventCount": r.get("eventCount"),
+                "snapshotCount": r.get("snapshotCount"),
+            })
+        else:
+            # Generic: drop large arrays, keep top-level scalars
+            out.append({
+                "step": name,
+                "ok": s["ok"],
+                "result": {k: v for k, v in r.items()
+                           if not isinstance(v, (list, dict))},
+            })
+    return out
+
+
 def _summarize(workflow_name, step_results, dry_run=False):
     """Send collected step results to GPT-OSS and return a plain-English summary."""
     if dry_run:
         return "dry-run mode — no LLM call", "dry-run"
 
     payload = json.dumps(
-        {"workflow": workflow_name, "steps": step_results},
+        {"workflow": workflow_name, "steps": _trim_for_summary(step_results)},
         indent=2,
         default=str,
     )
