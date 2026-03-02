@@ -43,7 +43,7 @@ SIGNAL_SPEC = {
         "min_edge":            0.08,   # raised 2026-03-01: 0.05→0.08 (87d real-line data)
         "min_edge_by_stat":    {"reb": 0.08, "ast": 0.09},  # ast: -1.11% ROI on 2,255 bets → higher bar
         "min_confidence":      0.60,   # raised 2026-03-01: 0.55→0.60 (marginal 55-60% bin losing)
-        "blocked_prob_bins":   {2, 3, 4, 5, 6},  # 20-70% calibrated range: 20-30% bin -8.6% ROI on 127 real-line bets; raised 2026-03-01
+        "blocked_prob_bins":   {2, 3, 4, 5, 6, 7},  # 20-80% calibrated range; bin 7 added to match BETTING_POLICY (51.4% hit/-9.88% ROI on 107 real-line bets, 60d)
         "real_line_required_stats": {"reb"},    # skip reb if no real Odds API line
         "paper_mode":          True,
         # Pinnacle confirmation gate (Phase 1a)
