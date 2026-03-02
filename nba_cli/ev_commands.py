@@ -13,6 +13,7 @@ from core.nba_data_prep import compute_usage_adjustment
 from core.nba_injury_news import fetch_nba_injury_news
 from core.nba_llm_engine import llm_full_analysis
 from core.nba_model_training import (
+    american_to_implied_prob,
     compute_auto_line_sweep,
     compute_ev,
     compute_parlay_ev,
@@ -394,12 +395,34 @@ def _handle_auto_sweep(argv):
         # Decision Journal signal logging for auto_sweep
         best_ev_data = (result.get("bestRecommendation") or {}).get("ev") or {}
         stat_proj = (result.get("projections") or {}).get(stat) or result.get("projection") or {}
+
+        # Extract Pinnacle no-vig from rankedOffers if available — no extra API call needed.
+        # Populates referenceBook so the Pinnacle confirmation gate fires when Pinnacle
+        # was one of the swept books. Falls back to None (gate skipped) if absent.
+        _ref_book = None
+        for _offer in (result.get("rankedOffers") or []):
+            if str(_offer.get("bookmaker") or "").lower() == "pinnacle":
+                _po = american_to_implied_prob(_offer.get("overOdds"))
+                _pu = american_to_implied_prob(_offer.get("underOdds"))
+                if _po and _pu and (_po + _pu) > 0:
+                    _t = _po + _pu
+                    _ref_book = {
+                        "book": "pinnacle",
+                        "line": _offer.get("line"),
+                        "overOdds": _offer.get("overOdds"),
+                        "underOdds": _offer.get("underOdds"),
+                        "noVigOver": safe_round(_po / _t, 4),
+                        "noVigUnder": safe_round(_pu / _t, 4),
+                    }
+                break
+
         sweep_qual_result = {
             "ev": best_ev_data,
             "success": True,
-            "referenceBook": result.get("referenceBook"),
+            "referenceBook": _ref_book,
             "projection": stat_proj,
             "minutesProjection": result.get("minutesProjection"),
+            "nBooksOffering": result.get("nBooksOffering"),
         }
         qualifies_ok, _ = _qualifies(sweep_qual_result, stat, used_real_line=True)
         if qualifies_ok and best_ev_data:
