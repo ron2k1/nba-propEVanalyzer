@@ -33,7 +33,7 @@ import json
 import math
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -280,7 +280,7 @@ def main():
 
     result = {
         "_fitted_on": args.input,
-        "_fitted_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "_fitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "_min_count": args.min_count,
     }
 

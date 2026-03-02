@@ -13,7 +13,7 @@ outcomes - post-settlement win/loss/push + CLV data
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from os.path import abspath, dirname, join
 
 _ROOT = dirname(dirname(abspath(__file__)))
@@ -580,7 +580,7 @@ class DecisionJournal:
         min_positive_clv_pct=50.0,
     ) -> dict:
         """Rolling gate check over last window_days of settled outcomes."""
-        date_to = datetime.utcnow().date()
+        date_to = datetime.now(timezone.utc).date()
         date_from = date_to - timedelta(days=window_days)
         date_from_str = date_from.isoformat()
         date_to_str = date_to.isoformat()
