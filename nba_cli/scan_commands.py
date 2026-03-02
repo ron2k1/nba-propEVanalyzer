@@ -15,7 +15,7 @@ def _handle_roster_sweep(argv):
     """
     from core.nba_line_store import LineStore
     from core.nba_decision_journal import DecisionJournal, _qualifies
-    from core.nba_model_training import compute_prop_ev
+    from core.nba_model_training import american_to_implied_prob, compute_prop_ev
     from core.nba_data_collection import safe_round
     from nba_api.stats.static import players as nba_players_static
 
@@ -39,12 +39,18 @@ def _handle_roster_sweep(argv):
         key = (s.get("player_name", ""), s.get("stat", ""), s.get("book", ""))
         latest[key] = s
 
-    # Further deduplicate: per (player, stat), pick the highest-priority book
+    # Further deduplicate: per (player, stat), pick the highest-priority book.
+    # Pinnacle is tracked separately as a reference (not a betting book) so it
+    # can populate referenceBook for the Pinnacle confirmation gate in _qualifies().
     # Priority order: betmgm > draftkings > fanduel > other
     BOOK_PRIO = {"betmgm": 0, "draftkings": 1, "fanduel": 2}
     best_per_player_stat = {}
+    pinnacle_per_player_stat = {}
     for (pname, stat, book), snap in latest.items():
         key2 = (pname, stat)
+        if book.lower() == "pinnacle":
+            pinnacle_per_player_stat[key2] = snap
+            continue
         existing = best_per_player_stat.get(key2)
         if existing is None:
             best_per_player_stat[key2] = snap
@@ -105,6 +111,24 @@ def _handle_roster_sweep(argv):
                     "reason": result.get("error", "ev_failed"),
                 })
                 continue
+
+            # Inject Pinnacle referenceBook from LineStore snapshots if available.
+            # No extra API call needed — Pinnacle data was already fetched by collect_lines.
+            # This activates the Pinnacle confirmation gate in _qualifies().
+            pinn_snap = pinnacle_per_player_stat.get((pname, stat))
+            if pinn_snap and result.get("referenceBook") is None:
+                _po = american_to_implied_prob(pinn_snap.get("over_odds"))
+                _pu = american_to_implied_prob(pinn_snap.get("under_odds"))
+                if _po and _pu and (_po + _pu) > 0:
+                    _t = _po + _pu
+                    result["referenceBook"] = {
+                        "book": "pinnacle",
+                        "line": pinn_snap.get("line"),
+                        "overOdds": pinn_snap.get("over_odds"),
+                        "underOdds": pinn_snap.get("under_odds"),
+                        "noVigOver": safe_round(_po / _t, 4),
+                        "noVigUnder": safe_round(_pu / _t, 4),
+                    }
 
             qualifies_ok, skip_reason = _qualifies(result, stat, used_real_line=True)
             if not qualifies_ok:
