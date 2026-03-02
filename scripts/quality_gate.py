@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
 FATAL_PATTERNS = [
     (
         "llm_projection_stub",
@@ -103,6 +104,28 @@ def _json_from_last_line(raw: str) -> dict | None:
         return json.loads(lines[-1])
     except Exception:
         return None
+
+
+def _parse_json_with_fallback(stdout: str) -> tuple[dict, str | None]:
+    """
+    Parse a JSON object from subprocess stdout.
+    First attempts to parse the full stdout; if that fails, scans backwards
+    for the last '{' to skip any banner text that precedes the JSON payload.
+    Returns (parsed_dict, parse_error_or_None).
+    """
+    text = (stdout or "").strip()
+    if not text:
+        return {}, None
+    try:
+        return json.loads(text), None
+    except Exception as first_err:
+        brace_idx = text.rfind("{")
+        if brace_idx >= 0:
+            try:
+                return json.loads(text[brace_idx:]), None
+            except Exception as second_err:
+                return {}, f"{first_err}; fallback={second_err}"
+        return {}, str(first_err)
 
 
 def _smoke_llm(pyexe: str) -> tuple[bool, str]:
@@ -205,30 +228,10 @@ def main() -> int:
 
         # LineStore → OddsStore bridge smoke
         cp = _run([pyexe, "scripts/validate_line_bridge.py"], timeout=120)
-        last_line = cp.stdout.splitlines()[-1] if cp.stdout else ""
-        stdout_str = (cp.stdout or "").strip()
-        parse_error = None
-        if stdout_str:
-            try:
-                vj = json.loads(stdout_str)
-            except Exception as e:
-                parse_error = str(e)
-                # Fallback: parse from the last '{' to end, in case banner text precedes JSON.
-                brace_idx = stdout_str.rfind("{")
-                if brace_idx >= 0:
-                    try:
-                        vj = json.loads(stdout_str[brace_idx:])
-                        parse_error = None
-                    except Exception as e2:
-                        vj = {}
-                        parse_error = f"{parse_error}; fallback={e2}"
-                else:
-                    vj = {}
-        else:
-            vj = {}
+        vj, parse_error = _parse_json_with_fallback(cp.stdout)
         bridge_ok = cp.returncode == 0 and isinstance(vj, dict) and vj.get("ok") is True
         if parse_error:
-            bridge_detail = {"parseError": parse_error, "stdoutTail": cp.stdout[-300:]}
+            bridge_detail = {"parseError": parse_error, "stdoutTail": (cp.stdout or "")[-300:]}
         else:
             bridge_detail = vj.get("checks", []) if isinstance(vj, dict) else []
         report["checks"].append({"name": "line_bridge_smoke", "ok": bridge_ok, "detail": bridge_detail})

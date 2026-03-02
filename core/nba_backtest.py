@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Historical backtesting utilities for projection and EV calibration."""
 
+import json
 import math
+import os
 import time
 from datetime import datetime, timedelta
 
@@ -44,6 +46,58 @@ MODEL_VERSION_SUMMARY = {
     },
     "bettingPolicy": "statWhitelist, blockedProbBins, minEdgeThreshold from nba_data_collection",
 }
+
+# ---------------------------------------------------------------------------
+# Date-aware policy versioning
+# ---------------------------------------------------------------------------
+_POLICY_HISTORY = None
+
+
+def _get_policy_for_date(date_str):
+    """Return the BETTING_POLICY that was active on *date_str* (YYYY-MM-DD).
+
+    Loads ``models/policy_history.json`` (cached after first call).
+    Falls back to the current ``BETTING_POLICY`` if the file is missing,
+    invalid, or *date_str* is before every recorded entry.
+    """
+    global _POLICY_HISTORY
+    if _POLICY_HISTORY is None:
+        policy_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "models",
+            "policy_history.json",
+        )
+        try:
+            with open(policy_path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if not isinstance(raw, list) or len(raw) == 0:
+                _POLICY_HISTORY = []
+            else:
+                _POLICY_HISTORY = sorted(raw, key=lambda e: e["effective_from"])
+        except (OSError, json.JSONDecodeError, KeyError):
+            _POLICY_HISTORY = []
+
+    # Find the latest entry whose effective_from <= date_str
+    matched = None
+    for entry in _POLICY_HISTORY:
+        if entry["effective_from"] <= date_str:
+            matched = entry
+        else:
+            break
+
+    if matched is None:
+        # Before all recorded entries — fall back to current BETTING_POLICY
+        return {
+            "stat_whitelist": set(BETTING_POLICY.get("stat_whitelist", set())),
+            "blocked_bins": set(BETTING_POLICY.get("blocked_prob_bins", set())),
+            "min_edge": BETTING_POLICY.get("min_edge_threshold", 0.05),
+        }
+
+    return {
+        "stat_whitelist": set(matched["stat_whitelist"]),
+        "blocked_bins": set(int(b) for b in matched["blocked_bins"]),
+        "min_edge": float(matched["min_edge"]),
+    }
 
 
 def _parse_date(value):
@@ -266,6 +320,13 @@ def _new_accumulator():
         "realLineStatRoi": {s: {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0}
                             for s in TRACKED_STATS},
         "realLineCalibBins": {i: {"count": 0, "wins": 0, "pnlUnits": 0.0} for i in range(10)},
+        # CLV tracking: opening line vs closing line per bet
+        "clvBetsTracked":    0,
+        "clvPositiveCount":  0,
+        "clvLineSumPositive": 0.0,
+        "clvLineSumNegative": 0.0,
+        "roiClvPositive": {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
+        "roiClvNegative": {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
     }
 
 
@@ -279,6 +340,22 @@ def _finalize_roi_seg(seg):
         "pnlUnits":     safe_round(seg["pnlUnits"], 4),
         "hitRatePct":   safe_round(seg["wins"] / b * 100.0, 3) if b else None,
         "roiPctPerBet": safe_round(seg["pnlUnits"] / b * 100.0, 3) if b else None,
+    }
+
+
+def _finalize_clv(acc):
+    """Produce the clv summary dict from raw accumulator CLV fields."""
+    n   = acc["clvBetsTracked"]
+    pos = acc["clvPositiveCount"]
+    neg = n - pos
+    return {
+        "betsTracked":        n,
+        "positiveCount":      pos,
+        "positiveClvPct":     safe_round(pos / n * 100.0, 2) if n else None,
+        "avgClvLinePositive": safe_round(acc["clvLineSumPositive"] / pos, 3) if pos else None,
+        "avgClvLineNegative": safe_round(acc["clvLineSumNegative"] / neg, 3) if neg else None,
+        "roiClvPositive":     _finalize_roi_seg(acc["roiClvPositive"]),
+        "roiClvNegative":     _finalize_roi_seg(acc["roiClvNegative"]),
     }
 
 
@@ -333,6 +410,7 @@ def _finalize_accumulator(acc):
         "roiSynth":          _finalize_roi_seg(acc["roiSynth"]),
         "realLineStatRoi":   {s: _finalize_roi_seg(acc["realLineStatRoi"][s])
                               for s in TRACKED_STATS},
+        "clv": _finalize_clv(acc),
         "realLineCalibBins": [
             {
                 "bin":          f"{i*10}-{(i+1)*10}%",
@@ -371,6 +449,8 @@ def run_backtest(
     odds_db=None,
     local_index=None,
     odds_only=False,
+    compute_clv=False,
+    walk_forward=False,
 ):
     """
     Backtest projection + EV quality for one day or a date range.
@@ -385,6 +465,9 @@ def run_backtest(
     odds_only: if True, skip any player-stat pair without a real closing line
                (no synthetic ±0.5 fallback). Requires odds_source="local_history".
                missingLineSamples will be 0 in the output.
+    walk_forward: if True, use date-specific calibration (models/walk_forward/)
+                  and date-specific policy (models/policy_history.json) for each
+                  backtest day. Eliminates calibration lookahead and policy snooping.
     """
     import copy as _copy
     import json as _json
@@ -427,6 +510,9 @@ def run_backtest(
             _odds_stat_to_market = _STM
         except Exception as e:
             return {"success": False, "error": f"Failed to init OddsStore: {e}"}
+
+    # Cache opening lines to avoid redundant DB queries (keyed by event_id+market+player)
+    _open_line_cache = {}
 
     bref_store = None
     bref_summary = None
@@ -539,6 +625,7 @@ def run_backtest(
             )
             season = _season_from_date(day)
             as_of_date = day.isoformat()
+            _day_policy = _get_policy_for_date(as_of_date) if walk_forward else None
 
             day_proj_calls = 0
             day_samples_start = sum(accumulators[m]["sampleCount"] for m in models)
@@ -685,6 +772,7 @@ def run_backtest(
                             if odds_only and not _used_real_line:
                                 continue
 
+                            _as_of = day.isoformat() if walk_forward else None
                             ev = compute_ev(
                                 projected,
                                 line,
@@ -692,6 +780,7 @@ def run_backtest(
                                 under_odds,
                                 stdev=stdev_val,
                                 stat=stat,
+                                as_of_date=_as_of,
                             )
                             if not ev:
                                 continue
@@ -726,12 +815,17 @@ def run_backtest(
                                 chosen_odds = under_odds
 
                             edge = abs(float(chosen.get("edge") or 0.0))
-                            meets_threshold = bool(chosen.get("meetsThreshold")) or (
-                                edge >= float(PROJECTION_CONFIG.get("min_edge_threshold", 0.05))
-                            )
-                            _bp = BETTING_POLICY
-                            _stat_ok = stat in _bp.get("stat_whitelist", TRACKED_STATS)
-                            _bin_ok = bin_idx not in _bp.get("blocked_prob_bins", set())
+                            if walk_forward:
+                                _stat_ok = stat in _day_policy["stat_whitelist"]
+                                _bin_ok = bin_idx not in _day_policy["blocked_bins"]
+                                meets_threshold = edge >= _day_policy["min_edge"]
+                            else:
+                                _bp = BETTING_POLICY
+                                _stat_ok = stat in _bp.get("stat_whitelist", TRACKED_STATS)
+                                _bin_ok = bin_idx not in _bp.get("blocked_prob_bins", set())
+                                meets_threshold = bool(chosen.get("meetsThreshold")) or (
+                                    edge >= float(PROJECTION_CONFIG.get("min_edge_threshold", 0.05))
+                                )
                             if (
                                 float(chosen.get("evPercent") or 0.0) > 0.0
                                 and meets_threshold
@@ -776,6 +870,39 @@ def run_backtest(
                                     if outcome == "win":
                                         cb["wins"] += 1
 
+                                    # CLV: compare opening line to closing line
+                                    if compute_clv and odds_store is not None and odds_event_id:
+                                        _clv_key = (odds_event_id, _market, _player_full_name)
+                                        if _clv_key not in _open_line_cache:
+                                            _open_line_cache[_clv_key] = odds_store.get_opening_line(
+                                                odds_event_id, _market, _player_full_name
+                                            )
+                                        _open = _open_line_cache[_clv_key]
+                                        if _open and _open.get("open_line") is not None:
+                                            # clv_line > 0 means the opening line was better for our side
+                                            # UNDER: good when open_line > close_line (higher threshold at open)
+                                            # OVER:  good when open_line < close_line (lower threshold at open)
+                                            _clv_line = (
+                                                (_open["open_line"] - line)
+                                                * (1 if chosen_side == "under" else -1)
+                                            )
+                                            acc["clvBetsTracked"] += 1
+                                            if _clv_line > 0:
+                                                acc["clvPositiveCount"]   += 1
+                                                acc["clvLineSumPositive"] += _clv_line
+                                                _clv_seg = acc["roiClvPositive"]
+                                            else:
+                                                acc["clvLineSumNegative"] += _clv_line
+                                                _clv_seg = acc["roiClvNegative"]
+                                            _clv_seg["betsPlaced"] += 1
+                                            _clv_seg["pnlUnits"]   += pnl
+                                            if outcome == "win":
+                                                _clv_seg["wins"] += 1
+                                            elif outcome == "loss":
+                                                _clv_seg["losses"] += 1
+                                            else:
+                                                _clv_seg["pushes"] += 1
+
             # End-of-day summary + checkpoint.
             day_samples = sum(accumulators[m]["sampleCount"] for m in models) - day_samples_start
             print(
@@ -818,10 +945,14 @@ def run_backtest(
             "modelsEvaluated": models,
             "stats": TRACKED_STATS,
             "minEdgeThreshold": PROJECTION_CONFIG.get("min_edge_threshold", 0.05),
-            "bettingPolicy": {
-                "statWhitelist": sorted(BETTING_POLICY.get("stat_whitelist", set())),
-                "blockedProbBins": sorted(BETTING_POLICY.get("blocked_prob_bins", set())),
-            },
+            "bettingPolicy": (
+                {"mode": "walk_forward", "source": "models/policy_history.json"}
+                if walk_forward
+                else {
+                    "statWhitelist": sorted(BETTING_POLICY.get("stat_whitelist", set())),
+                    "blockedProbBins": sorted(BETTING_POLICY.get("blocked_prob_bins", set())),
+                }
+            ),
             "modelVersion": MODEL_VERSION_SUMMARY,
             "reports": model_reports,
         }
@@ -831,6 +962,7 @@ def run_backtest(
             response["localIndexPath"] = getattr(local_provider, "index_path", None)
 
         response["fast"] = fast
+        response["walkForward"] = walk_forward
         if odds_key:
             response["oddsSource"] = odds_key
         if odds_only:
@@ -843,7 +975,8 @@ def run_backtest(
             _os.makedirs(results_dir, exist_ok=True)
             model_tag = model_key.replace(",", "-")
             realonly_tag = "_realonly" if odds_only else ""
-            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}.json"
+            wf_tag = "_wf" if walk_forward else ""
+            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}{wf_tag}.json"
             fpath = _os.path.join(results_dir, fname)
             with open(fpath, "w", encoding="utf-8") as fh:
                 _json.dump(response, fh, indent=2)

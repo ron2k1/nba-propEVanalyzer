@@ -103,6 +103,9 @@ def compute_prop_ev(
     model_variant="full",
     reference_book=None,
     auto_pinnacle=True,
+    no_blend=False,
+    opponent_is_b2b=False,
+    game_total=None,
 ):
     stat_key = str(stat or "").lower().strip()
     line_val = float(line)
@@ -128,8 +131,10 @@ def compute_prop_ev(
         is_home=is_home,
         is_b2b=is_b2b,
         season=season,
-        blend_with_line={stat_key: line_val},
+        blend_with_line=None if no_blend else {stat_key: line_val},
         model_variant=model_variant,
+        opponent_is_b2b=opponent_is_b2b,
+        game_total=game_total,
     )
     if not proj_data.get("success"):
         return proj_data
@@ -434,6 +439,47 @@ def compute_auto_line_sweep(
 
         projection_val = proj.get("projection")
         stdev_val = proj.get("projStdev") or proj.get("stdev") or 0
+
+        # Gap 8.12 + 8.8: compute cross-offer statistics once before the loop.
+        # These are per-player/stat aggregates, not per-offer values.
+        import statistics as _statistics
+        _all_lines = [
+            float(o["line"]) for o in offers
+            if o.get("line") is not None
+        ]
+        book_line_stdev = (
+            safe_round(_statistics.stdev(_all_lines), 3)
+            if len(_all_lines) >= 2
+            else 0.0
+        )
+        # Gap 8.8: count unique bookmakers across all offers for this player/stat
+        n_books_offering = len(set(
+            o.get("bookmaker") for o in offers if o.get("bookmaker")
+        ))
+
+        # Gap 8.12: stale consensus heuristic — compute median vig and median line
+        # across all valid offers for staleConsensus per-offer flag.
+        _all_vigs = []
+        for _o in offers:
+            _oi = american_to_implied_prob(_o.get("overOdds")) or 0.5
+            _ui = american_to_implied_prob(_o.get("underOdds")) or 0.5
+            _all_vigs.append(_oi + _ui - 1.0)
+        _median_vig = _statistics.median(_all_vigs) if _all_vigs else None
+        _median_line = _statistics.median(_all_lines) if _all_lines else None
+
+        # Gap 8.16: Cross-book line dispersion — identify outlier books whose line
+        # deviates from the median by > 0.4. A soft line is an exploitable edge.
+        # Informational: stored in result for context, not a blocking signal.
+        soft_line_books = (
+            [
+                o.get("bookmaker") for o in offers
+                if o.get("line") is not None and _median_line is not None
+                and abs(float(o["line"]) - _median_line) > 0.4
+            ]
+            if _median_line is not None
+            else []
+        )
+
         ranked = []
         for offer in offers:
             line = offer.get("line")
@@ -454,6 +500,22 @@ def compute_auto_line_sweep(
                 best_side = "under"
                 best_ev_pct = under_ev
 
+            # Gap 8.7: vig asymmetry — lower vig books have tighter spreads → higher EV
+            # vigSpread = sum of implied probs − 1.0; lower is better (less juice)
+            _over_imp = american_to_implied_prob(over_odds) or 0.5
+            _under_imp = american_to_implied_prob(under_odds) or 0.5
+            vig_spread = safe_round(_over_imp + _under_imp - 1.0, 4)
+
+            # Gap 8.12: stale consensus flag per offer.
+            # True when all books quote within 0.002 vig of each other AND within 0.25
+            # of the median line — indicates no sharp action / stale market.
+            if _median_vig is not None and _median_line is not None:
+                _vig_close = abs((_over_imp + _under_imp - 1.0) - _median_vig) <= 0.002
+                _line_close = abs(float(line) - _median_line) <= 0.25
+                stale_consensus = _vig_close and _line_close
+            else:
+                stale_consensus = False
+
             ranked.append(
                 {
                     "bookmaker": offer.get("bookmaker"),
@@ -470,6 +532,8 @@ def compute_auto_line_sweep(
                     "edgeUnder": (ev.get("under") or {}).get("edge"),
                     "overVerdict": (ev.get("over") or {}).get("verdict"),
                     "underVerdict": (ev.get("under") or {}).get("verdict"),
+                    "vigSpread": vig_spread,
+                    "staleConsensus": stale_consensus,
                     "ev": ev,
                 }
             )
@@ -488,6 +552,7 @@ def compute_auto_line_sweep(
         ranked.sort(
             key=lambda x: (
                 x.get("bestEvPct", -9999),
+                -(x.get("vigSpread") or 0.10),   # lower vig → less negative → ranks higher
                 -abs((x.get("line") or 0) - (projection_val or 0)),
                 _book_priority_score(x.get("bookmaker")),
             ),
@@ -523,6 +588,12 @@ def compute_auto_line_sweep(
             "fallbackUsed": fallback_used,
             "fallbackReason": fallback_reason,
             "bookmakersRequested": offer_data.get("bookmakersRequested"),
+            # Gap 8.8: number of unique books posting this prop (across all offers)
+            "nBooksOffering": n_books_offering,
+            # Gap 8.12: stdev of lines across all books (0.0 = identical lines)
+            "bookLineStdev": book_line_stdev,
+            # Gap 8.16: books whose line deviates from median by > 0.4 (soft line signal)
+            "softLineBooks": soft_line_books,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -617,25 +688,25 @@ def compute_live_projection(pregame_proj, live_stats, stat_key):
                 close_game_floor_applied = True
 
         projected_remaining = blended_per_min * adjusted_remaining_mins
-        live_projection = round(current_stat + projected_remaining, 1)
+        live_projection = safe_round(current_stat + projected_remaining, 1)
 
-        pace_pct = round(mins_played / projected_minutes * 100, 1) if projected_minutes > 0 else 0
+        pace_pct = safe_round(mins_played / projected_minutes * 100, 1) if projected_minutes > 0 else 0
 
         return {
             "success": True,
             "stat": stat_key,
             "liveProjection": live_projection,
             "currentStat": current_stat,
-            "minsPlayed": round(mins_played, 1),
-            "remainingMins": round(adjusted_remaining_mins, 1),
+            "minsPlayed": safe_round(mins_played, 1),
+            "remainingMins": safe_round(adjusted_remaining_mins, 1),
             "projectedMinutes": projected_minutes,
-            "perMinRate": round(blended_per_min, 4),
-            "basePerMinRate": round(per_min_rate, 4),
-            "livePerMinRate": round(live_per_min, 4),
-            "blendWeight": round(blend_weight, 3),
-            "minuteMultiplier": round(minute_multiplier, 3),
+            "perMinRate": safe_round(blended_per_min, 4),
+            "basePerMinRate": safe_round(per_min_rate, 4),
+            "livePerMinRate": safe_round(live_per_min, 4),
+            "blendWeight": safe_round(blend_weight, 3),
+            "minuteMultiplier": safe_round(minute_multiplier, 3),
             "closeGameFloor": close_game_floor_applied,
-            "shotAttempts": round(shot_attempts, 2),
+            "shotAttempts": safe_round(shot_attempts, 2),
             "pregameProjection": pregame_projection,
             "gamePacePct": pace_pct,
         }

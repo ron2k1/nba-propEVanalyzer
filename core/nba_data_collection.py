@@ -60,7 +60,7 @@ PROJECTION_CONFIG = {
 
 BETTING_POLICY = {
     "stat_whitelist": {"pts", "ast"},  # reb removed 2026-02-28: -5.34% ROI; pra removed 2026-03-01: -3.81% ROI on 318 real-line bets
-    "blocked_prob_bins": {2, 3, 4, 5, 6},  # 20-70% calibrated range: 20-30% bin -8.6% ROI on 127 real-line bets; raised 2026-03-01
+    "blocked_prob_bins": {2, 3, 4, 5, 6, 7},  # 20-80% calibrated range; bin 7 added 2026-03-01: 51.4% hit/-9.88% ROI on 107 real-line bets (60d)
     "min_ev_pct": 0.0,                 # evPercent floor
 }
 CURRENT_SEASON = get_season_string()
@@ -1064,15 +1064,26 @@ def get_todays_event_props_bulk(
             "quota":   events_resp.get("quota"),
         }
 
-    now    = datetime.utcnow()
-    events = [
-        e for e in (events_resp.get("data") or [])
-        if (
-            (lambda c: not c or (now - c.replace(tzinfo=None)).total_seconds() < 4 * 3600)(
-                _parse_iso_datetime(e.get("commence_time"))
-            )
-        )
-    ]
+    # Filter events to today's NBA schedule date (US/Eastern) + allow
+    # live games that started within the last 4 hours.
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("US/Eastern")
+    now      = datetime.now(timezone.utc)
+    today_et = now.astimezone(_ET).date()
+
+    def _event_is_today(e):
+        ct = _parse_iso_datetime(e.get("commence_time"))
+        if not ct:
+            return False                       # no commence_time → skip
+        ct_et = ct.astimezone(_ET)
+        if ct_et.date() != today_et:
+            return False                       # wrong date → skip
+        age = (now - ct).total_seconds()
+        if age > 4 * 3600:
+            return False                       # tipped off > 4 h ago → skip
+        return True
+
+    events = [e for e in (events_resp.get("data") or []) if _event_is_today(e)]
 
     if not events:
         return {
@@ -1713,6 +1724,90 @@ def get_matchup_history(logs, opponent_abbr):
             "stdev": safe_round(statistics.stdev(vals), 2) if len(vals) >= 2 else 0,
         }
     return result
+
+def get_yesterdays_team_abbrs(date_str: str = None) -> set:
+    """
+    Return the set of team abbreviations that played YESTERDAY relative to date_str.
+    Used for back-to-back detection: if a team played yesterday they are on a B2B today.
+    Uses NBA Stats API scoreboardv3 (free — no Odds API credits).
+    Falls back to empty set on any error.
+    """
+    try:
+        from datetime import datetime, timedelta
+        ds = date_str or datetime.now().strftime("%Y-%m-%d")
+        yesterday = (datetime.strptime(ds, "%Y-%m-%d") - timedelta(days=1)).strftime("%Y-%m-%d")
+        data = retry_api_call(
+            lambda: scoreboardv3.ScoreboardV3(
+                game_date=yesterday, league_id="00", timeout=30
+            ).get_dict()
+        )
+        abbrs = set()
+        for g in (data.get("scoreboard", {}).get("games", []) or []):
+            ht = (g.get("homeTeam") or {}).get("teamTricode", "")
+            at = (g.get("awayTeam") or {}).get("teamTricode", "")
+            if ht: abbrs.add(ht.upper())
+            if at: abbrs.add(at.upper())
+        return abbrs
+    except Exception:
+        return set()
+
+
+def get_todays_game_totals(date_str: str = None) -> dict:
+    """
+    Fetch O/U game totals for all of today's NBA games via Odds API totals market.
+    Returns dict keyed by frozenset({home_abbr, away_abbr}) -> float.
+    One API call covers all games. Falls back to {} on error or missing key.
+    Season average is ~226; deviations drive pts projection multiplier.
+    """
+    try:
+        resp = _odds_api_get(
+            "sports/basketball_nba/odds",
+            params={
+                "regions": ODDS_DEFAULT_REGIONS,
+                "markets": "totals",
+                "oddsFormat": "american",
+                "dateFormat": "iso",
+            },
+        )
+        if not resp.get("success"):
+            return {}
+        totals = {}
+        for event in (resp.get("data") or []):
+            home_name = event.get("home_team", "")
+            away_name = event.get("away_team", "")
+            home_abbr = _abbr_from_team_name(home_name)
+            away_abbr = _abbr_from_team_name(away_name)
+            if not home_abbr or not away_abbr:
+                continue
+            # Take the first bookmaker that has a totals market
+            total_pt = None
+            for bm in (event.get("bookmakers") or []):
+                for mkt in (bm.get("markets") or []):
+                    if mkt.get("key") != "totals":
+                        continue
+                    for outcome in (mkt.get("outcomes") or []):
+                        if str(outcome.get("name", "")).lower() == "over":
+                            total_pt = float(outcome["point"])
+                            break
+                    if total_pt is not None:
+                        break
+                if total_pt is not None:
+                    break
+            if total_pt is not None:
+                totals[frozenset({home_abbr, away_abbr})] = total_pt
+        return totals
+    except Exception:
+        return {}
+
+
+def get_game_total(home_abbr: str, away_abbr: str, date_str: str = None) -> float | None:
+    """
+    Convenience wrapper: look up a single game's O/U total.
+    Returns float or None. Uses get_todays_game_totals() internally.
+    """
+    totals = get_todays_game_totals(date_str)
+    return totals.get(frozenset({home_abbr.upper(), away_abbr.upper()}))
+
 
 def get_position_vs_team(opponent_team_id, season=None, as_of_date=None):
     """

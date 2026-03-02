@@ -13,11 +13,46 @@ outcomes - post-settlement win/loss/push + CLV data
 import os
 import sqlite3
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from os.path import abspath, dirname, join
 
 _ROOT = dirname(dirname(abspath(__file__)))
 _DEFAULT_DB_PATH = join(_ROOT, "data", "decision_journal", "decision_journal.sqlite")
+
+
+def _ct_day_utc_bounds(date_str):
+    """
+    Return (utc_start_iso, utc_end_exclusive_iso) for a US Central Time calendar day.
+
+    Accounts for CDT (UTC-5) vs CST (UTC-6):
+      CDT active: 2nd Sunday in March through (not including) 1st Sunday in November
+      CST active: all other dates
+
+    Example:
+      _ct_day_utc_bounds("2026-04-15")  -> ("2026-04-15T05:00:00Z", "2026-04-16T05:00:00Z")
+      _ct_day_utc_bounds("2026-01-10")  -> ("2026-01-10T06:00:00Z", "2026-01-11T06:00:00Z")
+    """
+    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    y = d.year
+    # 2nd Sunday in March (clocks spring forward at 2am CST → 3am CDT)
+    mar1 = datetime(y, 3, 1)
+    first_sun_mar = mar1 + timedelta(days=(6 - mar1.weekday()) % 7)
+    dst_start = (first_sun_mar + timedelta(weeks=1)).date()
+    # 1st Sunday in November (clocks fall back at 2am CDT → 1am CST)
+    nov1 = datetime(y, 11, 1)
+    dst_end = (nov1 + timedelta(days=(6 - nov1.weekday()) % 7)).date()
+
+    def _utc_offset_h(day):
+        return 5 if (dst_start <= day < dst_end) else 6
+
+    next_d = d + timedelta(days=1)
+    start_utc = datetime(d.year, d.month, d.day, _utc_offset_h(d), 0, 0)
+    end_utc   = datetime(next_d.year, next_d.month, next_d.day, _utc_offset_h(next_d), 0, 0)
+    return (
+        start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
 
 from .nba_data_collection import safe_round
 from .nba_bet_tracking import (
@@ -43,9 +78,33 @@ SIGNAL_SPEC = {
         "min_edge":            0.08,   # raised 2026-03-01: 0.05→0.08 (87d real-line data)
         "min_edge_by_stat":    {"reb": 0.08, "ast": 0.09},  # ast: -1.11% ROI on 2,255 bets → higher bar
         "min_confidence":      0.60,   # raised 2026-03-01: 0.55→0.60 (marginal 55-60% bin losing)
-        "blocked_prob_bins":   {2, 3, 4, 5, 6},  # 20-70% calibrated range: 20-30% bin -8.6% ROI on 127 real-line bets; raised 2026-03-01
+        "blocked_prob_bins":   {2, 3, 4, 5, 6, 7},  # 20-80% calibrated range; bin 7 added to match BETTING_POLICY (51.4% hit/-9.88% ROI on 107 real-line bets, 60d)
         "real_line_required_stats": {"reb"},    # skip reb if no real Odds API line
         "paper_mode":          True,
+        # Pinnacle confirmation gate (Phase 1a)
+        # require_pinnacle=True: if referenceBook present, enforce threshold.
+        # If referenceBook absent (backtest, no Pinnacle call), gate is skipped.
+        "require_pinnacle":    True,
+        "pinnacle_thresholds": {0: 0.75, 1: 0.65},  # global bin → min no-vig for rec side
+        # Per-stat Pinnacle threshold (overrides global when set; gap #7)
+        # ast is a sharper market — raise bar; pts is broader distribution — lower bar
+        "pinnacle_min_no_vig_by_stat": {"pts": 0.62, "ast": 0.67, "reb": 0.62},
+        # High-variance role-instability block (Phase 2b)
+        "block_high_variance": True,
+        # Intraday CLV: informational only — stored in context_json (Phase 1c)
+        # Only set when ≥2 distinct timestamps exist for (player, stat, book, date)
+        "min_intraday_clv_pct": 0,
+        # reb: signal-eligible (for research/CLV tracking) but BETTING_POLICY blocks
+        # betting on it. Signals are still journaled for calibration data collection.
+        # Source tracking: all signals include context_json["source"] for ROI by source
+        # Gap 8.8: minimum number of books posting this prop for market validation.
+        # A prop offered by only 1 book may be a pricing error or test line — not consensus.
+        # Absent (backtest / older result dicts): gate is skipped for backward compat.
+        "min_books_offering": 2,
+        # Gap 8.12: maximum allowed cross-book line stdev (diagnostic, not a blocker yet).
+        # bookLineStdev=0 means all books quote identical lines (stale consensus risk).
+        # Stored in context_json for future CLV correlation analysis.
+        "max_book_line_dispersion": 0.75,
     }
 }
 CURRENT_SIGNAL_VERSION = "v1"
@@ -166,6 +225,45 @@ def _qualifies(prop_result: dict, stat: str, used_real_line=None) -> tuple:
                 pass
         if pct is not None and pct <= 72:
             return False, f"injury_return_g1_blocked:{tag}"
+    # Pinnacle confirmation gate (Phase 1a):
+    # Use the recommended side's no-vig probability. If require_pinnacle is True
+    # but no Pinnacle data was fetched (referenceBook absent), pass through — the
+    # caller is responsible for fetching Pinnacle (backtests legitimately skip this).
+    if spec.get("require_pinnacle"):
+        ref = (prop_result or {}).get("referenceBook") or {}
+        if ref:
+            # Determine recommended side from edge magnitudes
+            rec_side = "over" if eo >= eu else "under"
+            no_vig_rec = ref.get("noVigOver") if rec_side == "over" else ref.get("noVigUnder")
+            if no_vig_rec is None:
+                return False, f"no_pinnacle_no_vig_{rec_side}"
+            bin_idx = max(0, min(9, int(prob_over * 10)))
+            # Per-stat threshold (falls back to global pinnacle_thresholds)
+            _pinn_by_stat = spec.get("pinnacle_min_no_vig_by_stat", {})
+            _pinn_global  = spec.get("pinnacle_thresholds", {})
+            min_nv = _pinn_by_stat.get(stat_key) or _pinn_global.get(bin_idx)
+            if min_nv is not None and float(no_vig_rec) < min_nv:
+                return False, f"pinnacle_{rec_side}_too_low:{no_vig_rec:.3f}<{min_nv}"
+        # No referenceBook → Pinnacle not fetched (backtest or caller omitted) → pass through
+    # High-variance block (Phase 2b):
+    # If last-5 stdev > 1.5× full-window stdev, role/usage is unstable.
+    if spec.get("block_high_variance"):
+        proj_data = (prop_result or {}).get("projection") or {}
+        if proj_data.get("recentHighVariance") is True:
+            return False, "recent_high_variance"
+    # Gap 8.16: cross-book line dispersion — informational only, no block.
+    # softLineBooks and bookLineStdev are stored in context_json by the caller
+    # when present. max_book_line_dispersion=0.75 is a future threshold for
+    # correlation analysis; dispersion alone is not a gating condition.
+    # Gap 8.8: market depth gate.
+    # Block if nBooksOffering is present and below min_books_offering.
+    # If absent (backtest compat, older result dicts): skip check entirely.
+    _n_books_raw = (prop_result or {}).get("nBooksOffering")
+    if _n_books_raw is not None:
+        _n_books = int(_n_books_raw)
+        _min_books = int(spec.get("min_books_offering", 1))
+        if _n_books > 0 and _n_books < _min_books:
+            return False, f"only_one_book:{_n_books}"
     return True, ""
 
 
@@ -267,14 +365,15 @@ class DecisionJournal:
         except ValueError:
             return {"success": False, "error": "Invalid date. Use YYYY-MM-DD.", "date": str(date_str)}
 
+        utc_start, utc_end = _ct_day_utc_bounds(date_str)
         cur = self._conn.execute(
             """SELECT s.signal_id, s.player_id, s.player_name, s.team_abbr, s.opponent_abbr,
                       s.stat, s.line, s.book, s.over_odds, s.under_odds,
                       s.recommended_side, s.recommended_edge
                FROM signals s
-               WHERE date(datetime(substr(s.ts_utc,1,19), '-6 hours')) = ?
+               WHERE s.ts_utc >= ? AND s.ts_utc < ?
                AND s.signal_id NOT IN (SELECT signal_id FROM outcomes)""",
-            (date_str,),
+            (utc_start, utc_end),
         )
         rows = cur.fetchall()
         cols = [
@@ -388,15 +487,16 @@ class DecisionJournal:
 
     def generate_report(self, date_from, date_to) -> dict:
         """Generate a performance report over a date range."""
+        utc_start, _    = _ct_day_utc_bounds(date_from)
+        _,        utc_end = _ct_day_utc_bounds(date_to)
         cur = self._conn.execute(
             """SELECT s.signal_id, s.stat, s.confidence, s.recommended_edge, s.used_real_line,
                       s.action_taken,
                       o.result, o.pnl_units, o.clv_delta
                FROM signals s
                LEFT JOIN outcomes o ON s.signal_id = o.signal_id
-               WHERE date(datetime(substr(s.ts_utc,1,19), '-6 hours')) >= ?
-                 AND date(datetime(substr(s.ts_utc,1,19), '-6 hours')) <= ?""",
-            (date_from, date_to),
+               WHERE s.ts_utc >= ? AND s.ts_utc < ?""",
+            (utc_start, utc_end),
         )
         rows = cur.fetchall()
         cols = [
@@ -517,7 +617,7 @@ class DecisionJournal:
         min_positive_clv_pct=50.0,
     ) -> dict:
         """Rolling gate check over last window_days of settled outcomes."""
-        date_to = datetime.utcnow().date()
+        date_to = datetime.now(timezone.utc).date()
         date_from = date_to - timedelta(days=window_days)
         date_from_str = date_from.isoformat()
         date_to_str = date_to.isoformat()
@@ -676,8 +776,9 @@ class DecisionJournal:
         """Read-only signal listing."""
         clauses, vals = [], []
         if date_str:
-            clauses.append("date(datetime(substr(s.ts_utc,1,19), '-6 hours'))=?")
-            vals.append(date_str)
+            _gs_start, _gs_end = _ct_day_utc_bounds(date_str)
+            clauses.append("s.ts_utc >= ? AND s.ts_utc < ?")
+            vals.extend([_gs_start, _gs_end])
         if stat:
             clauses.append("s.stat=?")
             vals.append(str(stat).lower())

@@ -2,6 +2,7 @@
 """EV CLI commands: prop_ev, prop_ev_ml, auto_sweep, parlay_ev."""
 
 import json
+from datetime import datetime, timezone
 
 from nba_api.stats.static import players as nba_players_static
 
@@ -12,6 +13,7 @@ from core.nba_data_prep import compute_usage_adjustment
 from core.nba_injury_news import fetch_nba_injury_news
 from core.nba_llm_engine import llm_full_analysis
 from core.nba_model_training import (
+    american_to_implied_prob,
     compute_auto_line_sweep,
     compute_ev,
     compute_parlay_ev,
@@ -73,6 +75,86 @@ def _apply_usage_adjustment(result, player_id, stat, line, over_odds, under_odds
     return result
 
 
+def _compute_intraday_clv(player_name, stat, book, recommended_side):
+    """
+    Compare the opening vs current LineStore snapshot for this player/stat/book.
+    Returns the intraday CLV line float (positive = line moved in our favour),
+    or None if fewer than 2 distinct timestamps exist or LineStore has no data.
+    """
+    try:
+        from core.nba_line_store import LineStore
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        book_hint = book if book != "user_supplied" else None
+        ls = LineStore()
+        all_snaps = ls.get_snapshots(today_str, book=book_hint, stat=stat, player_name=player_name)
+        distinct_ts = {s.get("timestamp_utc") for s in all_snaps if s.get("timestamp_utc")}
+        if len(distinct_ts) < 2:
+            return None
+        opening = min(all_snaps, key=lambda x: x.get("timestamp_utc", ""))
+        current = max(all_snaps, key=lambda x: x.get("timestamp_utc", ""))
+        o_line = opening.get("line")
+        c_line = current.get("line")
+        if o_line is None or c_line is None:
+            return None
+        # Positive = line moved in our favour (lower for over, higher for under)
+        if recommended_side == "over":
+            return round(float(c_line) - float(o_line), 2)
+        return round(float(o_line) - float(c_line), 2)
+    except Exception:
+        return None
+
+
+def _build_signal_context(source, result, stat, stat_proj, intraday_clv=None):
+    """Build the context dict passed to DecisionJournal.log_signal."""
+    ctx = {"source": source}
+    ref_book = result.get("referenceBook")
+    if ref_book:
+        ctx["referenceBook"] = ref_book
+    recent_hv = stat_proj.get("recentHighVariance")
+    if recent_hv is not None:
+        ctx["recentHighVariance"] = recent_hv
+    if intraday_clv is not None:
+        ctx["intradayClvLine"] = intraday_clv
+    return ctx
+
+
+def _log_dj_signal(result, player_id, player_name, team_abbr, opponent_abbr,
+                   stat, line, over_odds, under_odds, book, stat_proj,
+                   ev_data, used_real_line, context):
+    """
+    Log a qualifying signal to the DecisionJournal and annotate result with
+    journalSignalId / journalDuplicateSignal / journalSignalError.
+    """
+    eo = float((ev_data.get("over") or {}).get("edge") or 0.0)
+    eu = float((ev_data.get("under") or {}).get("edge") or 0.0)
+    rec = "over" if eo >= eu else "under"
+    dj = DecisionJournal()
+    djr = dj.log_signal(
+        player_id=player_id, player_name=player_name,
+        team_abbr=team_abbr or "", opponent_abbr=opponent_abbr,
+        stat=stat, line=line, book=book,
+        over_odds=over_odds, under_odds=under_odds,
+        projection=float(stat_proj.get("projection") or 0.0),
+        prob_over=float(ev_data.get("probOver") or 0.0),
+        prob_under=float(ev_data.get("probUnder") or 0.0),
+        edge_over=eo, edge_under=eu, recommended_side=rec,
+        recommended_edge=max(eo, eu),
+        confidence=max(
+            float(ev_data.get("probOver") or 0.0),
+            float(ev_data.get("probUnder") or 0.0),
+        ),
+        used_real_line=used_real_line, action_taken=0,
+        context=context,
+    )
+    dj.close()
+    if djr.get("isDuplicate"):
+        result["journalDuplicateSignal"] = True
+    elif djr.get("success"):
+        result["journalSignalId"] = djr.get("signalId")
+    else:
+        result["journalSignalError"] = djr.get("error")
+
+
 def _handle_prop_ev(argv):
     if len(argv) < 9:
         return {
@@ -86,15 +168,18 @@ def _handle_prop_ev(argv):
     if err:
         return err
 
-    opponent = argv[3]
-    is_home = argv[4] == "1"
-    stat = argv[5]
-    line = float(argv[6])
-    over_odds = int(argv[7])
-    under_odds = int(argv[8])
-    is_b2b = (argv[9] == "1") if len(argv) > 9 else False
-    player_team_abbr = argv[10] if len(argv) > 10 else None
-    reference_book = argv[11] if len(argv) > 11 else None
+    no_blend = "--no-blend" in argv
+    clean_argv = [a for a in argv if a != "--no-blend"]
+
+    opponent = clean_argv[3]
+    is_home = clean_argv[4] == "1"
+    stat = clean_argv[5]
+    line = float(clean_argv[6])
+    over_odds = int(clean_argv[7])
+    under_odds = int(clean_argv[8])
+    is_b2b = (clean_argv[9] == "1") if len(clean_argv) > 9 else False
+    player_team_abbr = clean_argv[10] if len(clean_argv) > 10 else None
+    reference_book = clean_argv[11] if len(clean_argv) > 11 else None
     player_name = str(argv[2])
 
     result = compute_prop_ev(
@@ -108,6 +193,7 @@ def _handle_prop_ev(argv):
         is_b2b=is_b2b,
         player_team_abbr=player_team_abbr,
         reference_book=reference_book,
+        no_blend=no_blend,
     )
 
     result = _apply_usage_adjustment(
@@ -169,45 +255,37 @@ def _handle_prop_ev(argv):
             result["journalError"] = journal_res.get("error")
 
         # Decision Journal signal logging
-        _ls  = result.get("lineShopping") or {}
-        _url = (
-            _ls.get("matchedLine") is not None
-            and _ls.get("bestOverOdds") is not None
+        line_shopping = result.get("lineShopping") or {}
+        used_real_line = (
+            line_shopping.get("matchedLine") is not None
+            and line_shopping.get("bestOverOdds") is not None
         )
-        _qualifies_ok, _skip = _qualifies(result, stat, used_real_line=_url)
-        if _qualifies_ok:
-            _ev  = result.get("ev") or {}
-            _eo  = float((_ev.get("over")  or {}).get("edge") or 0.0)
-            _eu  = float((_ev.get("under") or {}).get("edge") or 0.0)
-            _rec = "over" if _eo >= _eu else "under"
-            _book = (
-                result.get("bestOverBook") if _rec == "over"
+        qualifies_ok, _skip = _qualifies(result, stat, used_real_line=used_real_line)
+        if qualifies_ok:
+            ev_data = result.get("ev") or {}
+            eo = float((ev_data.get("over") or {}).get("edge") or 0.0)
+            eu = float((ev_data.get("under") or {}).get("edge") or 0.0)
+            rec = "over" if eo >= eu else "under"
+            book = (
+                result.get("bestOverBook") if rec == "over"
                 else result.get("bestUnderBook")
             ) or "user_supplied"
-            _dj  = DecisionJournal()
-            _djr = _dj.log_signal(
+
+            intraday_clv = _compute_intraday_clv(player_name, stat, book, rec)
+            if intraday_clv is not None:
+                result["intradayClvLine"] = intraday_clv
+
+            stat_proj = (result.get("projections") or {}).get(stat) or result.get("projection") or {}
+            ctx = _build_signal_context("prop_ev", result, stat, stat_proj, intraday_clv)
+            _log_dj_signal(
+                result=result,
                 player_id=player_id, player_name=player_name,
-                team_abbr=player_team_abbr or "", opponent_abbr=opponent,
-                stat=stat, line=line, book=_book,
+                team_abbr=player_team_abbr, opponent_abbr=opponent,
+                stat=stat, line=line, book=book,
                 over_odds=over_odds, under_odds=under_odds,
-                projection=float((result.get("projection") or {}).get("projection") or 0.0),
-                prob_over=float(_ev.get("probOver") or 0.0),
-                prob_under=float(_ev.get("probUnder") or 0.0),
-                edge_over=_eo, edge_under=_eu, recommended_side=_rec,
-                recommended_edge=max(_eo, _eu),
-                confidence=max(
-                    float(_ev.get("probOver") or 0.0),
-                    float(_ev.get("probUnder") or 0.0),
-                ),
-                used_real_line=bool(_url), action_taken=0,
+                stat_proj=stat_proj, ev_data=ev_data,
+                used_real_line=bool(used_real_line), context=ctx,
             )
-            _dj.close()
-            if _djr.get("isDuplicate"):
-                result["journalDuplicateSignal"] = True
-            elif _djr.get("success"):
-                result["journalSignalId"] = _djr.get("signalId")
-            else:
-                result["journalSignalError"] = _djr.get("error")
     return result
 
 
@@ -315,40 +393,54 @@ def _handle_auto_sweep(argv):
                 result["journalError"] = journal_res.get("error")
 
         # Decision Journal signal logging for auto_sweep
-        _best    = result.get("bestRecommendation") or {}
-        _best_ev = _best.get("ev") or {}
-        _qs, _   = _qualifies({"ev": _best_ev, "success": True}, stat, used_real_line=True)
-        if _qs and _best_ev:
-            _eo2  = float((_best_ev.get("over")  or {}).get("edge") or 0.0)
-            _eu2  = float((_best_ev.get("under") or {}).get("edge") or 0.0)
-            _rec2 = "over" if _eo2 >= _eu2 else "under"
-            _dj2  = DecisionJournal()
-            _p2   = nba_players_static.find_player_by_id(player_id)
-            _dj2r = _dj2.log_signal(
-                player_id=player_id,
-                player_name=(_p2.get("full_name") if _p2 else str(argv[2])),
+        best_ev_data = (result.get("bestRecommendation") or {}).get("ev") or {}
+        stat_proj = (result.get("projections") or {}).get(stat) or result.get("projection") or {}
+
+        # Extract Pinnacle no-vig from rankedOffers if available — no extra API call needed.
+        # Populates referenceBook so the Pinnacle confirmation gate fires when Pinnacle
+        # was one of the swept books. Falls back to None (gate skipped) if absent.
+        _ref_book = None
+        for _offer in (result.get("rankedOffers") or []):
+            if str(_offer.get("bookmaker") or "").lower() == "pinnacle":
+                _po = american_to_implied_prob(_offer.get("overOdds"))
+                _pu = american_to_implied_prob(_offer.get("underOdds"))
+                if _po and _pu and (_po + _pu) > 0:
+                    _t = _po + _pu
+                    _ref_book = {
+                        "book": "pinnacle",
+                        "line": _offer.get("line"),
+                        "overOdds": _offer.get("overOdds"),
+                        "underOdds": _offer.get("underOdds"),
+                        "noVigOver": safe_round(_po / _t, 4),
+                        "noVigUnder": safe_round(_pu / _t, 4),
+                    }
+                break
+
+        sweep_qual_result = {
+            "ev": best_ev_data,
+            "success": True,
+            "referenceBook": _ref_book,
+            "projection": stat_proj,
+            "minutesProjection": result.get("minutesProjection"),
+            "nBooksOffering": result.get("nBooksOffering"),
+        }
+        qualifies_ok, _ = _qualifies(sweep_qual_result, stat, used_real_line=True)
+        if qualifies_ok and best_ev_data:
+            p = nba_players_static.find_player_by_id(player_id)
+            player_name = p.get("full_name") if p else str(argv[2])
+            ctx = _build_signal_context("auto_sweep", result, stat, stat_proj)
+            _log_dj_signal(
+                result=result,
+                player_id=player_id, player_name=player_name,
                 team_abbr=player_team_abbr, opponent_abbr=opponent,
-                stat=stat, line=float(_best.get("line") or 0.0),
-                book=str(_best.get("bookmaker") or ""),
-                over_odds=int(_best.get("overOdds") or -110),
-                under_odds=int(_best.get("underOdds") or -110),
-                projection=float((result.get("projection") or {}).get("projection") or 0.0),
-                prob_over=float(_best_ev.get("probOver") or 0.0),
-                prob_under=float(_best_ev.get("probUnder") or 0.0),
-                edge_over=_eo2, edge_under=_eu2, recommended_side=_rec2,
-                recommended_edge=max(_eo2, _eu2),
-                confidence=max(
-                    float(_best_ev.get("probOver") or 0.0),
-                    float(_best_ev.get("probUnder") or 0.0),
-                ),
+                stat=stat, line=float(best.get("line") or 0.0),
+                book=str(best.get("bookmaker") or ""),
+                over_odds=int(best.get("overOdds") or -110),
+                under_odds=int(best.get("underOdds") or -110),
+                stat_proj=stat_proj, ev_data=best_ev_data,
                 used_real_line=True,  # auto_sweep always uses live Odds API lines
-                action_taken=0,
+                context=ctx,
             )
-            _dj2.close()
-            if _dj2r.get("isDuplicate"):
-                result["journalDuplicateSignal"] = True
-            elif _dj2r.get("success"):
-                result["journalSignalId"] = _dj2r.get("signalId")
     return result
 
 

@@ -338,6 +338,63 @@ class OddsStore:
             "close_ts_utc":     row[4],
         }
 
+    def get_opening_line(self, event_id, market, player_name, book=None):
+        """
+        Return the EARLIEST snapshot (opening line proxy) for a player prop.
+
+        Uses the same fuzzy player-name matching as get_closing_line().
+        If book is None, returns the alphabetically first book at the earliest ts.
+
+        Returns dict: {book, open_line, open_over_odds, open_under_odds, open_ts_utc}
+        or None if no snapshot found.
+        """
+        def _query(name_clause, name_val):
+            bc     = "AND book=?" if book else ""
+            extra  = [book] if book else []
+
+            # Step 1: find the earliest ts_utc for this prop
+            min_row = self._conn.execute(
+                f"SELECT MIN(ts_utc) FROM snapshots "
+                f"WHERE event_id=? AND market=? AND player_name {name_clause} {bc}",
+                [event_id, market, name_val] + extra,
+            ).fetchone()
+            if not min_row or not min_row[0]:
+                return None
+            min_ts = min_row[0]
+
+            # Step 2: fetch over + under at that timestamp
+            rows = self._conn.execute(
+                f"SELECT side, line, odds, book FROM snapshots "
+                f"WHERE event_id=? AND market=? AND player_name {name_clause} "
+                f"AND ts_utc=? {bc} ORDER BY book, side",
+                [event_id, market, name_val, min_ts] + extra,
+            ).fetchall()
+            if not rows:
+                return None
+
+            over_line = over_odds = under_odds = snap_book = None
+            for side, line_val, odds_val, bk in rows:
+                if side == "over" and over_line is None:
+                    over_line, over_odds, snap_book = line_val, odds_val, bk
+                elif side == "under" and under_odds is None:
+                    under_odds = odds_val
+            if over_line is None:
+                return None
+            return {
+                "book":            snap_book,
+                "open_line":       over_line,
+                "open_over_odds":  over_odds,
+                "open_under_odds": under_odds,
+                "open_ts_utc":     min_ts,
+            }
+
+        row = _query("=?", player_name)
+        if not row and player_name:
+            last = player_name.strip().split()[-1]
+            if len(last) > 2:
+                row = _query("LIKE ?", f"%{last}%")
+        return row
+
     def get_closing_lines_for_date(self, date_str, market=None, book=None):
         """Return all closing lines for events that commenced on date_str (NBA local time)."""
         clauses = ["date(datetime(substr(commence_time,1,19), '-6 hours'))=?"]

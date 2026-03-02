@@ -33,7 +33,7 @@ import json
 import math
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -87,6 +87,11 @@ def _fit_bin_temp(p_raw, p_actual, min_T=1.0, max_T=8.0):
     return round(best_T, 2)
 
 
+def _weighted_avg(block):
+    """Count-weighted average of p_actual across a PAV block."""
+    return sum(x[1] * x[2] for x in block) / sum(x[2] for x in block)
+
+
 def _pav_weighted_bins(items):
     """
     Pool Adjacent Violators (PAV) isotonic regression — non-decreasing p_actual.
@@ -96,8 +101,7 @@ def _pav_weighted_bins(items):
     blocks = [[item] for item in items]
     i = 0
     while i < len(blocks) - 1:
-        wa = lambda blk: sum(x[1] * x[2] for x in blk) / sum(x[2] for x in blk)
-        if wa(blocks[i]) > wa(blocks[i + 1]):
+        if _weighted_avg(blocks[i]) > _weighted_avg(blocks[i + 1]):
             blocks[i:i + 2] = [blocks[i] + blocks[i + 1]]
             if i > 0:
                 i -= 1
@@ -106,13 +110,16 @@ def _pav_weighted_bins(items):
     return blocks
 
 
-def fit_bin_temperatures(bins, min_count=30):
+def fit_bin_temperatures(bins, min_count=30, min_pred=0.10, max_pred=0.90):
     """
     Fit per-bin temperatures from backtest calibration bins.
 
     Returns dict like {"70-80": 3.10, "60-70": 1.40, ...} using keys WITHOUT
     the trailing '%' (matching the EV engine lookup format), or None if < 2 bins
     have sufficient data.
+
+    min_pred / max_pred: filter out bins whose average predicted probability
+    falls outside this range (mirrors the same filter in fit_temperature).
     """
     eligible = []
     for b in bins:
@@ -122,7 +129,10 @@ def fit_bin_temperatures(bins, min_count=30):
         bin_lbl = b.get("bin", "").rstrip("%")
         if pred_pct is None or actual_pct is None or n < min_count:
             continue
-        eligible.append([pred_pct / 100.0, actual_pct / 100.0, n, bin_lbl])
+        p_pred = pred_pct / 100.0
+        if not (min_pred <= p_pred <= max_pred):
+            continue
+        eligible.append([p_pred, actual_pct / 100.0, n, bin_lbl])
 
     if len(eligible) < 2:
         return None
@@ -245,6 +255,8 @@ def main():
     parser.add_argument("--max-pred", type=float, default=0.90)
     parser.add_argument("--model", default="full", help="Which model report to use (full|simple)")
     parser.add_argument("--no-piecewise", action="store_true", help="Skip per-bin temperature fitting")
+    parser.add_argument("--min-samples", type=int, default=None,
+                        help="If set, emit _sample_counts in output; stats below this threshold use _global T.")
     args = parser.parse_args()
 
     # --- Load backtest result ---
@@ -270,12 +282,19 @@ def main():
 
     result = {
         "_fitted_on": args.input,
-        "_fitted_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "_fitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "_min_count": args.min_count,
     }
+    if args.min_samples is not None:
+        result["_min_samples"] = args.min_samples
 
     all_T = []
+    sample_counts = {}
     for stat, bins in cal_by_stat.items():
+        # Compute total sample count for this stat (sum across all bins)
+        stat_total = sum(b.get("count", 0) for b in bins)
+        sample_counts[stat] = stat_total
+
         T, mse, n_bins = fit_temperature(
             bins,
             min_count=args.min_count,
@@ -286,12 +305,17 @@ def main():
         result[stat] = T
         all_T.append(T)
         mse_str = f"MSE*10^4={mse:.2f}" if mse is not None else "no data"
-        print(f"=== {stat.upper():5s}  T={T:.2f}  ({mse_str}, {n_bins} bins) ===")
+        print(f"=== {stat.upper():5s}  T={T:.2f}  ({mse_str}, {n_bins} bins, n_total={stat_total}) ===")
         _preview_calibration(bins, T, args.min_count, args.min_pred, args.max_pred)
 
         # Piecewise (per-bin) calibration (#4)
         if not args.no_piecewise:
-            bin_temps = fit_bin_temperatures(bins, min_count=args.bin_min_count)
+            bin_temps = fit_bin_temperatures(
+                bins,
+                min_count=args.bin_min_count,
+                min_pred=args.min_pred,
+                max_pred=args.max_pred,
+            )
             if bin_temps:
                 result[f"{stat}_bins"] = bin_temps
                 print(f"  bin temps: {bin_temps}")
@@ -306,6 +330,11 @@ def main():
         global_T = all_T_sorted[mid]
         result["_global"] = global_T
         print(f"Global fallback T (median): {global_T:.2f}")
+
+    # Emit _sample_counts when --min-samples is specified
+    if args.min_samples is not None:
+        result["_sample_counts"] = sample_counts
+        print(f"Sample counts by stat: {sample_counts}")
 
     # --- Save ---
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
