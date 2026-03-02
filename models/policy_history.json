@@ -1,0 +1,23 @@
+[
+  {
+    "effective_from": "2025-10-21",
+    "stat_whitelist": ["pts", "reb", "ast", "pra"],
+    "blocked_bins": [2, 3, 4, 5, 6],
+    "min_edge": 0.05,
+    "note": "Season start policy — all major stats, 20-70% bins blocked"
+  },
+  {
+    "effective_from": "2026-02-28",
+    "stat_whitelist": ["pts", "reb", "ast"],
+    "blocked_bins": [2, 3, 4, 5, 6],
+    "min_edge": 0.05,
+    "note": "Removed pra — not in original whitelist, tested and removed"
+  },
+  {
+    "effective_from": "2026-03-01",
+    "stat_whitelist": ["pts", "ast"],
+    "blocked_bins": [2, 3, 4, 5, 6, 7],
+    "min_edge": 0.08,
+    "note": "Removed reb (-5.34% ROI); blocked bin 7 (51.4% hit / -9.88% ROI); raised min_edge; raised min_confidence to 0.60"
+  }
+]

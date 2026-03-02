@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Historical backtesting utilities for projection and EV calibration."""
 
+import json
 import math
+import os
 import time
 from datetime import datetime, timedelta
 
@@ -44,6 +46,58 @@ MODEL_VERSION_SUMMARY = {
     },
     "bettingPolicy": "statWhitelist, blockedProbBins, minEdgeThreshold from nba_data_collection",
 }
+
+# ---------------------------------------------------------------------------
+# Date-aware policy versioning
+# ---------------------------------------------------------------------------
+_POLICY_HISTORY = None
+
+
+def _get_policy_for_date(date_str):
+    """Return the BETTING_POLICY that was active on *date_str* (YYYY-MM-DD).
+
+    Loads ``models/policy_history.json`` (cached after first call).
+    Falls back to the current ``BETTING_POLICY`` if the file is missing,
+    invalid, or *date_str* is before every recorded entry.
+    """
+    global _POLICY_HISTORY
+    if _POLICY_HISTORY is None:
+        policy_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "models",
+            "policy_history.json",
+        )
+        try:
+            with open(policy_path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            if not isinstance(raw, list) or len(raw) == 0:
+                _POLICY_HISTORY = []
+            else:
+                _POLICY_HISTORY = sorted(raw, key=lambda e: e["effective_from"])
+        except (OSError, json.JSONDecodeError, KeyError):
+            _POLICY_HISTORY = []
+
+    # Find the latest entry whose effective_from <= date_str
+    matched = None
+    for entry in _POLICY_HISTORY:
+        if entry["effective_from"] <= date_str:
+            matched = entry
+        else:
+            break
+
+    if matched is None:
+        # Before all recorded entries — fall back to current BETTING_POLICY
+        return {
+            "stat_whitelist": set(BETTING_POLICY.get("stat_whitelist", set())),
+            "blocked_bins": set(BETTING_POLICY.get("blocked_prob_bins", set())),
+            "min_edge": BETTING_POLICY.get("min_edge_threshold", 0.05),
+        }
+
+    return {
+        "stat_whitelist": set(matched["stat_whitelist"]),
+        "blocked_bins": set(int(b) for b in matched["blocked_bins"]),
+        "min_edge": float(matched["min_edge"]),
+    }
 
 
 def _parse_date(value):
@@ -396,6 +450,7 @@ def run_backtest(
     local_index=None,
     odds_only=False,
     compute_clv=False,
+    walk_forward=False,
 ):
     """
     Backtest projection + EV quality for one day or a date range.
@@ -410,6 +465,9 @@ def run_backtest(
     odds_only: if True, skip any player-stat pair without a real closing line
                (no synthetic ±0.5 fallback). Requires odds_source="local_history".
                missingLineSamples will be 0 in the output.
+    walk_forward: if True, use date-specific calibration (models/walk_forward/)
+                  and date-specific policy (models/policy_history.json) for each
+                  backtest day. Eliminates calibration lookahead and policy snooping.
     """
     import copy as _copy
     import json as _json
@@ -567,6 +625,7 @@ def run_backtest(
             )
             season = _season_from_date(day)
             as_of_date = day.isoformat()
+            _day_policy = _get_policy_for_date(as_of_date) if walk_forward else None
 
             day_proj_calls = 0
             day_samples_start = sum(accumulators[m]["sampleCount"] for m in models)
@@ -713,6 +772,7 @@ def run_backtest(
                             if odds_only and not _used_real_line:
                                 continue
 
+                            _as_of = day.isoformat() if walk_forward else None
                             ev = compute_ev(
                                 projected,
                                 line,
@@ -720,6 +780,7 @@ def run_backtest(
                                 under_odds,
                                 stdev=stdev_val,
                                 stat=stat,
+                                as_of_date=_as_of,
                             )
                             if not ev:
                                 continue
@@ -754,12 +815,17 @@ def run_backtest(
                                 chosen_odds = under_odds
 
                             edge = abs(float(chosen.get("edge") or 0.0))
-                            meets_threshold = bool(chosen.get("meetsThreshold")) or (
-                                edge >= float(PROJECTION_CONFIG.get("min_edge_threshold", 0.05))
-                            )
-                            _bp = BETTING_POLICY
-                            _stat_ok = stat in _bp.get("stat_whitelist", TRACKED_STATS)
-                            _bin_ok = bin_idx not in _bp.get("blocked_prob_bins", set())
+                            if walk_forward:
+                                _stat_ok = stat in _day_policy["stat_whitelist"]
+                                _bin_ok = bin_idx not in _day_policy["blocked_bins"]
+                                meets_threshold = edge >= _day_policy["min_edge"]
+                            else:
+                                _bp = BETTING_POLICY
+                                _stat_ok = stat in _bp.get("stat_whitelist", TRACKED_STATS)
+                                _bin_ok = bin_idx not in _bp.get("blocked_prob_bins", set())
+                                meets_threshold = bool(chosen.get("meetsThreshold")) or (
+                                    edge >= float(PROJECTION_CONFIG.get("min_edge_threshold", 0.05))
+                                )
                             if (
                                 float(chosen.get("evPercent") or 0.0) > 0.0
                                 and meets_threshold
@@ -879,10 +945,14 @@ def run_backtest(
             "modelsEvaluated": models,
             "stats": TRACKED_STATS,
             "minEdgeThreshold": PROJECTION_CONFIG.get("min_edge_threshold", 0.05),
-            "bettingPolicy": {
-                "statWhitelist": sorted(BETTING_POLICY.get("stat_whitelist", set())),
-                "blockedProbBins": sorted(BETTING_POLICY.get("blocked_prob_bins", set())),
-            },
+            "bettingPolicy": (
+                {"mode": "walk_forward", "source": "models/policy_history.json"}
+                if walk_forward
+                else {
+                    "statWhitelist": sorted(BETTING_POLICY.get("stat_whitelist", set())),
+                    "blockedProbBins": sorted(BETTING_POLICY.get("blocked_prob_bins", set())),
+                }
+            ),
             "modelVersion": MODEL_VERSION_SUMMARY,
             "reports": model_reports,
         }
@@ -892,6 +962,7 @@ def run_backtest(
             response["localIndexPath"] = getattr(local_provider, "index_path", None)
 
         response["fast"] = fast
+        response["walkForward"] = walk_forward
         if odds_key:
             response["oddsSource"] = odds_key
         if odds_only:
@@ -904,7 +975,8 @@ def run_backtest(
             _os.makedirs(results_dir, exist_ok=True)
             model_tag = model_key.replace(",", "-")
             realonly_tag = "_realonly" if odds_only else ""
-            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}.json"
+            wf_tag = "_wf" if walk_forward else ""
+            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}{wf_tag}.json"
             fpath = _os.path.join(results_dir, fname)
             with open(fpath, "w", encoding="utf-8") as fh:
                 _json.dump(response, fh, indent=2)

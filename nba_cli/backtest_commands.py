@@ -16,7 +16,7 @@ def _handle_backtest(argv):
                 "[--model full|simple|both] [--save] [--fast] "
                 "[--data-source nba|bref|local] [--local] [--bref-dir <path>] "
                 "[--local-index <path>] [--odds-source local_history] [--odds-db <path>] "
-                "[--real-only] [--clv]"
+                "[--real-only] [--clv] [--walk-forward]"
             )
         }
     date_from = argv[2]
@@ -36,6 +36,7 @@ def _handle_backtest(argv):
     local_index = None
     odds_only = False
     compute_clv = False
+    walk_forward = False
     while idx < len(argv):
         token = str(argv[idx]).strip().lower()
         if token == "--model" and idx + 1 < len(argv):
@@ -82,13 +83,18 @@ def _handle_backtest(argv):
             compute_clv = True
             idx += 1
             continue
+        if token == "--walk-forward":
+            walk_forward = True
+            idx += 1
+            continue
         return {
             "error": (
                 "Invalid backtest arguments. "
                 "Usage: backtest <date_from> [date_to] [--model full|simple|both] "
                 "[--save] [--fast] [--data-source nba|bref|local] [--local] "
                 "[--bref-dir <path>] [--local-index <path>] "
-                "[--odds-source local_history] [--odds-db <path>] [--real-only] [--clv]"
+                "[--odds-source local_history] [--odds-db <path>] [--real-only] [--clv] "
+                "[--walk-forward]"
             )
         }
     return run_backtest(date_from=date_from, date_to=date_to, model=model,
@@ -96,7 +102,8 @@ def _handle_backtest(argv):
                         data_source=data_source, bref_dir=bref_dir,
                         odds_source=odds_source, odds_db=odds_db,
                         local_index=local_index, odds_only=odds_only,
-                        compute_clv=compute_clv)
+                        compute_clv=compute_clv,
+                        walk_forward=walk_forward)
 
 
 def _handle_backtest_60d(argv):

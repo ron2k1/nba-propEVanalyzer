@@ -255,6 +255,8 @@ def main():
     parser.add_argument("--max-pred", type=float, default=0.90)
     parser.add_argument("--model", default="full", help="Which model report to use (full|simple)")
     parser.add_argument("--no-piecewise", action="store_true", help="Skip per-bin temperature fitting")
+    parser.add_argument("--min-samples", type=int, default=None,
+                        help="If set, emit _sample_counts in output; stats below this threshold use _global T.")
     args = parser.parse_args()
 
     # --- Load backtest result ---
@@ -283,9 +285,16 @@ def main():
         "_fitted_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
         "_min_count": args.min_count,
     }
+    if args.min_samples is not None:
+        result["_min_samples"] = args.min_samples
 
     all_T = []
+    sample_counts = {}
     for stat, bins in cal_by_stat.items():
+        # Compute total sample count for this stat (sum across all bins)
+        stat_total = sum(b.get("count", 0) for b in bins)
+        sample_counts[stat] = stat_total
+
         T, mse, n_bins = fit_temperature(
             bins,
             min_count=args.min_count,
@@ -296,7 +305,7 @@ def main():
         result[stat] = T
         all_T.append(T)
         mse_str = f"MSE*10^4={mse:.2f}" if mse is not None else "no data"
-        print(f"=== {stat.upper():5s}  T={T:.2f}  ({mse_str}, {n_bins} bins) ===")
+        print(f"=== {stat.upper():5s}  T={T:.2f}  ({mse_str}, {n_bins} bins, n_total={stat_total}) ===")
         _preview_calibration(bins, T, args.min_count, args.min_pred, args.max_pred)
 
         # Piecewise (per-bin) calibration (#4)
@@ -321,6 +330,11 @@ def main():
         global_T = all_T_sorted[mid]
         result["_global"] = global_T
         print(f"Global fallback T (median): {global_T:.2f}")
+
+    # Emit _sample_counts when --min-samples is specified
+    if args.min_samples is not None:
+        result["_sample_counts"] = sample_counts
+        print(f"Sample counts by stat: {sample_counts}")
 
     # --- Save ---
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
