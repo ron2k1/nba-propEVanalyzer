@@ -19,6 +19,41 @@ from os.path import abspath, dirname, join
 _ROOT = dirname(dirname(abspath(__file__)))
 _DEFAULT_DB_PATH = join(_ROOT, "data", "decision_journal", "decision_journal.sqlite")
 
+
+def _ct_day_utc_bounds(date_str):
+    """
+    Return (utc_start_iso, utc_end_exclusive_iso) for a US Central Time calendar day.
+
+    Accounts for CDT (UTC-5) vs CST (UTC-6):
+      CDT active: 2nd Sunday in March through (not including) 1st Sunday in November
+      CST active: all other dates
+
+    Example:
+      _ct_day_utc_bounds("2026-04-15")  -> ("2026-04-15T05:00:00Z", "2026-04-16T05:00:00Z")
+      _ct_day_utc_bounds("2026-01-10")  -> ("2026-01-10T06:00:00Z", "2026-01-11T06:00:00Z")
+    """
+    d = datetime.strptime(date_str, "%Y-%m-%d").date()
+    y = d.year
+    # 2nd Sunday in March (clocks spring forward at 2am CST → 3am CDT)
+    mar1 = datetime(y, 3, 1)
+    first_sun_mar = mar1 + timedelta(days=(6 - mar1.weekday()) % 7)
+    dst_start = (first_sun_mar + timedelta(weeks=1)).date()
+    # 1st Sunday in November (clocks fall back at 2am CDT → 1am CST)
+    nov1 = datetime(y, 11, 1)
+    dst_end = (nov1 + timedelta(days=(6 - nov1.weekday()) % 7)).date()
+
+    def _utc_offset_h(day):
+        return 5 if (dst_start <= day < dst_end) else 6
+
+    next_d = d + timedelta(days=1)
+    start_utc = datetime(d.year, d.month, d.day, _utc_offset_h(d), 0, 0)
+    end_utc   = datetime(next_d.year, next_d.month, next_d.day, _utc_offset_h(next_d), 0, 0)
+    return (
+        start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+
+
 from .nba_data_collection import safe_round
 from .nba_bet_tracking import (
     _now_utc_iso,
@@ -330,14 +365,15 @@ class DecisionJournal:
         except ValueError:
             return {"success": False, "error": "Invalid date. Use YYYY-MM-DD.", "date": str(date_str)}
 
+        utc_start, utc_end = _ct_day_utc_bounds(date_str)
         cur = self._conn.execute(
             """SELECT s.signal_id, s.player_id, s.player_name, s.team_abbr, s.opponent_abbr,
                       s.stat, s.line, s.book, s.over_odds, s.under_odds,
                       s.recommended_side, s.recommended_edge
                FROM signals s
-               WHERE date(datetime(substr(s.ts_utc,1,19), '-6 hours')) = ?
+               WHERE s.ts_utc >= ? AND s.ts_utc < ?
                AND s.signal_id NOT IN (SELECT signal_id FROM outcomes)""",
-            (date_str,),
+            (utc_start, utc_end),
         )
         rows = cur.fetchall()
         cols = [
@@ -451,15 +487,16 @@ class DecisionJournal:
 
     def generate_report(self, date_from, date_to) -> dict:
         """Generate a performance report over a date range."""
+        utc_start, _    = _ct_day_utc_bounds(date_from)
+        _,        utc_end = _ct_day_utc_bounds(date_to)
         cur = self._conn.execute(
             """SELECT s.signal_id, s.stat, s.confidence, s.recommended_edge, s.used_real_line,
                       s.action_taken,
                       o.result, o.pnl_units, o.clv_delta
                FROM signals s
                LEFT JOIN outcomes o ON s.signal_id = o.signal_id
-               WHERE date(datetime(substr(s.ts_utc,1,19), '-6 hours')) >= ?
-                 AND date(datetime(substr(s.ts_utc,1,19), '-6 hours')) <= ?""",
-            (date_from, date_to),
+               WHERE s.ts_utc >= ? AND s.ts_utc < ?""",
+            (utc_start, utc_end),
         )
         rows = cur.fetchall()
         cols = [
@@ -739,8 +776,9 @@ class DecisionJournal:
         """Read-only signal listing."""
         clauses, vals = [], []
         if date_str:
-            clauses.append("date(datetime(substr(s.ts_utc,1,19), '-6 hours'))=?")
-            vals.append(date_str)
+            _gs_start, _gs_end = _ct_day_utc_bounds(date_str)
+            clauses.append("s.ts_utc >= ? AND s.ts_utc < ?")
+            vals.extend([_gs_start, _gs_end])
         if stat:
             clauses.append("s.stat=?")
             vals.append(str(stat).lower())
