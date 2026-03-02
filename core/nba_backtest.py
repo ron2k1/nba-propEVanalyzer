@@ -266,6 +266,13 @@ def _new_accumulator():
         "realLineStatRoi": {s: {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0}
                             for s in TRACKED_STATS},
         "realLineCalibBins": {i: {"count": 0, "wins": 0, "pnlUnits": 0.0} for i in range(10)},
+        # CLV tracking: opening line vs closing line per bet
+        "clvBetsTracked":    0,
+        "clvPositiveCount":  0,
+        "clvLineSumPositive": 0.0,
+        "clvLineSumNegative": 0.0,
+        "roiClvPositive": {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
+        "roiClvNegative": {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
     }
 
 
@@ -279,6 +286,22 @@ def _finalize_roi_seg(seg):
         "pnlUnits":     safe_round(seg["pnlUnits"], 4),
         "hitRatePct":   safe_round(seg["wins"] / b * 100.0, 3) if b else None,
         "roiPctPerBet": safe_round(seg["pnlUnits"] / b * 100.0, 3) if b else None,
+    }
+
+
+def _finalize_clv(acc):
+    """Produce the clv summary dict from raw accumulator CLV fields."""
+    n   = acc["clvBetsTracked"]
+    pos = acc["clvPositiveCount"]
+    neg = n - pos
+    return {
+        "betsTracked":        n,
+        "positiveCount":      pos,
+        "positiveClvPct":     safe_round(pos / n * 100.0, 2) if n else None,
+        "avgClvLinePositive": safe_round(acc["clvLineSumPositive"] / pos, 3) if pos else None,
+        "avgClvLineNegative": safe_round(acc["clvLineSumNegative"] / neg, 3) if neg else None,
+        "roiClvPositive":     _finalize_roi_seg(acc["roiClvPositive"]),
+        "roiClvNegative":     _finalize_roi_seg(acc["roiClvNegative"]),
     }
 
 
@@ -333,6 +356,7 @@ def _finalize_accumulator(acc):
         "roiSynth":          _finalize_roi_seg(acc["roiSynth"]),
         "realLineStatRoi":   {s: _finalize_roi_seg(acc["realLineStatRoi"][s])
                               for s in TRACKED_STATS},
+        "clv": _finalize_clv(acc),
         "realLineCalibBins": [
             {
                 "bin":          f"{i*10}-{(i+1)*10}%",
@@ -371,6 +395,7 @@ def run_backtest(
     odds_db=None,
     local_index=None,
     odds_only=False,
+    compute_clv=False,
 ):
     """
     Backtest projection + EV quality for one day or a date range.
@@ -427,6 +452,9 @@ def run_backtest(
             _odds_stat_to_market = _STM
         except Exception as e:
             return {"success": False, "error": f"Failed to init OddsStore: {e}"}
+
+    # Cache opening lines to avoid redundant DB queries (keyed by event_id+market+player)
+    _open_line_cache = {}
 
     bref_store = None
     bref_summary = None
@@ -775,6 +803,39 @@ def run_backtest(
                                     cb["pnlUnits"] += pnl
                                     if outcome == "win":
                                         cb["wins"] += 1
+
+                                    # CLV: compare opening line to closing line
+                                    if compute_clv and odds_store is not None and odds_event_id:
+                                        _clv_key = (odds_event_id, _market, _player_full_name)
+                                        if _clv_key not in _open_line_cache:
+                                            _open_line_cache[_clv_key] = odds_store.get_opening_line(
+                                                odds_event_id, _market, _player_full_name
+                                            )
+                                        _open = _open_line_cache[_clv_key]
+                                        if _open and _open.get("open_line") is not None:
+                                            # clv_line > 0 means the opening line was better for our side
+                                            # UNDER: good when open_line > close_line (higher threshold at open)
+                                            # OVER:  good when open_line < close_line (lower threshold at open)
+                                            _clv_line = (
+                                                (_open["open_line"] - line)
+                                                * (1 if chosen_side == "under" else -1)
+                                            )
+                                            acc["clvBetsTracked"] += 1
+                                            if _clv_line > 0:
+                                                acc["clvPositiveCount"]   += 1
+                                                acc["clvLineSumPositive"] += _clv_line
+                                                _clv_seg = acc["roiClvPositive"]
+                                            else:
+                                                acc["clvLineSumNegative"] += _clv_line
+                                                _clv_seg = acc["roiClvNegative"]
+                                            _clv_seg["betsPlaced"] += 1
+                                            _clv_seg["pnlUnits"]   += pnl
+                                            if outcome == "win":
+                                                _clv_seg["wins"] += 1
+                                            elif outcome == "loss":
+                                                _clv_seg["losses"] += 1
+                                            else:
+                                                _clv_seg["pushes"] += 1
 
             # End-of-day summary + checkpoint.
             day_samples = sum(accumulators[m]["sampleCount"] for m in models) - day_samples_start
