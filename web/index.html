@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>NBA Prop Engine</title>
   <link rel="stylesheet" href="/styles.css">
+  <script defer src="/vendor/alpine.min.js"></script>
+  <script type="module" src="/app.js"></script>
 </head>
 <body>
   <div class="bg-shape bg-shape-a"></div>
@@ -12,261 +14,698 @@
 
   <header class="page-head">
     <h1>NBA Prop Engine</h1>
-    <p>Live projection + EV UI backed by <code>nba_mod.py</code></p>
-    <div id="healthBadge" class="badge">Checking API...</div>
+    <p>Live projection + EV backed by <code>nba_mod.py</code></p>
   </header>
 
+  <!-- Tab Navigation -->
+  <nav class="tab-nav" x-data>
+    <template x-for="t in [
+      {id:'dashboard', label:'Dashboard'},
+      {id:'lines',     label:'Lines'},
+      {id:'picks',     label:'Picks'},
+      {id:'analyze',   label:'Analyze'},
+      {id:'live',      label:'Live'},
+      {id:'results',   label:'Results'},
+      {id:'reference', label:'Reference'}
+    ]" :key="t.id">
+      <button class="tab-btn"
+        :class="{ active: $store.tab.current === t.id }"
+        @click="$store.tab.set(t.id)"
+        x-text="t.label"></button>
+    </template>
+  </nav>
+
   <main class="layout">
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Slate</h2>
-        <button id="loadGamesBtn" class="btn btn-secondary">Refresh Games</button>
+
+    <!-- ═══ TAB 1: Dashboard ═══ -->
+    <section class="tab-panel" x-data="dashboard" x-show="$store.tab.current === 'dashboard'" x-cloak>
+
+      <!-- Health Badge -->
+      <div class="panel">
+        <div class="panel-head">
+          <h2>System Status</h2>
+          <span class="badge" :class="healthStatus" x-text="healthText"></span>
+        </div>
+
+        <!-- Gate Widget -->
+        <template x-if="gateLoading">
+          <div class="skeleton skeleton-lg"></div>
+        </template>
+        <template x-if="gateError && !gateLoading">
+          <p class="hint" x-text="gateError"></p>
+        </template>
+        <template x-if="gate && !gateLoading">
+          <div class="gate-widget">
+            <div class="gate-badge" :class="gate.gate?.gatePass ? 'gate-pass' : 'gate-fail'">
+              <span class="gate-label" x-text="gate.gate?.gatePass ? 'GO-LIVE: PASS' : 'GO-LIVE: FAIL'"></span>
+            </div>
+            <div class="gate-metrics">
+              <span>Signals: <strong x-text="gate.totalSignals ?? '?'"></strong></span>
+              <span>ROI: <strong x-text="(gate.roi ?? 0).toFixed(1) + '%'"></strong></span>
+              <span>+CLV: <strong x-text="(gate.positiveClvPct ?? 0).toFixed(1) + '%'"></strong></span>
+              <template x-if="gate.reason"><span style="font-size:0.82rem" x-text="gate.reason"></span></template>
+            </div>
+          </div>
+        </template>
       </div>
-      <p class="hint">Use a matchup below to prefill home/away context for props.</p>
-      <div id="gamesContainer" class="games-grid"></div>
+
+      <!-- Games Grid -->
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Today's Slate</h2>
+          <button class="btn btn-secondary" @click="loadGames()">Refresh</button>
+        </div>
+        <p class="hint">Click a matchup to prefill the Analyze tab forms.</p>
+
+        <template x-if="gamesLoading">
+          <div class="skeleton skeleton-lg"></div>
+        </template>
+        <template x-if="gamesError && !gamesLoading">
+          <p class="error" x-text="gamesError"></p>
+        </template>
+        <div class="games-grid">
+          <template x-for="g in games" :key="(g.homeTeam?.abbreviation || '') + (g.awayTeam?.abbreviation || '')">
+            <article class="game-card">
+              <h3 class="matchup" x-text="awayAbbr(g) + ' @ ' + homeAbbr(g)"></h3>
+              <p class="meta" x-text="gameMeta(g)"></p>
+              <div class="card-actions">
+                <button class="btn btn-chip" @click="prefill(homeAbbr(g), awayAbbr(g), true)">Use Home</button>
+                <button class="btn btn-chip" @click="prefill(awayAbbr(g), homeAbbr(g), false)">Use Away</button>
+              </div>
+            </article>
+          </template>
+        </div>
+        <template x-if="!gamesLoading && !gamesError && games.length === 0">
+          <p class="hint">No games returned.</p>
+        </template>
+      </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Prop EV</h2>
-      </div>
-      <p class="hint">Use either player name or player ID. Selecting a name auto-fills ID.</p>
-      <form id="propForm" class="form-grid">
-        <label>
-          Player ID
-          <input id="playerId" type="number" value="2544">
-        </label>
-        <label>
-          Player Name
-          <input id="playerName" type="text" list="playersList" placeholder="LeBron James">
-        </label>
-        <label>
-          Player Team
-          <input id="playerTeamAbbr" type="text" maxlength="3" placeholder="LAL">
-        </label>
-        <label>
-          Opponent
-          <input id="opponentAbbr" type="text" maxlength="3" required placeholder="ORL">
-        </label>
-        <label>
-          Stat
-          <select id="stat" required>
-            <option value="pts">Points</option>
-            <option value="reb">Rebounds</option>
-            <option value="ast">Assists</option>
-            <option value="fg3m">3PM</option>
-            <option value="stl">Steals</option>
-            <option value="blk">Blocks</option>
-            <option value="tov">Turnovers</option>
-            <option value="pra">PRA</option>
-            <option value="pr">PR</option>
-            <option value="pa">PA</option>
-            <option value="ra">RA</option>
-          </select>
-        </label>
-        <label>
-          Line
-          <input id="line" type="number" step="0.5" required value="24.5">
-        </label>
-        <label>
-          Over Odds
-          <input id="overOdds" type="number" required value="-110">
-        </label>
-        <label>
-          Under Odds
-          <input id="underOdds" type="number" required value="-110">
-        </label>
-        <label class="toggle">
-          <input id="isHome" type="checkbox" checked>
-          Is Home
-        </label>
-        <label class="toggle">
-          <input id="isB2b" type="checkbox">
-          Back-to-back
-        </label>
-        <label>
-          Reference Book (optional)
-          <input id="referenceBook" type="text" placeholder="pinnacle">
-        </label>
-        <label>
-          Sweep Top N
-          <input id="sweepTopN" type="number" min="1" max="50" value="15">
-        </label>
-        <button type="submit" class="btn btn-primary">Run Prop EV</button>
-        <button id="autoSweepBtn" type="button" class="btn btn-secondary">Auto Sweep Best Line</button>
-      </form>
-      <p class="hint">Auto sweep uses Regions/Bookmakers/Sport from the Sportsbook Odds panel.</p>
-      <datalist id="playersList"></datalist>
+    <!-- ═══ TAB 2: Lines ═══ -->
+    <section class="tab-panel" x-data="lines" x-show="$store.tab.current === 'lines'" x-cloak>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Line Collection Pipeline</h2>
+        </div>
+        <p class="hint">Collect book lines, run roster sweep, or execute the full daily ops pipeline.</p>
 
-      <div id="propResult" class="result"></div>
-      <div id="sweepResult" class="result"></div>
+        <div class="form-grid" style="margin-bottom:14px">
+          <label>Books <input type="text" x-model="collectBooks"></label>
+          <label>Stats <input type="text" x-model="collectStats"></label>
+        </div>
+
+        <div class="card-actions" style="margin-bottom:14px">
+          <button class="btn btn-primary" @click="collectLines()" :disabled="collectLoading">
+            <span x-show="!collectLoading">Collect Lines</span>
+            <span x-show="collectLoading">Collecting...</span>
+          </button>
+          <button class="btn btn-secondary" @click="rosterSweep()" :disabled="sweepLoading">
+            <span x-show="!sweepLoading">Roster Sweep</span>
+            <span x-show="sweepLoading">Sweeping...</span>
+          </button>
+          <button class="btn btn-primary" @click="runDailyOps()" :disabled="opsLoading">
+            <span x-show="!opsLoading">Run Full Pipeline</span>
+            <span x-show="opsLoading">Running...</span>
+          </button>
+        </div>
+
+        <!-- Collect Lines Result -->
+        <template x-if="collectResult">
+          <div class="result">
+            <h4>Collect Lines Result</h4>
+            <div class="metric-grid">
+              <article class="metric"><h4>Status</h4><p class="ok-text">Success</p></article>
+              <article class="metric"><h4>Snapshots</h4><p x-text="collectResult.snapshotCount ?? collectResult.snapshots ?? '?'"></p></article>
+            </div>
+          </div>
+        </template>
+        <template x-if="collectError">
+          <p class="error" x-text="collectError"></p>
+        </template>
+
+        <!-- Roster Sweep Result -->
+        <template x-if="sweepResult">
+          <div class="result">
+            <h4>Roster Sweep Result</h4>
+            <pre x-text="JSON.stringify(sweepResult, null, 2)" style="max-height:300px;overflow:auto"></pre>
+          </div>
+        </template>
+        <template x-if="sweepError">
+          <p class="error" x-text="sweepError"></p>
+        </template>
+
+        <!-- Pipeline Steps -->
+        <template x-if="opsSteps.length > 0">
+          <div class="pipeline-steps">
+            <template x-for="(step, i) in opsSteps" :key="i">
+              <div class="pipeline-step" :class="'step-' + step.status">
+                <span class="step-icon" x-text="step.status === 'done' ? '\u2713' : step.status === 'error' ? '\u2717' : step.status === 'running' ? '\u25CB' : '\u2022'"></span>
+                <span x-text="step.name"></span>
+                <span class="step-status" x-text="step.status"></span>
+              </div>
+            </template>
+          </div>
+        </template>
+        <template x-if="opsError">
+          <p class="error" x-text="opsError"></p>
+        </template>
+      </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Live Projection</h2>
+    <!-- ═══ TAB 3: Picks ═══ -->
+    <section class="tab-panel" x-data="picks" x-show="$store.tab.current === 'picks'" x-cloak>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Best EV Today</h2>
+          <div class="card-actions">
+            <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;color:var(--muted)">
+              Limit <input type="number" x-model.number="bestLimit" min="1" max="50" style="width:60px">
+            </label>
+            <button class="btn btn-secondary" @click="loadBestToday()" :disabled="bestLoading">Refresh</button>
+          </div>
+        </div>
+
+        <template x-if="bestLoading">
+          <div class="skeleton skeleton-lg"></div>
+        </template>
+        <template x-if="bestError && !bestLoading">
+          <p class="error" x-text="bestError"></p>
+        </template>
+        <template x-if="bestResult && !bestLoading">
+          <div class="result">
+            <div class="metric-grid">
+              <article class="metric"><h4>Date</h4><p x-text="bestResult.date || 'n/a'"></p></article>
+              <article class="metric"><h4>Logged</h4><p x-text="bestResult.entriesLogged ?? 0"></p></article>
+              <article class="metric"><h4>Ranked</h4><p x-text="bestResult.rankedCount ?? 0"></p></article>
+              <article class="metric"><h4>Positive Edge</h4><p x-text="bestResult.positiveEdgeCount ?? 0"></p></article>
+            </div>
+            <h4 style="margin-top:14px">Top EV Plays</h4>
+            <div class="odds-table-wrap">
+              <table class="odds-table">
+                <thead><tr><th>Player</th><th>Stat</th><th>Side</th><th>Line</th><th>Proj</th><th>EV%</th><th>Odds</th><th>Status</th></tr></thead>
+                <tbody>
+                  <template x-for="r in bestRows()" :key="(r.playerId||'') + r.stat + r.line">
+                    <tr>
+                      <td x-text="r.playerName || r.playerId || '?'"></td>
+                      <td x-text="(r.stat || '').toUpperCase()"></td>
+                      <td x-text="(r.recommendedSide || '').toUpperCase()"></td>
+                      <td x-text="fmt(r.line, 1)"></td>
+                      <td x-text="fmt(r.projection, 1)"></td>
+                      <td x-text="fmt(r.recommendedEvPct, 2) + '%'"></td>
+                      <td x-text="r.recommendedOdds ?? 'n/a'"></td>
+                      <td x-html="statusPill(r.result || 'pending')"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </template>
       </div>
-      <p class="hint">Fetches real-time boxscore and adjusts the pregame projection based on minutes remaining.</p>
-      <form id="liveForm" class="form-grid">
-        <label>
-          Player ID
-          <input id="livePlayerId" type="number">
-        </label>
-        <label>
-          Player Name
-          <input id="livePlayerName" type="text" list="playersList" placeholder="Victor Wembanyama">
-        </label>
-        <label>
-          Player Team
-          <input id="livePlayerTeam" type="text" maxlength="3" placeholder="SAS">
-        </label>
-        <label>
-          Opponent
-          <input id="liveOpponent" type="text" maxlength="3" placeholder="TOR">
-        </label>
-        <label>
-          Stat
-          <select id="liveStat">
-            <option value="pts">Points</option>
-            <option value="reb">Rebounds</option>
-            <option value="ast">Assists</option>
-            <option value="fg3m">3PM</option>
-            <option value="stl">Steals</option>
-            <option value="blk">Blocks</option>
-            <option value="tov">Turnovers</option>
-            <option value="pra">PRA</option>
-          </select>
-        </label>
-        <label class="toggle">
-          <input id="liveIsHome" type="checkbox">
-          Is Home
-        </label>
-        <button type="submit" class="btn btn-primary">Run Live Projection</button>
-      </form>
-      <div id="liveResult" class="result"></div>
+
+      <!-- Top Picks -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head">
+          <h2>Top Picks</h2>
+          <div class="card-actions">
+            <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;color:var(--muted)">
+              Limit <input type="number" x-model.number="topLimit" min="1" max="20" style="width:60px">
+            </label>
+            <button class="btn btn-primary" @click="loadTopPicks()" :disabled="topLoading">Load Top Picks</button>
+          </div>
+        </div>
+
+        <template x-if="topLoading">
+          <div class="skeleton skeleton-lg"></div>
+        </template>
+        <template x-if="topError && !topLoading">
+          <p class="error" x-text="topError"></p>
+        </template>
+        <template x-if="topResult && !topLoading">
+          <div class="result">
+            <div class="odds-table-wrap">
+              <table class="odds-table">
+                <thead><tr><th>Rank</th><th>Player</th><th>Stat</th><th>Side</th><th>Line</th><th>EV%</th><th>Projection</th><th>Odds</th><th>Book</th></tr></thead>
+                <tbody>
+                  <template x-for="(r, i) in topRows()" :key="i">
+                    <tr>
+                      <td x-text="i + 1"></td>
+                      <td x-text="r.playerName || r.player || '?'"></td>
+                      <td x-text="(r.stat || '').toUpperCase()"></td>
+                      <td x-text="(r.side || r.recommendedSide || '').toUpperCase()"></td>
+                      <td x-text="fmt(r.line, 1)"></td>
+                      <td x-text="fmt(r.evPct || r.recommendedEvPct || r.ev_pct, 2) + '%'"></td>
+                      <td x-text="fmt(r.projection, 1)"></td>
+                      <td x-text="r.odds || r.recommendedOdds || 'n/a'"></td>
+                      <td x-text="r.book || r.bookmaker || 'n/a'"></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+            <template x-if="topResult.bestParlay">
+              <div style="margin-top:14px">
+                <h4>Best Parlay</h4>
+                <pre x-text="JSON.stringify(topResult.bestParlay, null, 2)"></pre>
+              </div>
+            </template>
+          </div>
+        </template>
+      </div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Parlay EV</h2>
-        <button id="parlayBtn" class="btn btn-primary">Run Parlay</button>
+    <!-- ═══ TAB 4: Analyze ═══ -->
+    <section class="tab-panel" x-data="analyze" x-show="$store.tab.current === 'analyze'" x-cloak>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Prop EV</h2>
+        </div>
+        <p class="hint">Use either player name or player ID. Selecting a name auto-fills ID.</p>
+
+        <form class="form-grid" @submit.prevent="runPropEv()">
+          <label>Player ID <input type="number" x-model.number="playerId"></label>
+          <label>Player Name
+            <input type="text" x-model="playerName" list="playersList"
+              @change="
+                let ps = $store.players;
+                if (ps.loaded) {
+                  let r = ps.resolve(playerName);
+                  if (r.id) { playerId = r.id; playerName = ps.nameForId(r.id); }
+                }
+              ">
+          </label>
+          <label>Player Team <input type="text" maxlength="3" x-model="playerTeamAbbr" placeholder="LAL"></label>
+          <label>Opponent <input type="text" maxlength="3" x-model="opponentAbbr" required placeholder="ORL"></label>
+          <label>Stat
+            <select x-model="stat">
+              <option value="pts">Points</option>
+              <option value="reb">Rebounds</option>
+              <option value="ast">Assists</option>
+              <option value="fg3m">3PM</option>
+              <option value="stl">Steals</option>
+              <option value="blk">Blocks</option>
+              <option value="tov">Turnovers</option>
+              <option value="pra">PRA</option>
+              <option value="pr">PR</option>
+              <option value="pa">PA</option>
+              <option value="ra">RA</option>
+            </select>
+          </label>
+          <label>Line <input type="number" step="0.5" x-model.number="line" required></label>
+          <label>Over Odds <input type="number" x-model.number="overOdds" required></label>
+          <label>Under Odds <input type="number" x-model.number="underOdds" required></label>
+          <label class="toggle"><input type="checkbox" x-model="isHome"> Is Home</label>
+          <label class="toggle"><input type="checkbox" x-model="isB2b"> Back-to-back</label>
+          <label>Reference Book <input type="text" x-model="referenceBook" placeholder="pinnacle"></label>
+          <label>Sweep Top N <input type="number" x-model.number="sweepTopN" min="1" max="50"></label>
+          <button type="submit" class="btn btn-primary" :disabled="propLoading">
+            <span x-show="!propLoading">Run Prop EV</span>
+            <span x-show="propLoading">Running...</span>
+          </button>
+          <button type="button" class="btn btn-secondary" @click="runAutoSweep()" :disabled="sweepLoading">
+            <span x-show="!sweepLoading">Auto Sweep Best Line</span>
+            <span x-show="sweepLoading">Sweeping...</span>
+          </button>
+        </form>
+
+        <!-- Player datalist -->
+        <datalist id="playersList">
+          <template x-for="o in $store.players.options" :key="o.id">
+            <option :value="o.label"></option>
+          </template>
+        </datalist>
+
+        <!-- Prop EV Result -->
+        <template x-if="propError">
+          <div class="result"><p class="error" x-text="propError"></p></div>
+        </template>
+        <template x-if="propResult && !propError">
+          <div class="result">
+            <div class="metric-grid">
+              <article class="metric"><h4>Projection</h4><p x-text="fmt(propResult.projection?.projection, 1)"></p></article>
+              <article class="metric"><h4>Line</h4><p x-text="fmt(propResult.line, 1)"></p></article>
+              <article class="metric"><h4>Stdev</h4><p x-text="fmt(propResult.ev?.stdev, 2)"></p></article>
+              <article class="metric ev-over"><h4>Over Prob</h4><p x-text="pct(propResult.ev?.probOver)"></p></article>
+              <article class="metric ev-under"><h4>Under Prob</h4><p x-text="pct(propResult.ev?.probUnder)"></p></article>
+              <article class="metric"><h4>Push Prob</h4><p x-text="pct(propResult.ev?.probPush || 0)"></p></article>
+              <article class="metric ev-over"><h4>Over EV%</h4>
+                <p><span x-text="fmt(propResult.ev?.over?.evPercent, 2)"></span> | <span x-text="propResult.ev?.over?.verdict || 'n/a'"></span></p>
+              </article>
+              <article class="metric ev-under"><h4>Under EV%</h4>
+                <p><span x-text="fmt(propResult.ev?.under?.evPercent, 2)"></span> | <span x-text="propResult.ev?.under?.verdict || 'n/a'"></span></p>
+              </article>
+              <article class="metric"><h4>Games Sample</h4><p x-text="propResult.gamesPlayed ?? 'n/a'"></p></article>
+              <article class="metric"><h4>Distribution</h4><p x-text="propResult.ev?.distributionMode || 'normal'"></p></article>
+              <template x-if="propResult.referenceBook">
+                <article class="metric ev-over"><h4>Reference Book</h4>
+                  <p x-text="(propResult.referenceBook.book || 'n/a') + ' | No-Vig O ' + pctAlready(propResult.referenceBook.noVigOver * 100)"></p>
+                </article>
+              </template>
+            </div>
+
+            <!-- LLM Analysis -->
+            <template x-if="propResult.llmAnalysis">
+              <div class="llm-section">
+                <h4>LLM Analysis</h4>
+                <div x-html="renderLlmHtml()"></div>
+              </div>
+            </template>
+
+            <h4 style="margin-top:14px">Adjustments</h4>
+            <pre x-text="JSON.stringify(propResult.projection?.adjustments || {}, null, 2)"></pre>
+            <details style="margin-top:10px">
+              <summary class="hint" style="cursor:pointer">Raw Result</summary>
+              <pre x-text="JSON.stringify(propResult, null, 2)"></pre>
+            </details>
+          </div>
+        </template>
+
+        <!-- Sweep Result -->
+        <template x-if="sweepError">
+          <div class="result"><p class="error" x-text="sweepError"></p></div>
+        </template>
+        <template x-if="sweepResult && !sweepError">
+          <div class="result">
+            <h4>Auto Sweep Result</h4>
+            <div class="metric-grid">
+              <article class="metric"><h4>Player</h4><p x-text="(sweepResult.playerName || 'n/a') + ' (' + (sweepResult.playerId || '?') + ')'"></p></article>
+              <article class="metric"><h4>Projection</h4><p x-text="fmt(sweepResult.projectionValue, 1) + ' (' + (sweepResult.stat || '').toUpperCase() + ')'"></p></article>
+              <article class="metric"><h4>Best Book</h4><p x-text="(sweepResult.bestRecommendation?.bookmaker || 'n/a') + ' @ ' + fmt(sweepResult.bestRecommendation?.line, 1)"></p></article>
+              <article class="metric"><h4>Best Side</h4><p x-text="(sweepResult.bestRecommendation?.bestSide || 'n/a').toUpperCase() + ' | EV ' + fmt(sweepResult.bestRecommendation?.bestEvPct, 2) + '%'"></p></article>
+              <article class="metric"><h4>Offers</h4><p x-text="sweepResult.offerCount ?? 0"></p></article>
+              <article class="metric"><h4>Event</h4><p x-text="(sweepResult.eventAwayTeam || '?') + ' @ ' + (sweepResult.eventHomeTeam || '?')"></p></article>
+            </div>
+            <h4 style="margin-top:14px">Ranked Offers</h4>
+            <div class="odds-table-wrap" x-html="renderSweepTableHtml()"></div>
+            <details style="margin-top:10px">
+              <summary class="hint" style="cursor:pointer">Raw Result</summary>
+              <pre x-text="JSON.stringify(sweepResult, null, 2)"></pre>
+            </details>
+          </div>
+        </template>
       </div>
-      <p class="hint">2-3 legs only. Edit JSON directly.</p>
-      <textarea id="parlayLegs" class="codebox">[
-  {"playerId":2544,"playerTeam":"LAL","stat":"pts","line":25.5,"side":"over","probOver":0.58,"overOdds":-110,"underOdds":-110},
-  {"playerId":2544,"playerTeam":"LAL","stat":"reb","line":8.5,"side":"under","probOver":0.52,"overOdds":-115,"underOdds":-105}
-]</textarea>
-      <div id="parlayResult" class="result"></div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Sportsbook Odds</h2>
+    <!-- ═══ TAB 5: Live ═══ -->
+    <section class="tab-panel" x-data="live" x-show="$store.tab.current === 'live'" x-cloak>
+
+      <!-- Live Projection -->
+      <div class="panel">
+        <div class="panel-head"><h2>Live Projection</h2></div>
+        <p class="hint">Fetches real-time boxscore and adjusts pregame projection based on minutes remaining.</p>
+
+        <form class="form-grid" @submit.prevent="runLiveProjection()">
+          <label>Player ID <input type="number" x-model.number="livePlayerId"></label>
+          <label>Player Name
+            <input type="text" x-model="livePlayerName" list="playersList"
+              @change="
+                let ps = $store.players;
+                if (ps.loaded) {
+                  let r = ps.resolve(livePlayerName);
+                  if (r.id) { livePlayerId = r.id; livePlayerName = ps.nameForId(r.id); }
+                }
+              ">
+          </label>
+          <label>Player Team <input type="text" maxlength="3" x-model="livePlayerTeam" placeholder="SAS"></label>
+          <label>Opponent <input type="text" maxlength="3" x-model="liveOpponent" placeholder="TOR"></label>
+          <label>Stat
+            <select x-model="liveStat">
+              <option value="pts">Points</option>
+              <option value="reb">Rebounds</option>
+              <option value="ast">Assists</option>
+              <option value="fg3m">3PM</option>
+              <option value="stl">Steals</option>
+              <option value="blk">Blocks</option>
+              <option value="tov">Turnovers</option>
+              <option value="pra">PRA</option>
+            </select>
+          </label>
+          <label class="toggle"><input type="checkbox" x-model="liveIsHome"> Is Home</label>
+          <button type="submit" class="btn btn-primary" :disabled="liveLoading">
+            <span x-show="!liveLoading">Run Live Projection</span>
+            <span x-show="liveLoading">Fetching...</span>
+          </button>
+        </form>
+
+        <template x-if="liveError">
+          <div class="result"><p class="error" x-text="liveError"></p></div>
+        </template>
+        <template x-if="liveResult && !liveError">
+          <div class="result">
+            <div class="metric-grid">
+              <article class="metric ev-over"><h4>Live Projection</h4><p x-text="fmt(liveResult.liveProjection, 1)"></p></article>
+              <article class="metric"><h4>Current <span x-text="(liveResult.stat || '').toUpperCase()"></span></h4><p x-text="fmt(liveResult.currentStat, 1)"></p></article>
+              <article class="metric"><h4>Pregame Proj</h4><p x-text="fmt(liveResult.pregameProjection, 1)"></p></article>
+              <article class="metric"><h4>Mins Played</h4><p x-text="fmt(liveResult.minsPlayed, 1) + ' / ' + fmt(liveResult.projectedMinutes, 1)"></p></article>
+              <article class="metric"><h4>Remaining Mins</h4><p x-text="fmt(liveResult.remainingMins, 1)"></p></article>
+              <article class="metric"><h4>Per-Min Rate</h4><p x-text="fmt(liveResult.perMinRate, 4)"></p></article>
+              <article class="metric"><h4>Period</h4><p x-text="periodLabel()"></p></article>
+            </div>
+            <div class="pace-row">
+              <div class="pace-bar-wrap"><div class="pace-bar" :style="'width:' + paceWidth() + '%'"></div></div>
+              <span x-text="paceWidth() + '% through projected mins'"></span>
+            </div>
+            <h4>Live Stat Line</h4>
+            <div class="odds-table-wrap">
+              <table class="odds-table">
+                <thead><tr><th>Stat</th><th>Current</th></tr></thead>
+                <tbody x-html="liveStatRows()"></tbody>
+              </table>
+            </div>
+          </div>
+        </template>
       </div>
-      <form id="oddsForm" class="form-grid">
-        <label>
-          Regions
-          <input id="oddsRegions" type="text" value="us" placeholder="us">
-        </label>
-        <label>
-          Markets
-          <input id="oddsMarkets" type="text" value="h2h,spreads,totals" placeholder="h2h,spreads,totals">
-        </label>
-        <label>
-          Bookmakers (optional)
-          <input id="oddsBookmakers" type="text" value="betmgm,draftkings,fanduel" placeholder="betmgm,draftkings,fanduel">
-        </label>
-        <label>
-          Sport Key
-          <input id="oddsSport" type="text" value="basketball_nba" placeholder="basketball_nba">
-        </label>
-        <label>
-          Live Max Events
-          <input id="oddsMaxEvents" type="number" value="8" min="1" max="20">
-        </label>
-      </form>
-      <div class="card-actions">
-        <button id="propsPresetBtn" class="btn btn-chip">Props Preset</button>
-        <button id="loadOddsBtn" class="btn btn-secondary">Load Pregame Odds</button>
-        <button id="loadLiveOddsBtn" class="btn btn-primary">Load Live Odds</button>
+
+      <!-- Parlay EV -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head">
+          <h2>Parlay EV</h2>
+          <button class="btn btn-primary" @click="runParlay()" :disabled="parlayLoading">
+            <span x-show="!parlayLoading">Run Parlay</span>
+            <span x-show="parlayLoading">Running...</span>
+          </button>
+        </div>
+        <p class="hint">2-3 legs only. Edit JSON directly.</p>
+        <textarea class="codebox" x-model="parlayLegs"></textarea>
+
+        <template x-if="parlayError">
+          <div class="result"><p class="error" x-text="parlayError"></p></div>
+        </template>
+        <template x-if="parlayResult && !parlayError">
+          <div class="result">
+            <div class="metric-grid">
+              <article class="metric"><h4>Joint Prob</h4><p x-text="pct(parlayResult.jointProb)"></p></article>
+              <article class="metric"><h4>Naive Joint</h4><p x-text="pct(parlayResult.naiveJointProb)"></p></article>
+              <article class="metric"><h4>Correlation Impact</h4><p x-text="fmt(parlayResult.correlationImpact, 2) + ' pts'"></p></article>
+              <article class="metric"><h4>Parlay Odds</h4><p x-text="'Dec ' + fmt(parlayResult.parlayDecOdds, 3) + ' | Am ' + (parlayResult.parlayAmericanOdds || 'n/a')"></p></article>
+              <article class="metric"><h4>EV%</h4><p x-text="fmt(parlayResult.evPercent, 2) + ' | ' + (parlayResult.verdict || 'n/a')"></p></article>
+              <article class="metric"><h4>Kelly / Half</h4><p x-text="fmt(parlayResult.kellyFraction, 4) + ' / ' + fmt(parlayResult.halfKelly, 4)"></p></article>
+            </div>
+            <details style="margin-top:10px">
+              <summary class="hint" style="cursor:pointer">Raw Result</summary>
+              <pre x-text="JSON.stringify(parlayResult, null, 2)"></pre>
+            </details>
+          </div>
+        </template>
       </div>
-      <p id="oddsMarketWarning" class="hint market-warning" hidden></p>
-      <p class="hint">Set <code>ODDS_API_KEY</code> in your shell before launch to enable these endpoints.</p>
-      <p class="hint">Use "Auto Sweep Best Line" for player props. Odds panel is for h2h/spreads/totals.</p>
-      <div id="oddsResult" class="result"></div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Tracking & Settlement</h2>
+    <!-- ═══ TAB 6: Results ═══ -->
+    <section class="tab-panel" x-data="results" x-show="$store.tab.current === 'results'" x-cloak>
+      <div class="panel">
+        <div class="panel-head">
+          <h2>Tracking & Settlement</h2>
+        </div>
+        <p class="hint">Review top EV picks, settle previous picks, and inspect win/loss results.</p>
+
+        <div class="form-grid" style="margin-bottom:14px">
+          <label>Date Override <input type="date" x-model="trackingDate"></label>
+          <label>Limit <input type="number" x-model.number="trackingLimit" min="1" max="200"></label>
+        </div>
+
+        <div class="card-actions" style="margin-bottom:14px">
+          <button class="btn btn-primary" @click="loadBestToday()" :disabled="resultsLoading">Load Best EV</button>
+          <button class="btn btn-secondary" @click="settleDate()" :disabled="resultsLoading">Settle Date</button>
+          <button class="btn btn-secondary" @click="loadResults()" :disabled="resultsLoading">Load Results</button>
+        </div>
+
+        <template x-if="resultsLoading">
+          <div class="skeleton skeleton-lg"></div>
+        </template>
+        <template x-if="resultsError && !resultsLoading">
+          <p class="error" x-text="resultsError"></p>
+        </template>
+
+        <!-- Settlement banner -->
+        <template x-if="settleData && !resultsLoading">
+          <div class="result">
+            <h4>Settlement Run</h4>
+            <div class="metric-grid">
+              <article class="metric"><h4>Date</h4><p x-text="settleData.date || 'n/a'"></p></article>
+              <article class="metric"><h4>Pending</h4><p x-text="settleData.pendingCount ?? 0"></p></article>
+              <article class="metric"><h4>Settled Now</h4><p x-text="settleData.settledNow ?? 0"></p></article>
+              <article class="metric"><h4>Unresolved</h4><p x-text="settleData.unresolved ?? 0"></p></article>
+            </div>
+          </div>
+        </template>
+
+        <!-- CLV section -->
+        <template x-if="hasClv() && !resultsLoading && resultsData?.mode === 'results'">
+          <div class="result">
+            <h4>Closing Line Value</h4>
+            <div class="metric-grid">
+              <article class="metric"><h4>CLV Sample</h4><p x-text="summary().clvSampleSize ?? 0"></p></article>
+              <article class="metric ev-over"><h4>Avg CLV Line</h4><p x-text="fmt(summary().avgClvLine, 3)"></p></article>
+              <article class="metric ev-over"><h4>Avg CLV Odds%</h4><p x-text="fmt(summary().avgClvOddsPct, 2) + '%'"></p></article>
+              <article class="metric"><h4>+CLV Count</h4><p x-text="(summary().positiveClvCount ?? 0) + ' / ' + (summary().clvSampleSize ?? 0)"></p></article>
+              <article class="metric"><h4>+CLV Rate</h4><p x-text="pctAlready(summary().positiveClvPct)"></p></article>
+            </div>
+          </div>
+        </template>
+
+        <!-- Main summary metrics -->
+        <template x-if="resultsData && !resultsLoading && resultsData.mode === 'results'">
+          <div class="result">
+            <div class="metric-grid">
+              <article class="metric"><h4>Date</h4><p x-text="resultsData.date || 'n/a'"></p></article>
+              <article class="metric"><h4>Graded</h4><p x-text="summary().gradedCount ?? 0"></p></article>
+              <article class="metric"><h4>W / L / P</h4><p x-text="(summary().wins ?? 0) + ' / ' + (summary().losses ?? 0) + ' / ' + (summary().pushes ?? 0)"></p></article>
+              <article class="metric"><h4>Hit Rate</h4><p x-text="pctAlready(summary().hitRateNoPushPct)"></p></article>
+              <article class="metric"><h4>PnL (1u)</h4><p x-text="fmt(summary().pnlUnits, 2)"></p></article>
+              <article class="metric"><h4>ROI / Bet</h4><p x-text="pctAlready(summary().roiPctPerBet)"></p></article>
+              <article class="metric"><h4>Unsettled</h4><p x-text="resultsData.unsettledCount ?? 0"></p></article>
+            </div>
+          </div>
+        </template>
+
+        <!-- Results/Best table -->
+        <template x-if="resultsData && !resultsLoading">
+          <div class="result">
+            <h4 x-text="resultsData.mode === 'best' ? 'Top EV Plays' : 'Graded Picks'"></h4>
+            <div class="odds-table-wrap" x-html="renderResultsTableHtml()"></div>
+          </div>
+        </template>
       </div>
-      <p class="hint">Review top EV picks, settle previous picks, and inspect win/loss results.</p>
-      <form id="trackingForm" class="form-grid">
-        <label>
-          Date Override (optional)
-          <input id="trackingDate" type="date">
-        </label>
-        <label>
-          Limit
-          <input id="trackingLimit" type="number" min="1" max="200" value="15">
-        </label>
-      </form>
-      <div class="card-actions">
-        <button id="loadBestTodayBtn" class="btn btn-primary">Load Best EV</button>
-        <button id="settleYesterdayBtn" class="btn btn-secondary">Settle Date</button>
-        <button id="loadResultsYesterdayBtn" class="btn btn-secondary">Load Results</button>
+
+      <!-- Paper Summary -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head">
+          <h2>Paper Trading Summary</h2>
+          <div class="card-actions">
+            <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;color:var(--muted)">
+              Window <input type="number" x-model.number="summaryWindow" min="1" max="90" style="width:60px"> days
+            </label>
+            <button class="btn btn-primary" @click="loadPaperSummary()" :disabled="summaryLoading">
+              <span x-show="!summaryLoading">Load Summary</span>
+              <span x-show="summaryLoading">Loading...</span>
+            </button>
+          </div>
+        </div>
+
+        <template x-if="summaryLoading">
+          <div class="skeleton skeleton-lg"></div>
+        </template>
+        <template x-if="summaryError && !summaryLoading">
+          <p class="error" x-text="summaryError"></p>
+        </template>
+        <template x-if="summaryData && !summaryLoading">
+          <div class="result" x-html="renderSummaryHtml()"></div>
+        </template>
       </div>
-      <div id="trackingResult" class="result"></div>
     </section>
 
-    <section class="panel">
-      <div class="panel-head">
-        <h2>Starter EV Accuracy</h2>
+    <!-- ═══ TAB 7: Reference ═══ -->
+    <section class="tab-panel" x-data="reference" x-show="$store.tab.current === 'reference'" x-cloak>
+
+      <!-- Sportsbook Odds -->
+      <div class="panel">
+        <div class="panel-head"><h2>Sportsbook Odds</h2></div>
+        <form class="form-grid" @submit.prevent>
+          <label>Regions <input type="text" x-model="oddsRegions"></label>
+          <label>Markets <input type="text" x-model="oddsMarkets" @input="checkMarketWarning()"></label>
+          <label>Bookmakers <input type="text" x-model="oddsBookmakers"></label>
+          <label>Sport Key <input type="text" x-model="oddsSport"></label>
+          <label>Live Max Events <input type="number" x-model.number="oddsMaxEvents" min="1" max="20"></label>
+        </form>
+        <template x-if="oddsMarketWarning">
+          <p class="hint market-warning" x-text="oddsMarketWarning"></p>
+        </template>
+        <div class="card-actions" style="margin-top:10px">
+          <button class="btn btn-chip" @click="applyPropsPreset()">Props Preset</button>
+          <button class="btn btn-secondary" @click="loadOdds(false)" :disabled="oddsLoading">Load Pregame</button>
+          <button class="btn btn-primary" @click="loadOdds(true)" :disabled="oddsLoading">Load Live</button>
+        </div>
+        <p class="hint">Set <code>ODDS_API_KEY</code> before launch. Use Auto Sweep for player props.</p>
+
+        <template x-if="oddsError && !oddsLoading">
+          <p class="error" x-text="oddsError"></p>
+        </template>
+        <template x-if="oddsResult && !oddsLoading">
+          <div class="result">
+            <div class="metric-grid">
+              <article class="metric"><h4>Mode</h4><p x-text="oddsResult.mode || 'n/a'"></p></article>
+              <article class="metric"><h4>Events</h4><p x-text="oddsResult.eventCount ?? 0"></p></article>
+              <article class="metric"><h4>Discrepancies</h4><p x-text="(oddsResult.discrepancies || []).length"></p></article>
+              <article class="metric"><h4>Quota Remaining</h4><p x-text="oddsResult.quota?.remaining ?? 'n/a'"></p></article>
+              <article class="metric"><h4>Quota Used</h4><p x-text="oddsResult.quota?.used ?? 'n/a'"></p></article>
+            </div>
+            <h4 style="margin-top:14px">Top Line Discrepancies</h4>
+            <div class="odds-table-wrap" x-html="renderOddsTableHtml()"></div>
+            <details style="margin-top:10px">
+              <summary class="hint" style="cursor:pointer">Raw Result</summary>
+              <pre x-text="JSON.stringify(oddsResult, null, 2)"></pre>
+            </details>
+          </div>
+        </template>
       </div>
-      <p class="hint">Pregame historical test on all starters for a date using EV-positive leans.</p>
-      <form id="starterAccuracyForm" class="form-grid">
-        <label>
-          Date
-          <input id="starterAccDate" type="date">
-        </label>
-        <label>
-          Bookmakers
-          <input id="starterAccBookmakers" type="text" value="betmgm,draftkings,fanduel" placeholder="betmgm,draftkings,fanduel">
-        </label>
-        <label>
-          Regions
-          <input id="starterAccRegions" type="text" value="us" placeholder="us">
-        </label>
-        <label>
-          Sport
-          <input id="starterAccSport" type="text" value="basketball_nba" placeholder="basketball_nba">
-        </label>
-        <label>
-          Model Variant
-          <select id="starterAccModel">
-            <option value="full">Full</option>
-            <option value="simple">Simple</option>
-          </select>
-        </label>
-      </form>
-      <div class="card-actions">
-        <button id="runStarterAccuracyBtn" class="btn btn-primary">Run Starter Accuracy</button>
+
+      <!-- Starter EV Accuracy -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head"><h2>Starter EV Accuracy</h2></div>
+        <p class="hint">Pregame historical test on all starters for a date using EV-positive leans.</p>
+        <form class="form-grid" @submit.prevent="runStarterAccuracy()">
+          <label>Date <input type="date" x-model="starterDate"></label>
+          <label>Bookmakers <input type="text" x-model="starterBookmakers"></label>
+          <label>Regions <input type="text" x-model="starterRegions"></label>
+          <label>Sport <input type="text" x-model="starterSport"></label>
+          <label>Model
+            <select x-model="starterModel">
+              <option value="full">Full</option>
+              <option value="simple">Simple</option>
+            </select>
+          </label>
+          <button type="submit" class="btn btn-primary" :disabled="starterLoading">
+            <span x-show="!starterLoading">Run Starter Accuracy</span>
+            <span x-show="starterLoading">Running...</span>
+          </button>
+        </form>
+
+        <template x-if="starterError && !starterLoading">
+          <p class="error" x-text="starterError"></p>
+        </template>
+        <template x-if="starterResult && !starterLoading">
+          <div class="result">
+            <div class="metric-grid">
+              <article class="metric"><h4>Date</h4><p x-text="starterResult.targetDate || 'n/a'"></p></article>
+              <article class="metric"><h4>Games Final</h4><p x-text="starterResult.gamesFinal ?? 0"></p></article>
+              <article class="metric"><h4>Starters Seen</h4><p x-text="starterResult.startersSeen ?? 0"></p></article>
+              <article class="metric"><h4>EV Leans</h4><p x-text="starterResult.evLeansPlaced ?? 0"></p></article>
+              <article class="metric"><h4>Record</h4><p x-text="(starterResult.wins ?? 0) + ' / ' + (starterResult.losses ?? 0) + ' / ' + (starterResult.pushes ?? 0)"></p></article>
+              <article class="metric"><h4>Hit Rate</h4><p x-text="pctAlready(starterResult.hitRateNoPushPct)"></p></article>
+              <article class="metric"><h4>PnL (1u)</h4><p x-text="fmt(starterResult.pnlUnits, 2)"></p></article>
+              <article class="metric"><h4>ROI / Bet</h4><p x-text="pctAlready(starterResult.roiPctPerBet)"></p></article>
+              <article class="metric"><h4>Runtime</h4><p x-text="fmt(starterResult.runtimeSec, 1) + 's'"></p></article>
+            </div>
+            <div class="odds-table-wrap" style="margin-top:14px" x-html="renderStarterTableHtml()"></div>
+            <details style="margin-top:10px">
+              <summary class="hint" style="cursor:pointer">Raw Result</summary>
+              <pre x-text="JSON.stringify(starterResult, null, 2)"></pre>
+            </details>
+          </div>
+        </template>
       </div>
-      <div id="starterAccuracyResult" class="result"></div>
     </section>
+
   </main>
-
-  <template id="gameCardTemplate">
-    <article class="game-card">
-      <h3 class="matchup"></h3>
-      <p class="meta"></p>
-      <div class="card-actions">
-        <button class="btn btn-chip use-home">Use Home</button>
-        <button class="btn btn-chip use-away">Use Away</button>
-      </div>
-    </article>
-  </template>
-
-  <script src="/app.js"></script>
 </body>
 </html>
