@@ -395,6 +395,110 @@ class OddsStore:
                 row = _query("LIKE ?", f"%{last}%")
         return row
 
+    def get_line_movement(self, event_id, market, player_name, book=None):
+        """
+        Return the full snapshot timeline for a player prop.
+
+        Each entry represents one timestamp with aggregated over/under data.
+        Returns list of dicts ordered by ts_utc (earliest first):
+            [{ts_utc, book, line, over_odds, under_odds, minutes_to_tip}, ...]
+        Empty list if no snapshots found.
+        """
+        bc    = "AND book=?" if book else ""
+        extra = [book] if book else []
+
+        def _query(name_clause, name_val):
+            rows = self._conn.execute(
+                f"SELECT ts_utc, book, side, line, odds, commence_time "
+                f"FROM snapshots "
+                f"WHERE event_id=? AND market=? AND player_name {name_clause} {bc} "
+                f"ORDER BY ts_utc, book, side",
+                [event_id, market, name_val] + extra,
+            ).fetchall()
+            return rows
+
+        raw = _query("=?", player_name)
+        if not raw and player_name:
+            last = player_name.strip().split()[-1]
+            if len(last) > 2:
+                raw = _query("LIKE ?", f"%{last}%")
+        if not raw:
+            return []
+
+        # Group by (ts_utc, book) and merge over/under sides
+        from collections import OrderedDict
+        grouped = OrderedDict()
+        for ts, bk, side, line_val, odds_val, commence in raw:
+            key = (ts, bk)
+            if key not in grouped:
+                grouped[key] = {
+                    "ts_utc": ts, "book": bk,
+                    "line": None, "over_odds": None, "under_odds": None,
+                    "commence_time": commence,
+                }
+            if side == "over":
+                grouped[key]["line"] = line_val
+                grouped[key]["over_odds"] = odds_val
+            elif side == "under":
+                grouped[key]["under_odds"] = odds_val
+                if grouped[key]["line"] is None:
+                    grouped[key]["line"] = line_val
+
+        timeline = []
+        for entry in grouped.values():
+            # Compute minutes to tip
+            minutes_to_tip = None
+            if entry["commence_time"] and entry["ts_utc"]:
+                try:
+                    from datetime import datetime
+                    ct = entry["commence_time"][:19].replace("T", " ")
+                    ts = entry["ts_utc"][:19].replace("T", " ")
+                    tip = datetime.strptime(ct, "%Y-%m-%d %H:%M:%S")
+                    snap = datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+                    minutes_to_tip = round((tip - snap).total_seconds() / 60, 1)
+                except (ValueError, TypeError):
+                    pass
+            timeline.append({
+                "ts_utc": entry["ts_utc"],
+                "book": entry["book"],
+                "line": entry["line"],
+                "over_odds": entry["over_odds"],
+                "under_odds": entry["under_odds"],
+                "minutes_to_tip": minutes_to_tip,
+            })
+        return timeline
+
+    def get_line_movement_by_date(self, player_name, market, date_str, book=None):
+        """
+        Get line movement for a player prop by date (no event_id needed).
+
+        Finds the event via commence_time date matching, then delegates to
+        get_line_movement(). Returns list of timeline dicts or empty list.
+        """
+        bc    = "AND book=?" if book else ""
+        extra = [book] if book else []
+        row = self._conn.execute(
+            f"SELECT DISTINCT event_id FROM snapshots "
+            f"WHERE market=? AND player_name=? "
+            f"AND date(datetime(substr(commence_time,1,19), '-6 hours'))=? {bc} "
+            f"LIMIT 1",
+            [market, player_name, date_str] + extra,
+        ).fetchone()
+        if not row:
+            # Try last-name fuzzy match
+            last = player_name.strip().split()[-1] if player_name else ""
+            if len(last) > 2:
+                row = self._conn.execute(
+                    f"SELECT DISTINCT event_id FROM snapshots "
+                    f"WHERE market=? AND player_name LIKE ? "
+                    f"AND date(datetime(substr(commence_time,1,19), '-6 hours'))=? {bc} "
+                    f"LIMIT 1",
+                    [market, f"%{last}%", date_str] + extra,
+                ).fetchone()
+        if not row:
+            return []
+        return self.get_line_movement(row[0], market, player_name, book=book)
+
     def get_closing_lines_for_date(self, date_str, market=None, book=None):
         """Return all closing lines for events that commenced on date_str (NBA local time)."""
         clauses = ["date(datetime(substr(commence_time,1,19), '-6 hours'))=?"]

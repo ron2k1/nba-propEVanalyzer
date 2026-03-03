@@ -17,7 +17,7 @@ def _handle_backtest(argv):
                 "[--data-source nba|bref|local] [--local] [--bref-dir <path>] "
                 "[--local-index <path>] [--odds-source local_history] [--odds-db <path>] "
                 "[--real-only] [--clv] [--walk-forward] "
-                "[--emit-bets] [--emit-bets-path <path>]"
+                "[--emit-bets] [--emit-bets-path <path>] [--emit-all]"
             )
         }
     date_from = argv[2]
@@ -40,6 +40,7 @@ def _handle_backtest(argv):
     walk_forward = False
     emit_bets = False
     emit_bets_path = None
+    emit_all = False
     while idx < len(argv):
         token = str(argv[idx]).strip().lower()
         if token == "--model" and idx + 1 < len(argv):
@@ -99,6 +100,11 @@ def _handle_backtest(argv):
             emit_bets = True  # implied
             idx += 2
             continue
+        if token == "--emit-all":
+            emit_all = True
+            emit_bets = True  # implied — need bet records
+            idx += 1
+            continue
         return {
             "error": (
                 "Invalid backtest arguments. "
@@ -106,7 +112,7 @@ def _handle_backtest(argv):
                 "[--save] [--fast] [--data-source nba|bref|local] [--local] "
                 "[--bref-dir <path>] [--local-index <path>] "
                 "[--odds-source local_history] [--odds-db <path>] [--real-only] [--clv] "
-                "[--walk-forward] [--emit-bets] [--emit-bets-path <path>]"
+                "[--walk-forward] [--emit-bets] [--emit-bets-path <path>] [--emit-all]"
             )
         }
     result = run_backtest(date_from=date_from, date_to=date_to, model=model,
@@ -116,7 +122,8 @@ def _handle_backtest(argv):
                           local_index=local_index, odds_only=odds_only,
                           compute_clv=compute_clv,
                           walk_forward=walk_forward,
-                          emit_bets=emit_bets)
+                          emit_bets=emit_bets,
+                          emit_all=emit_all)
 
     # Write bet records to JSONL file if path specified
     if emit_bets_path and result.get("bets"):

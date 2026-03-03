@@ -329,6 +329,11 @@ def _new_accumulator():
         "clvLineSumNegative": 0.0,
         "roiClvPositive": {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
         "roiClvNegative": {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
+        # OLV tracking: did the market move toward our model between open and close?
+        "olvBetsTracked":    0,
+        "olvFavorableCount": 0,
+        "roiOlvFavorable":   {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
+        "roiOlvUnfavorable": {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
     }
 
 
@@ -358,6 +363,19 @@ def _finalize_clv(acc):
         "avgClvLineNegative": safe_round(acc["clvLineSumNegative"] / neg, 3) if neg else None,
         "roiClvPositive":     _finalize_roi_seg(acc["roiClvPositive"]),
         "roiClvNegative":     _finalize_roi_seg(acc["roiClvNegative"]),
+    }
+
+
+def _finalize_olv(acc):
+    """Produce the OLV summary dict from raw accumulator OLV fields."""
+    n   = acc["olvBetsTracked"]
+    fav = acc["olvFavorableCount"]
+    return {
+        "betsTracked":       n,
+        "favorableCount":    fav,
+        "favorablePct":      safe_round(fav / n * 100.0, 2) if n else None,
+        "roiOlvFavorable":   _finalize_roi_seg(acc["roiOlvFavorable"]),
+        "roiOlvUnfavorable": _finalize_roi_seg(acc["roiOlvUnfavorable"]),
     }
 
 
@@ -413,6 +431,7 @@ def _finalize_accumulator(acc):
         "realLineStatRoi":   {s: _finalize_roi_seg(acc["realLineStatRoi"][s])
                               for s in TRACKED_STATS},
         "clv": _finalize_clv(acc),
+        "olv": _finalize_olv(acc),
         "realLineCalibBins": [
             {
                 "bin":          f"{i*10}-{(i+1)*10}%",
@@ -454,6 +473,7 @@ def run_backtest(
     compute_clv=False,
     walk_forward=False,
     emit_bets=False,
+    emit_all=False,
 ):
     """
     Backtest projection + EV quality for one day or a date range.
@@ -829,14 +849,25 @@ def run_backtest(
                                 meets_threshold = bool(chosen.get("meetsThreshold")) or (
                                     edge >= float(PROJECTION_CONFIG.get("min_edge_threshold", 0.05))
                                 )
-                            if (
-                                float(chosen.get("evPercent") or 0.0) > 0.0
-                                and meets_threshold
-                                and _stat_ok
-                                and _bin_ok
-                            ):
+
+                            # Three-boolean gate for policy sensitivity analysis
+                            _has_positive_ev = float(chosen.get("evPercent") or 0.0) > 0.0
+                            _policy_pass = (
+                                _has_positive_ev and meets_threshold
+                                and _stat_ok and _bin_ok
+                            )
+
+                            # Determine if we need outcome grading
+                            _should_emit = (
+                                (emit_all and _has_positive_ev)
+                                or (emit_bets and _policy_pass)
+                            )
+                            if _policy_pass or _should_emit:
                                 outcome = _grade_side(actual_val, line, chosen_side)
                                 pnl = _pnl_for_american(outcome, chosen_odds)
+
+                            # ROI accumulators — only for policy-passing bets (unchanged)
+                            if _policy_pass:
                                 roi = acc["roiSimulation"]
                                 roi["betsPlaced"] += 1
                                 roi["pnlUnits"] += pnl
@@ -906,28 +937,82 @@ def run_backtest(
                                             else:
                                                 _clv_seg["pushes"] += 1
 
-                                # Emit bet-level record for downstream analysis
-                                if emit_bets:
-                                    _ps = proj_stat or {}
-                                    acc["_bet_records"].append({
-                                        "date": day.isoformat(),
-                                        "player_id": player_id,
-                                        "player_name": _player_full_name,
-                                        "stat": stat,
-                                        "line": float(line),
-                                        "projection": float(projected),
-                                        "prob_over": float(prob_over),
-                                        "bin": bin_idx,
-                                        "side": chosen_side,
-                                        "edge": float(edge),
-                                        "odds": int(chosen_odds),
-                                        "actual": float(actual_val),
-                                        "outcome": outcome,
-                                        "pnl": float(pnl),
-                                        "used_real_line": _used_real_line,
-                                        "n_games": int(_ps.get("nGames") or 0),
-                                        "shrink_weight": float(_ps.get("shrinkWeight") or 0.0),
-                                    })
+                            # Emit bet-level record for downstream analysis
+                            if _should_emit:
+                                # OLV: look up opening line for line movement data
+                                _open_line_val = None
+                                _line_movement = None
+                                _olv_favorable = None
+                                if odds_store is not None and odds_event_id and _market:
+                                    _olv_key = (odds_event_id, _market, _player_full_name)
+                                    if _olv_key not in _open_line_cache:
+                                        _open_line_cache[_olv_key] = odds_store.get_opening_line(
+                                            odds_event_id, _market, _player_full_name
+                                        )
+                                    _olv_open = _open_line_cache[_olv_key]
+                                    if _olv_open and _olv_open.get("open_line") is not None:
+                                        _open_line_val = float(_olv_open["open_line"])
+                                        _line_movement = float(line) - _open_line_val
+                                        # OLV favorable: market moved toward our model's view
+                                        # OVER bet + line went up (close > open) = market agrees
+                                        # UNDER bet + line went down (close < open) = market agrees
+                                        if abs(_line_movement) > 1e-9:
+                                            _olv_favorable = (
+                                                (chosen_side == "over" and _line_movement > 0)
+                                                or (chosen_side == "under" and _line_movement < 0)
+                                            )
+                                        else:
+                                            _olv_favorable = None  # no movement
+
+                                        # OLV accumulators (only for policy-passing bets with real lines)
+                                        if _policy_pass and _used_real_line and _olv_favorable is not None:
+                                            acc["olvBetsTracked"] += 1
+                                            if _olv_favorable:
+                                                acc["olvFavorableCount"] += 1
+                                                _olv_seg = acc["roiOlvFavorable"]
+                                            else:
+                                                _olv_seg = acc["roiOlvUnfavorable"]
+                                            _olv_seg["betsPlaced"] += 1
+                                            _olv_seg["pnlUnits"]   += pnl
+                                            if outcome == "win":
+                                                _olv_seg["wins"] += 1
+                                            elif outcome == "loss":
+                                                _olv_seg["losses"] += 1
+                                            else:
+                                                _olv_seg["pushes"] += 1
+
+                                _ps = proj_stat or {}
+                                acc["_bet_records"].append({
+                                    "date": day.isoformat(),
+                                    "player_id": player_id,
+                                    "player_name": _player_full_name,
+                                    "stat": stat,
+                                    "line": float(line),
+                                    "projection": float(projected),
+                                    "prob_over": float(prob_over),
+                                    "bin": bin_idx,
+                                    "side": chosen_side,
+                                    "edge": float(edge),
+                                    "odds": int(chosen_odds),
+                                    "actual": float(actual_val),
+                                    "outcome": outcome,
+                                    "pnl": float(pnl),
+                                    "used_real_line": _used_real_line,
+                                    "n_games": int(_ps.get("nGames") or 0),
+                                    "shrink_weight": float(_ps.get("shrinkWeight") or 0.0),
+                                    "has_positive_ev": _has_positive_ev,
+                                    "meets_threshold": meets_threshold,
+                                    "policy_pass": _policy_pass,
+                                    "policy_detail": {
+                                        "stat_in_whitelist": _stat_ok,
+                                        "bin_in_blocklist": not _bin_ok,
+                                        "blocked_stat": None if _stat_ok else stat,
+                                        "blocked_bin": None if _bin_ok else bin_idx,
+                                    },
+                                    "opening_line": _open_line_val,
+                                    "line_movement": round(_line_movement, 2) if _line_movement is not None else None,
+                                    "olv_favorable": _olv_favorable,
+                                })
 
             # End-of-day summary + checkpoint.
             day_samples = sum(accumulators[m]["sampleCount"] for m in models) - day_samples_start
@@ -968,7 +1053,7 @@ def run_backtest(
 
         # Pop bet records before finalization (not needed by _finalize_accumulator)
         _bet_records_by_model = {}
-        if emit_bets:
+        if emit_bets or emit_all:
             for m in models:
                 _bet_records_by_model[m] = accumulators[m].pop("_bet_records", [])
         else:
@@ -1003,13 +1088,15 @@ def run_backtest(
 
         response["fast"] = fast
         response["walkForward"] = walk_forward
+        if emit_all:
+            response["emitAll"] = True
         if odds_key:
             response["oddsSource"] = odds_key
         if odds_only:
             response["oddsOnly"] = True
 
-        # Attach bet-level records when emit_bets is enabled
-        if emit_bets and _bet_records_by_model:
+        # Attach bet-level records when emit_bets or emit_all is enabled
+        if (emit_bets or emit_all) and _bet_records_by_model:
             if len(models) == 1:
                 response["bets"] = _bet_records_by_model[models[0]]
             else:
