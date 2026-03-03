@@ -3,25 +3,26 @@ import { apiGet, escapeHtml, fmt } from './api.js';
 
 export default function () {
   return {
+    // Shared lock — prevents overlapping long-running requests
+    busy: false,
+
     // Collect Lines
-    collectLoading: false,
     collectResult: null,
     collectError: '',
     collectBooks: 'betmgm,draftkings,fanduel',
     collectStats: 'pts,reb,ast,pra',
 
     // Roster Sweep
-    sweepLoading: false,
     sweepResult: null,
     sweepError: '',
 
     // Daily Ops
-    opsLoading: false,
     opsSteps: [],
     opsError: '',
 
     async collectLines() {
-      this.collectLoading = true;
+      if (this.busy) return;
+      this.busy = true;
       this.collectError = '';
       this.collectResult = null;
       try {
@@ -38,16 +39,17 @@ export default function () {
       } catch (err) {
         this.collectError = `Collect lines failed: ${err.message}`;
       } finally {
-        this.collectLoading = false;
+        this.busy = false;
       }
     },
 
     async rosterSweep() {
-      this.sweepLoading = true;
+      if (this.busy) return;
+      this.busy = true;
       this.sweepError = '';
       this.sweepResult = null;
       try {
-        const data = await apiGet('/api/roster_sweep');
+        const data = await apiGet('/api/roster_sweep', { timeoutMs: 600_000 });
         if (!data || data.success !== true) {
           this.sweepError = data?.error || 'Roster sweep failed.';
           return;
@@ -56,12 +58,13 @@ export default function () {
       } catch (err) {
         this.sweepError = `Roster sweep failed: ${err.message}`;
       } finally {
-        this.sweepLoading = false;
+        this.busy = false;
       }
     },
 
     async runDailyOps() {
-      this.opsLoading = true;
+      if (this.busy) return;
+      this.busy = true;
       this.opsError = '';
       this.opsSteps = [
         { name: 'Collect Lines', status: 'running', result: null },
@@ -76,27 +79,20 @@ export default function () {
 
         // Step 2: Roster Sweep
         this.opsSteps[1].status = 'running';
-        const rs = await apiGet('/api/roster_sweep');
+        const rs = await apiGet('/api/roster_sweep', { timeoutMs: 600_000 });
         this.opsSteps[1].status = rs?.success ? 'done' : 'error';
         this.opsSteps[1].result = rs;
 
         // Step 3: Build Closes
         this.opsSteps[2].status = 'running';
-        const data = await apiGet('/api/daily_ops?dryRun=false');
+        const data = await apiGet('/api/daily_ops?dryRun=false', { timeoutMs: 600_000 });
         this.opsSteps[2].status = data?.success ? 'done' : 'error';
         this.opsSteps[2].result = data;
       } catch (err) {
         this.opsError = `Pipeline failed: ${err.message}`;
       } finally {
-        this.opsLoading = false;
+        this.busy = false;
       }
-    },
-
-    stepIcon(status) {
-      if (status === 'done') return 'done';
-      if (status === 'error') return 'error';
-      if (status === 'running') return 'running';
-      return 'pending';
     },
   };
 }

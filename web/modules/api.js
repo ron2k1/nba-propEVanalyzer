@@ -1,8 +1,14 @@
 // Shared API utilities and formatters — used by all tab modules
 
-export async function apiGet(path) {
-  const res = await fetch(path, { cache: "no-store" });
-  return res.json();
+export async function apiGet(path, { timeoutMs = 300_000 } = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(path, { cache: "no-store", signal: ctrl.signal });
+    return res.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function apiPost(path, body) {
