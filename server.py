@@ -230,6 +230,41 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     args.append(date_str)
                 return self._send_json(200, _run_nba_command(args))
 
+            if path == "/api/paper_summary":
+                window_days = (query.get("windowDays") or ["14"])[0].strip() or "14"
+                args = ["paper_summary", "--window-days", window_days]
+                return self._send_json(200, _run_nba_command(args))
+
+            if path == "/api/journal_gate":
+                window_days = (query.get("windowDays") or ["14"])[0].strip() or "14"
+                args = ["journal_gate", "--window-days", window_days]
+                return self._send_json(200, _run_nba_command(args))
+
+            if path == "/api/roster_sweep":
+                date_str = (query.get("date") or [""])[0].strip()
+                args = ["roster_sweep"]
+                if date_str:
+                    args.append(date_str)
+                return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
+
+            if path == "/api/collect_lines":
+                books = (query.get("books") or [DEFAULT_MAIN_BOOKMAKERS])[0].strip() or DEFAULT_MAIN_BOOKMAKERS
+                stats = (query.get("stats") or ["pts,reb,ast,pra"])[0].strip() or "pts,reb,ast,pra"
+                args = ["collect_lines", "--books", books, "--stats", stats]
+                return self._send_json(200, _run_nba_command(args))
+
+            if path == "/api/daily_ops":
+                dry_run = (query.get("dryRun") or ["false"])[0].strip().lower()
+                args = ["daily_ops"]
+                if dry_run == "true":
+                    args.append("--dry-run")
+                return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
+
+            if path == "/api/top_picks":
+                limit = (query.get("limit") or ["5"])[0].strip() or "5"
+                args = ["top_picks", limit]
+                return self._send_json(200, _run_nba_command(args))
+
             return self._serve_static(path)
         except subprocess.TimeoutExpired:
             self._send_json(504, {"success": False, "error": "Request timed out calling nba_mod.py."})
