@@ -645,14 +645,16 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
     _wl = _bp.get("stat_whitelist", set())
     _bb = _bp.get("blocked_prob_bins", set())
 
-    def _policy_ok(e):
-        if _wl and str(e.get("stat", "")).lower() not in _wl:
-            return False
+    def _policy_check(e):
+        """Return None if policy-qualified, else a short reason string."""
+        stat = str(e.get("stat", "")).lower()
+        if _wl and stat not in _wl:
+            return f"{stat} not in whitelist"
         po = _as_float(e.get("probOver"), 0.5)
         bin_idx = max(0, min(9, int(po * 10)))
         if bin_idx in _bb:
-            return False
-        return True
+            return f"bin {bin_idx} blocked ({bin_idx*10}-{(bin_idx+1)*10}%)"
+        return None
 
     top_rows = [
         {
@@ -670,7 +672,8 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
             "recommendedOdds": e.get("recommendedOdds"),
             "settled": e.get("settled"),
             "result": e.get("result"),
-            "policyQualified": _policy_ok(e),
+            "policyQualified": _policy_check(e) is None,
+            "policyRejectReason": _policy_check(e),
         }
         for e in top
     ]
@@ -767,7 +770,7 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
                 "odds": row.get("recommendedOdds", ""),
                 "move": f"{delta:+.1f}" if delta is not None else "-",
                 "clv": "yes" if fav is True else ("no" if fav is False else "-"),
-                "policy": "OK" if row.get("policyQualified") else "--",
+                "policy": "OK" if row.get("policyQualified") else (row.get("policyRejectReason") or "--"),
             })
         toon_print_section(
             f"BEST TODAY  {target}  ({len(ranked)} ranked | {len(policy_qualified)} policy-qualified)",

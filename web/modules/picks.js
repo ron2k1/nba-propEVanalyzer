@@ -55,13 +55,27 @@ export default function () {
 
     bestRows() {
       if (!this.bestResult) return [];
-      return Array.isArray(this.bestResult.top) ? this.bestResult.top : [];
+      const rows = this.bestResult.topOffers || this.bestResult.top || [];
+      return Array.isArray(rows) ? rows : [];
+    },
+
+    qualifiedRows() {
+      return this.bestRows().filter(r => r.policyQualified);
+    },
+
+    leanRows() {
+      return this.bestRows().filter(r => !r.policyQualified && (r.recommendedEvPct || 0) > 0);
     },
 
     topRows() {
       if (!this.topResult) return [];
       const picks = this.topResult.picks || this.topResult.top || [];
       return Array.isArray(picks) ? picks : [];
+    },
+
+    reasonTag(reason) {
+      if (!reason) return '';
+      return `<span class="lean-reason">${escapeHtml(reason)}</span>`;
     },
 
     // Helpers exposed to template

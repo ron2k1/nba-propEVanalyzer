@@ -224,6 +224,33 @@
         </template>
       </div>
 
+      <!-- Model Leans -->
+      <div class="panel" style="margin-top:16px" x-show="leanRows().length > 0" x-cloak>
+        <div class="panel-head">
+          <h2>Model Leans</h2>
+          <span class="lean-disclaimer">Not policy-qualified — for research only</span>
+        </div>
+        <div class="odds-table-wrap">
+          <table class="odds-table">
+            <thead><tr><th>Player</th><th>Stat</th><th>Side</th><th>Line</th><th>Proj</th><th>EV%</th><th>Odds</th><th>Reason</th></tr></thead>
+            <tbody>
+              <template x-for="r in leanRows()" :key="(r.playerId||'') + r.stat + r.line">
+                <tr>
+                  <td x-text="r.playerName || r.playerId || '?'"></td>
+                  <td x-text="(r.stat || '').toUpperCase()"></td>
+                  <td x-text="(r.recommendedSide || '').toUpperCase()"></td>
+                  <td x-text="fmt(r.line, 1)"></td>
+                  <td x-text="fmt(r.projection, 1)"></td>
+                  <td x-text="fmt(r.recommendedEvPct, 2) + '%'"></td>
+                  <td x-text="r.recommendedOdds ?? 'n/a'"></td>
+                  <td x-html="reasonTag(r.policyRejectReason)"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
       <!-- Top Picks -->
       <div class="panel" style="margin-top:16px">
         <div class="panel-head">
