@@ -645,7 +645,7 @@ class DecisionJournal:
     def gate_check(
         self,
         window_days=14,
-        min_sample=30,
+        min_sample=50,
         min_roi=0.0,
         min_positive_clv_pct=50.0,
     ) -> dict:

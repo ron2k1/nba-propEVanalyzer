@@ -181,7 +181,7 @@ CLV rule: `clvLine > 0` AND `clvOddsPct > 0` required for high-quality bets. Pos
 
 ### GO-LIVE Gate
 
-`paper_summary` → `gate.gatePass`: `sample >= 30` | `roi > 0.0` | `positive_clv_pct >= 50.0` | no stat with ≥20 signals AND hit rate < 45%.
+`paper_summary` → `gate.gatePass`: `sample >= 50` | `roi > 0.0` | `positive_clv_pct >= 50.0` | no stat with ≥20 signals AND hit rate < 45%.
 
 **Model comparison protocol:** same date range, same books/stats, same odds DB. Compare `roiReal`, `hitRate` on real-line subset, and `realLineSamples` count only.
 
