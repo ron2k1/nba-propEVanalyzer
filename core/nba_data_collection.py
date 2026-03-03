@@ -1800,6 +1800,37 @@ def get_todays_game_totals(date_str: str = None) -> dict:
         return {}
 
 
+_player_team_cache = {"data": None, "ts": 0}
+
+def get_player_team_map(max_age_sec: int = 3600) -> dict:
+    """
+    Return {normalized_player_name: TEAM_ABBR} for all current-season players.
+    Uses LeagueDashPlayerStats (one API call, 544 rows). Cached for max_age_sec.
+    """
+    now = time.time()
+    if _player_team_cache["data"] and (now - _player_team_cache["ts"]) < max_age_sec:
+        return _player_team_cache["data"]
+    try:
+        time.sleep(API_DELAY)
+        result = retry_api_call(
+            lambda: leaguedashplayerstats.LeagueDashPlayerStats(
+                season=CURRENT_SEASON, timeout=30,
+            )
+        )
+        rows = result.get_normalized_dict().get("LeagueDashPlayerStats", [])
+        mapping = {}
+        for r in rows:
+            name = re.sub(r"[.\-'']", "", str(r.get("PLAYER_NAME", ""))).lower().strip()
+            abbr = str(r.get("TEAM_ABBREVIATION", "")).upper()
+            if name and abbr:
+                mapping[name] = abbr
+        _player_team_cache["data"] = mapping
+        _player_team_cache["ts"] = now
+        return mapping
+    except Exception:
+        return _player_team_cache["data"] or {}
+
+
 def get_game_total(home_abbr: str, away_abbr: str, date_str: str = None) -> float | None:
     """
     Convenience wrapper: look up a single game's O/U total.

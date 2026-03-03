@@ -106,6 +106,7 @@ def compute_prop_ev(
     no_blend=False,
     opponent_is_b2b=False,
     game_total=None,
+    minutes_multiplier=None,
 ):
     stat_key = str(stat or "").lower().strip()
     line_val = float(line)
@@ -135,6 +136,7 @@ def compute_prop_ev(
         model_variant=model_variant,
         opponent_is_b2b=opponent_is_b2b,
         game_total=game_total,
+        minutes_multiplier=minutes_multiplier,
     )
     if not proj_data.get("success"):
         return proj_data

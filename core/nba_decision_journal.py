@@ -486,7 +486,11 @@ class DecisionJournal:
     # ------------------------------------------------------------------
 
     def generate_report(self, date_from, date_to) -> dict:
-        """Generate a performance report over a date range."""
+        """Generate a performance report over a date range.
+
+        Includes collection coverage: dates with signals vs total calendar
+        dates, plus any gap dates where no signals were recorded.
+        """
         utc_start, _    = _ct_day_utc_bounds(date_from)
         _,        utc_end = _ct_day_utc_bounds(date_to)
         cur = self._conn.execute(
@@ -585,6 +589,34 @@ class DecisionJournal:
             "synthetic": {"count": len(synth_recs), "hitRate": hr_synth, "roi": roi_synth},
         }
 
+        # --- Collection coverage / gap detection ---
+        date_from_d = datetime.strptime(str(date_from), "%Y-%m-%d").date()
+        date_to_d = datetime.strptime(str(date_to), "%Y-%m-%d").date()
+        all_dates = set()
+        d = date_from_d
+        while d < date_to_d:
+            all_dates.add(d.isoformat())
+            d += timedelta(days=1)
+
+        # Signal ts_utc is stored in UTC; shift by -6h to recover the
+        # Central Time game day (matches _ct_day_utc_bounds convention).
+        ct_signal_dates_cur = self._conn.execute(
+            """SELECT DISTINCT DATE(ts_utc, '-6 hours') AS ct_date
+               FROM signals
+               WHERE ts_utc >= ? AND ts_utc < ?""",
+            (utc_start, utc_end),
+        )
+        dates_with_signals = {row[0] for row in ct_signal_dates_cur.fetchall()}
+        gaps = sorted(all_dates - dates_with_signals)
+
+        coverage = {
+            "daysInRange": len(all_dates),
+            "daysWithSignals": len(dates_with_signals & all_dates),
+            "gapDates": gaps,
+        }
+        if gaps:
+            coverage["warning"] = f"{len(gaps)} collection day(s) missing"
+
         return {
             "success": True,
             "dateFrom": date_from,
@@ -603,6 +635,7 @@ class DecisionJournal:
             "by_confidence_bucket": by_conf,
             "by_edge_bucket": by_edge,
             "by_line_type": by_line_type,
+            "coverage": coverage,
         }
 
     # ------------------------------------------------------------------

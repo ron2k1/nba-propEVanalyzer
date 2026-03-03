@@ -4,6 +4,7 @@
 import csv
 import json
 import os
+import sys
 import tempfile
 import time
 import uuid
@@ -14,6 +15,7 @@ from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.static import players as nba_players_static
 
 from .nba_data_collection import HEADERS, API_DELAY, retry_api_call, safe_round, safe_div, BETTING_POLICY
+from .nba_toon import to_toon_table, toon_print_section
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
@@ -748,27 +750,29 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
     policy_qualified = [r for r in top_rows if r.get("policyQualified")]
 
     # --- Human-readable ranking (printed before the final JSON line) ---
-    print(f"\n=== BEST TODAY  {target}  ({len(ranked)} ranked | {len(policy_qualified)} policy-qualified) ===")
-    print(f"{'#':<3} {'Player':<26} {'Stat':<5} {'Side':<6} {'Line':>5}  {'EV%':>7}  {'Proj':>6}  {'Odds':>6}  {'Move':>6}  {'CLV':>4}  {'Policy'}")
-    print("-" * 100)
-    for idx, row in enumerate(top_rows, 1):
-        lm     = row.get("lineMovement") or {}
-        delta  = lm.get("lineDelta")
-        fav    = lm.get("favorable")
-        move_s = (f"{delta:+.1f}" if delta is not None else "  —  ")
-        clv_s  = ("yes" if fav is True else ("no" if fav is False else "---"))
-        pol_s  = "OK" if row.get("policyQualified") else "--"
-        _name = str(row.get('playerName', '') or '').encode('ascii', 'replace').decode('ascii')
-        print(
-            f"{idx:<3} {_name:<26} "
-            f"{str(row.get('stat','')):<5} {str(row.get('recommendedSide','')):<6} "
-            f"{row.get('line', 0):>5.1f}  "
-            f"{(_as_float(row.get('recommendedEvPct'), 0.0) or 0.0):>6.1f}%  "
-            f"{(_as_float(row.get('projection'), 0.0) or 0.0):>6.1f}  "
-            f"{str(row.get('recommendedOdds','')):>6}  "
-            f"{move_s:>6}  {clv_s:>4}  {pol_s}"
+    if sys.stdout.isatty() and top_rows:
+        toon_rows = []
+        for idx, row in enumerate(top_rows, 1):
+            lm    = row.get("lineMovement") or {}
+            delta = lm.get("lineDelta")
+            fav   = lm.get("favorable")
+            toon_rows.append({
+                "#": idx,
+                "player": str(row.get("playerName", "") or "").encode("ascii", "replace").decode("ascii"),
+                "stat": row.get("stat", ""),
+                "side": row.get("recommendedSide", ""),
+                "line": row.get("line", 0),
+                "evPct": safe_round(_as_float(row.get("recommendedEvPct"), 0.0) or 0.0, 1),
+                "proj": safe_round(_as_float(row.get("projection"), 0.0) or 0.0, 1),
+                "odds": row.get("recommendedOdds", ""),
+                "move": f"{delta:+.1f}" if delta is not None else "-",
+                "clv": "yes" if fav is True else ("no" if fav is False else "-"),
+                "policy": "OK" if row.get("policyQualified") else "--",
+            })
+        toon_print_section(
+            f"BEST TODAY  {target}  ({len(ranked)} ranked | {len(policy_qualified)} policy-qualified)",
+            to_toon_table(toon_rows, ["#", "player", "stat", "side", "line", "evPct", "proj", "odds", "move", "clv", "policy"]),
         )
-    print()
 
     return {
         "success": True,

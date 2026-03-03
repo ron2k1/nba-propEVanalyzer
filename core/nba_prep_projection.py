@@ -2,6 +2,7 @@
 """Projection-focused prep logic."""
 
 import math
+import os
 import statistics
 import time
 import traceback
@@ -37,6 +38,11 @@ _LINE_BLEND_STDEV_FACTOR = math.sqrt(1.0 - _LINE_BLEND_MODEL_WEIGHT)
 
 # Reference window for variance-inflation scaling (max games fetched per player).
 _N_GAMES_REF = 25
+
+# Continuous shrinkage strength: k/(k+n) blends weighted_avg toward season_avg.
+# Lower k = more shrinkage (stronger pull to season avg).
+# Override via SHRINK_K env var for sensitivity testing.
+_SHRINK_K = int(os.getenv("SHRINK_K", "8"))
 
 _DEF_WEIGHTS = {
     "G": {
@@ -223,12 +229,11 @@ def _project_minutes(logs, rolling, splits, is_home, is_b2b):
     season_mins = rolling.get("min_avg_season", 0) or weighted_mins or 0.0
     min_stdev = float(rolling.get("min_stdev", 0) or 0.0)
 
-    # Regression to mean for extreme recent minutes (mirrors stat regression).
-    if min_stdev > 0 and season_mins > 0:
-        z = abs((weighted_mins - season_mins) / min_stdev)
-        if z > 1.5:
-            shrink = min(0.5, (z - 1.5) * 0.25)
-            weighted_mins = weighted_mins * (1 - shrink) + season_mins * shrink
+    # Continuous shrinkage toward season minutes: k/(k+n) blend.
+    n_mins = len(vals)
+    if season_mins > 0 and n_mins > 0:
+        _shrink_w = _SHRINK_K / (_SHRINK_K + n_mins)
+        weighted_mins = (1 - _shrink_w) * weighted_mins + _shrink_w * season_mins
 
     base = 0.60 * weighted_mins + 0.40 * season_mins
 
@@ -476,14 +481,11 @@ def compute_projection(
                 season_avg = sum(_last5_vals) / len(_last5_vals)
                 season_mins = (sum(_last5_mins) / len(_last5_mins)) if _last5_mins else season_mins
 
-            # Regression to mean: dampen extreme recent performance toward
-            # season average. Activates above 1.5 stdev; linear shrinkage to
-            # max 50%.  Prevents last-5 hot/cold streaks from dominating.
-            if stdev_val > 0 and season_avg > 0:
-                z = abs((weighted_avg - season_avg) / stdev_val)
-                if z > 1.5:
-                    shrink = min(0.5, (z - 1.5) * 0.25)
-                    weighted_avg = weighted_avg * (1 - shrink) + season_avg * shrink
+            # Continuous shrinkage toward season average: k/(k+n) blend.
+            # Lower k = stronger pull to season avg; n = games in window.
+            _shrink_w = _SHRINK_K / (_SHRINK_K + n) if n > 0 else 1.0
+            if season_avg > 0 and n > 0:
+                weighted_avg = (1 - _shrink_w) * weighted_avg + _shrink_w * season_avg
 
             # Variance inflation for small samples: widen CDF tails when we
             # have fewer games, reflecting higher uncertainty.  No effect at
@@ -620,6 +622,8 @@ def compute_projection(
                 "confidence": confidence,
                 "seasonAvg": safe_round(season_avg, 2),
                 "weightedAvg": safe_round(weighted_avg, 2),
+                "nGames": n,
+                "shrinkWeight": safe_round(_shrink_w, 4),
                 "last5Avg": rolling.get(f"{stat}_avg5", 0),
                 "last10Avg": rolling.get(f"{stat}_avg10", 0),
                 "median": rolling.get(f"{stat}_median", 0),

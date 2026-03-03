@@ -8,12 +8,16 @@ import re
 import requests
 from dotenv import load_dotenv
 
+from .nba_toon import to_toon_object, to_toon_table
+from .nba_rag_client import query_rag
+
 load_dotenv(override=True)
 
 _OLLAMA_BASE = "http://localhost:11434"
 _OLLAMA_MODEL = "gpt-oss:20b"
 _CLAUDE_MODEL = "claude-sonnet-4-6"
 _PROVIDER_ORDER = os.getenv("LLM_PROVIDER_ORDER", "ollama_first").strip().lower()
+_PROMPT_FORMAT = os.getenv("LLM_PROMPT_FORMAT", "toon").strip().lower()
 _TIMEOUT = 90
 
 
@@ -116,10 +120,19 @@ def llm_injury_signal(player_name, team_abbr, news_signals):
     if not news_signals:
         return {"success": False, "error": "No news signals to analyze"}
 
-    articles_text = "\n".join([
-        f"- [{s.get('source')}] {s.get('title')} (status: {s.get('status')}, conf: {s.get('confidence')})"
-        for s in (news_signals or [])[:10]
-    ])
+    signals = (news_signals or [])[:10]
+    if _PROMPT_FORMAT == "toon":
+        articles_text = to_toon_table(
+            [{"source": s.get("source"), "title": s.get("title"),
+              "status": s.get("status"), "confidence": s.get("confidence")}
+             for s in signals],
+            columns=["source", "title", "status", "confidence"],
+        )
+    else:
+        articles_text = "\n".join([
+            f"- [{s.get('source')}] {s.get('title')} (status: {s.get('status')}, conf: {s.get('confidence')})"
+            for s in signals
+        ])
 
     system_prompt = (
         "You are an NBA prop betting analyst. Analyze injury/news signals and return a JSON "
@@ -133,6 +146,10 @@ def llm_injury_signal(player_name, team_abbr, news_signals):
         "Return ONLY this JSON:\n"
         '{"adjustmentPct": <float -0.25 to 0.25>, "reasoning": "<1-2 sentences>", "confidence": <0.0 to 1.0>}'
     )
+
+    rag_context = query_rag(f"injury patterns and projection adjustments for {player_name} {team_abbr}")
+    if rag_context:
+        user_prompt += f"\n\nHistorical context:\n{rag_context}"
 
     content, provider, err = _llm_call(system_prompt, user_prompt)
     if err:
@@ -148,6 +165,7 @@ def llm_injury_signal(player_name, team_abbr, news_signals):
         "reasoning": str(parsed.get("reasoning") or ""),
         "confidence": float(parsed.get("confidence") or 0.5),
         "provider": provider,
+        "ragContext": bool(rag_context),
     }
 
 
@@ -160,15 +178,24 @@ def llm_matchup_context(player_name, stat, projection, opponent_abbr, is_home,
     """
     defense_text = ""
     if opponent_defense:
-        defense_text = (
-            f"Opponent defense rank: {opponent_defense.get('rank')} | "
-            f"Def rating: {opponent_defense.get('defRating')} | "
-            f"Pts allowed to position: {opponent_defense.get('ptsAllowed')}"
-        )
+        if _PROMPT_FORMAT == "toon":
+            defense_text = "Opponent defense:\n" + to_toon_object(opponent_defense)
+        else:
+            defense_text = (
+                f"Opponent defense rank: {opponent_defense.get('rank')} | "
+                f"Def rating: {opponent_defense.get('defRating')} | "
+                f"Pts allowed to position: {opponent_defense.get('ptsAllowed')}"
+            )
 
     history_text = ""
     if matchup_history:
-        history_text = f"Recent matchup history vs {opponent_abbr}: {json.dumps(matchup_history)}"
+        if _PROMPT_FORMAT == "toon":
+            if isinstance(matchup_history, list) and matchup_history:
+                history_text = f"Recent matchup history vs {opponent_abbr}:\n" + to_toon_table(matchup_history)
+            else:
+                history_text = f"Recent matchup history vs {opponent_abbr}: {json.dumps(matchup_history)}"
+        else:
+            history_text = f"Recent matchup history vs {opponent_abbr}: {json.dumps(matchup_history)}"
 
     system_prompt = (
         "You are an NBA prop betting analyst. Analyze matchup context and return a modifier "
@@ -184,6 +211,10 @@ def llm_matchup_context(player_name, stat, projection, opponent_abbr, is_home,
         '{"modifier": <float 0.80 to 1.20>, "reasoning": "<1-2 sentences>", "confidence": <0.0 to 1.0>}'
     )
 
+    rag_context = query_rag(f"matchup calibration findings for {stat} against {opponent_abbr}")
+    if rag_context:
+        user_prompt += f"\n\nHistorical context:\n{rag_context}"
+
     content, provider, err = _llm_call(system_prompt, user_prompt)
     if err:
         return {"success": False, "error": err}
@@ -198,6 +229,7 @@ def llm_matchup_context(player_name, stat, projection, opponent_abbr, is_home,
         "reasoning": str(parsed.get("reasoning") or ""),
         "confidence": float(parsed.get("confidence") or 0.5),
         "provider": provider,
+        "ragContext": bool(rag_context),
     }
 
 
@@ -211,19 +243,35 @@ def llm_line_reasoning(player_name, stat, line, projection, ev_data=None, refere
     if ev_data:
         over = ev_data.get("over") or {}
         under = ev_data.get("under") or {}
-        ev_text = (
-            f"Model EV — Over: {over.get('evPercent')}% | Under: {under.get('evPercent')}%\n"
-            f"Prob Over: {ev_data.get('probOver')} | Prob Under: {ev_data.get('probUnder')}\n"
-            f"Distribution: {ev_data.get('distributionMode')}"
-        )
+        if _PROMPT_FORMAT == "toon":
+            ev_text = "Model EV:\n" + to_toon_object({
+                "evOver": f"{over.get('evPercent')}%",
+                "evUnder": f"{under.get('evPercent')}%",
+                "probOver": ev_data.get("probOver"),
+                "probUnder": ev_data.get("probUnder"),
+                "distribution": ev_data.get("distributionMode"),
+            })
+        else:
+            ev_text = (
+                f"Model EV — Over: {over.get('evPercent')}% | Under: {under.get('evPercent')}%\n"
+                f"Prob Over: {ev_data.get('probOver')} | Prob Under: {ev_data.get('probUnder')}\n"
+                f"Distribution: {ev_data.get('distributionMode')}"
+            )
 
     ref_text = ""
     if reference_book_meta:
-        ref_text = (
-            f"Sharp book ({reference_book_meta.get('book')}): "
-            f"No-vig Over {reference_book_meta.get('noVigOver')} | "
-            f"No-vig Under {reference_book_meta.get('noVigUnder')}"
-        )
+        if _PROMPT_FORMAT == "toon":
+            ref_text = "Sharp book reference:\n" + to_toon_object({
+                "book": reference_book_meta.get("book"),
+                "noVigOver": reference_book_meta.get("noVigOver"),
+                "noVigUnder": reference_book_meta.get("noVigUnder"),
+            })
+        else:
+            ref_text = (
+                f"Sharp book ({reference_book_meta.get('book')}): "
+                f"No-vig Over {reference_book_meta.get('noVigOver')} | "
+                f"No-vig Under {reference_book_meta.get('noVigUnder')}"
+            )
 
     system_prompt = (
         "You are an NBA sharp betting analyst. Evaluate whether a prop line is sharp "
@@ -236,6 +284,10 @@ def llm_line_reasoning(player_name, stat, line, projection, ev_data=None, refere
         "Return ONLY this JSON:\n"
         '{"verdict": "sharp"|"soft"|"neutral", "sharpnessScore": <int 1-10>, "reasoning": "<2-3 sentences>"}'
     )
+
+    rag_context = query_rag(f"calibration lessons for {stat} lines and edge thresholds")
+    if rag_context:
+        user_prompt += f"\n\nHistorical context:\n{rag_context}"
 
     content, provider, err = _llm_call(system_prompt, user_prompt)
     if err:
@@ -251,6 +303,7 @@ def llm_line_reasoning(player_name, stat, line, projection, ev_data=None, refere
         "sharpnessScore": int(parsed.get("sharpnessScore") or 5),
         "reasoning": str(parsed.get("reasoning") or ""),
         "provider": provider,
+        "ragContext": bool(rag_context),
     }
 
 

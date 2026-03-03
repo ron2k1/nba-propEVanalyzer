@@ -320,6 +320,8 @@ def _new_accumulator():
         "realLineStatRoi": {s: {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0}
                             for s in TRACKED_STATS},
         "realLineCalibBins": {i: {"count": 0, "wins": 0, "pnlUnits": 0.0} for i in range(10)},
+        # Bet-level records (populated only when emit_bets=True)
+        "_bet_records": [],
         # CLV tracking: opening line vs closing line per bet
         "clvBetsTracked":    0,
         "clvPositiveCount":  0,
@@ -451,6 +453,7 @@ def run_backtest(
     odds_only=False,
     compute_clv=False,
     walk_forward=False,
+    emit_bets=False,
 ):
     """
     Backtest projection + EV quality for one day or a date range.
@@ -903,6 +906,29 @@ def run_backtest(
                                             else:
                                                 _clv_seg["pushes"] += 1
 
+                                # Emit bet-level record for downstream analysis
+                                if emit_bets:
+                                    _ps = proj_stat or {}
+                                    acc["_bet_records"].append({
+                                        "date": day.isoformat(),
+                                        "player_id": player_id,
+                                        "player_name": _player_full_name,
+                                        "stat": stat,
+                                        "line": float(line),
+                                        "projection": float(projected),
+                                        "prob_over": float(prob_over),
+                                        "bin": bin_idx,
+                                        "side": chosen_side,
+                                        "edge": float(edge),
+                                        "odds": int(chosen_odds),
+                                        "actual": float(actual_val),
+                                        "outcome": outcome,
+                                        "pnl": float(pnl),
+                                        "used_real_line": _used_real_line,
+                                        "n_games": int(_ps.get("nGames") or 0),
+                                        "shrink_weight": float(_ps.get("shrinkWeight") or 0.0),
+                                    })
+
             # End-of-day summary + checkpoint.
             day_samples = sum(accumulators[m]["sampleCount"] for m in models) - day_samples_start
             print(
@@ -912,8 +938,13 @@ def run_backtest(
             )
             if save_results and day_proj_calls > 0:
                 _os.makedirs(_results_dir, exist_ok=True)
+                _ckpt_copies = {}
+                for m in models:
+                    _c = _copy.deepcopy(accumulators[m])
+                    _c.pop("_bet_records", None)
+                    _ckpt_copies[m] = _c
                 _ckpt_reports = {
-                    m: _finalize_accumulator(_copy.deepcopy(accumulators[m])) for m in models
+                    m: _finalize_accumulator(_ckpt_copies[m]) for m in models
                 }
                 _ckpt = {
                     "success": True,
@@ -934,6 +965,15 @@ def run_backtest(
                 with open(_os.path.join(_results_dir, _ckpt_fname), "w", encoding="utf-8") as _fh:
                     _json.dump(_ckpt, _fh, indent=2)
                 print(f"  -> checkpoint saved: {_ckpt_fname}", file=_sys.stderr, flush=True)
+
+        # Pop bet records before finalization (not needed by _finalize_accumulator)
+        _bet_records_by_model = {}
+        if emit_bets:
+            for m in models:
+                _bet_records_by_model[m] = accumulators[m].pop("_bet_records", [])
+        else:
+            for m in models:
+                accumulators[m].pop("_bet_records", None)
 
         model_reports = {m: _finalize_accumulator(accumulators[m]) for m in models}
         response = {
@@ -967,6 +1007,13 @@ def run_backtest(
             response["oddsSource"] = odds_key
         if odds_only:
             response["oddsOnly"] = True
+
+        # Attach bet-level records when emit_bets is enabled
+        if emit_bets and _bet_records_by_model:
+            if len(models) == 1:
+                response["bets"] = _bet_records_by_model[models[0]]
+            else:
+                response["bets"] = _bet_records_by_model
 
         if save_results:
             results_dir = _os.path.join(
