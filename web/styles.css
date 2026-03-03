@@ -678,6 +678,26 @@ pre {
   color: #3d5288;
 }
 
+/* ── Model Leans ─────────────────────────────────────── */
+.lean-disclaimer {
+  font-size: 0.78rem;
+  font-style: italic;
+  color: var(--muted);
+}
+
+.lean-reason {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-family: var(--heading);
+  font-size: 0.70rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid var(--accent-soft);
+  background: #fef6e4;
+  color: #9a6b1a;
+}
+
 /* ── Error / Warning ──────────────────────────────────── */
 .error {
   color: var(--bad);
