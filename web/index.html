@@ -26,7 +26,8 @@
       {id:'analyze',   label:'Analyze'},
       {id:'live',      label:'Live'},
       {id:'results',   label:'Results'},
-      {id:'reference', label:'Reference'}
+      {id:'reference', label:'Reference'},
+      {id:'knowledge', label:'Knowledge'}
     ]" :key="t.id">
       <button class="tab-btn"
         :class="{ active: $store.tab.current === t.id }"
@@ -115,17 +116,17 @@
         </div>
 
         <div class="card-actions" style="margin-bottom:14px">
-          <button class="btn btn-primary" @click="collectLines()" :disabled="collectLoading">
-            <span x-show="!collectLoading">Collect Lines</span>
-            <span x-show="collectLoading">Collecting...</span>
+          <button class="btn btn-primary" @click="collectLines()" :disabled="busy">
+            <span x-show="!busy">Collect Lines</span>
+            <span x-show="busy">Working...</span>
           </button>
-          <button class="btn btn-secondary" @click="rosterSweep()" :disabled="sweepLoading">
-            <span x-show="!sweepLoading">Roster Sweep</span>
-            <span x-show="sweepLoading">Sweeping...</span>
+          <button class="btn btn-secondary" @click="rosterSweep()" :disabled="busy">
+            <span x-show="!busy">Roster Sweep</span>
+            <span x-show="busy">Working...</span>
           </button>
-          <button class="btn btn-primary" @click="runDailyOps()" :disabled="opsLoading">
-            <span x-show="!opsLoading">Run Full Pipeline</span>
-            <span x-show="opsLoading">Running...</span>
+          <button class="btn btn-primary" @click="runDailyOps()" :disabled="busy">
+            <span x-show="!busy">Run Full Pipeline</span>
+            <span x-show="busy">Working...</span>
           </button>
         </div>
 
@@ -316,6 +317,7 @@
           <label>Under Odds <input type="number" x-model.number="underOdds" required></label>
           <label class="toggle"><input type="checkbox" x-model="isHome"> Is Home</label>
           <label class="toggle"><input type="checkbox" x-model="isB2b"> Back-to-back</label>
+          <label>Mins Multiplier <input type="number" step="0.05" min="0.1" max="1.5" x-model="minutesMult" placeholder="e.g. 0.70"></label>
           <label>Reference Book <input type="text" x-model="referenceBook" placeholder="pinnacle"></label>
           <label>Sweep Top N <input type="number" x-model.number="sweepTopN" min="1" max="50"></label>
           <button type="submit" class="btn btn-primary" :disabled="propLoading">
@@ -701,6 +703,100 @@
               <summary class="hint" style="cursor:pointer">Raw Result</summary>
               <pre x-text="JSON.stringify(starterResult, null, 2)"></pre>
             </details>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <!-- ═══ TAB 8: Knowledge ═══ -->
+    <section class="tab-panel" x-data="knowledge" x-show="$store.tab.current === 'knowledge'" x-cloak>
+
+      <!-- Health -->
+      <div class="panel">
+        <div class="panel-head">
+          <h2>LightRAG Status</h2>
+          <template x-if="healthLoading">
+            <span class="badge">Checking...</span>
+          </template>
+          <template x-if="!healthLoading && healthy === true">
+            <span class="badge ok">Healthy</span>
+          </template>
+          <template x-if="!healthLoading && healthy === false">
+            <span class="badge fail">Offline</span>
+          </template>
+          <button class="btn btn-secondary" @click="checkHealth()" :disabled="healthLoading">Refresh</button>
+        </div>
+        <template x-if="healthUrl">
+          <p class="hint">Connected to <code x-text="healthUrl"></code></p>
+        </template>
+        <template x-if="healthError">
+          <p class="error" x-text="healthError"></p>
+        </template>
+      </div>
+
+      <!-- Ingest -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head">
+          <h2>Ingest Documents</h2>
+        </div>
+        <p class="hint">Ingest project documents into LightRAG for retrieval-augmented queries.</p>
+
+        <div class="form-grid" style="margin-bottom:14px">
+          <label>Source
+            <select x-model="ingestSource">
+              <option value="all">All</option>
+              <option value="docs">Docs</option>
+              <option value="lessons">Lessons</option>
+              <option value="backtests">Backtests</option>
+              <option value="journal">Journal</option>
+              <option value="claude_md">CLAUDE.md</option>
+            </select>
+          </label>
+          <label class="toggle"><input type="checkbox" x-model="ingestForce"> Force re-ingest</label>
+        </div>
+
+        <div class="card-actions" style="margin-bottom:14px">
+          <button class="btn btn-primary" @click="runIngest()" :disabled="ingestLoading">
+            <span x-show="!ingestLoading">Run Ingest</span>
+            <span x-show="ingestLoading">Ingesting...</span>
+          </button>
+        </div>
+
+        <template x-if="ingestError">
+          <p class="error" x-text="ingestError"></p>
+        </template>
+        <template x-if="ingestOutput">
+          <div class="result">
+            <h4>Ingest Output</h4>
+            <pre style="max-height:300px;overflow:auto;white-space:pre-wrap" x-text="ingestOutput"></pre>
+          </div>
+        </template>
+      </div>
+
+      <!-- Query -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head">
+          <h2>Knowledge Query</h2>
+        </div>
+        <p class="hint">Ask questions about the project using LightRAG hybrid retrieval.</p>
+
+        <form class="form-grid" @submit.prevent="runQuery()">
+          <label style="grid-column:1/-1">Question
+            <input type="text" x-model="queryText" placeholder="Why was reb removed from the stat whitelist?">
+          </label>
+          <button type="submit" class="btn btn-primary" :disabled="queryLoading || !queryText.trim()">
+            <span x-show="!queryLoading">Ask</span>
+            <span x-show="queryLoading">Querying...</span>
+          </button>
+        </form>
+
+        <template x-if="queryError">
+          <p class="error" x-text="queryError"></p>
+        </template>
+        <template x-if="queryResponse">
+          <div class="result">
+            <h4>Response</h4>
+            <pre style="max-height:400px;overflow:auto;white-space:pre-wrap" x-text="queryResponse"></pre>
           </div>
         </template>
       </div>

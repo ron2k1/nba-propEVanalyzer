@@ -29,6 +29,10 @@ LONG_TIMEOUT_SEC = 1800
 DEFAULT_ODDS_MARKETS = "h2h,spreads,totals"
 DEFAULT_MAIN_BOOKMAKERS = "betmgm,draftkings,fanduel"
 
+# Server-side lock for long-running commands — prevents duplicate spawns
+import threading
+_long_running_lock = threading.Lock()
+
 
 def _run_nba_command(args, timeout_sec=None):
     cmd = [sys.executable, str(NBA_SCRIPT), *args]
@@ -241,29 +245,66 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                 return self._send_json(200, _run_nba_command(args))
 
             if path == "/api/roster_sweep":
-                date_str = (query.get("date") or [""])[0].strip()
-                args = ["roster_sweep"]
-                if date_str:
-                    args.append(date_str)
-                return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
+                if not _long_running_lock.acquire(blocking=False):
+                    return self._send_json(409, {"success": False, "error": "Roster sweep already running."})
+                try:
+                    date_str = (query.get("date") or [""])[0].strip()
+                    args = ["roster_sweep"]
+                    if date_str:
+                        args.append(date_str)
+                    return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
+                finally:
+                    _long_running_lock.release()
 
             if path == "/api/collect_lines":
-                books = (query.get("books") or [DEFAULT_MAIN_BOOKMAKERS])[0].strip() or DEFAULT_MAIN_BOOKMAKERS
-                stats = (query.get("stats") or ["pts,reb,ast,pra"])[0].strip() or "pts,reb,ast,pra"
-                args = ["collect_lines", "--books", books, "--stats", stats]
-                return self._send_json(200, _run_nba_command(args))
+                if not _long_running_lock.acquire(blocking=False):
+                    return self._send_json(409, {"success": False, "error": "Another pipeline task is running."})
+                try:
+                    books = (query.get("books") or [DEFAULT_MAIN_BOOKMAKERS])[0].strip() or DEFAULT_MAIN_BOOKMAKERS
+                    stats = (query.get("stats") or ["pts,reb,ast,pra"])[0].strip() or "pts,reb,ast,pra"
+                    args = ["collect_lines", "--books", books, "--stats", stats]
+                    return self._send_json(200, _run_nba_command(args))
+                finally:
+                    _long_running_lock.release()
 
             if path == "/api/daily_ops":
-                dry_run = (query.get("dryRun") or ["false"])[0].strip().lower()
-                args = ["daily_ops"]
-                if dry_run == "true":
-                    args.append("--dry-run")
-                return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
+                if not _long_running_lock.acquire(blocking=False):
+                    return self._send_json(409, {"success": False, "error": "Another pipeline task is running."})
+                try:
+                    dry_run = (query.get("dryRun") or ["false"])[0].strip().lower()
+                    args = ["daily_ops"]
+                    if dry_run == "true":
+                        args.append("--dry-run")
+                    return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
+                finally:
+                    _long_running_lock.release()
 
             if path == "/api/top_picks":
                 limit = (query.get("limit") or ["5"])[0].strip() or "5"
                 args = ["top_picks", limit]
                 return self._send_json(200, _run_nba_command(args))
+
+            if path == "/api/lightrag_health":
+                return self._send_json(200, _run_nba_command(["lightrag_health"]))
+
+            if path == "/api/lightrag_ingest":
+                if not _long_running_lock.acquire(blocking=False):
+                    return self._send_json(409, {"success": False, "error": "Ingest already running."})
+                try:
+                    source = (query.get("source") or ["all"])[0].strip() or "all"
+                    force = (query.get("force") or ["false"])[0].strip().lower() == "true"
+                    args = ["lightrag_ingest", "--source", source]
+                    if force:
+                        args.append("--force")
+                    return self._send_json(200, _run_nba_command(args, timeout_sec=120))
+                finally:
+                    _long_running_lock.release()
+
+            if path == "/api/lightrag_query":
+                q = (query.get("q") or [""])[0].strip()
+                if not q:
+                    return self._send_json(400, {"success": False, "error": "q query param is required."})
+                return self._send_json(200, _run_nba_command(["lightrag_query", q]))
 
             return self._serve_static(path)
         except subprocess.TimeoutExpired:
@@ -318,6 +359,12 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     args.append(player_team_abbr)
                     if reference_book:
                         args.append(reference_book)
+                mins_mult = body.get("minutesMultiplier")
+                if mins_mult is not None:
+                    try:
+                        args.extend(["--mins-mult", str(float(mins_mult))])
+                    except (TypeError, ValueError):
+                        pass
                 return self._send_json(200, _run_nba_command(args))
 
             if path == "/api/prop_ev_ml":
