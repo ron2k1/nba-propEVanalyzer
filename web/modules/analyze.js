@@ -15,6 +15,7 @@ export default function () {
     isHome: true,
     isB2b: false,
     referenceBook: '',
+    minutesMult: '',
     sweepTopN: 15,
 
     // Results
@@ -96,6 +97,7 @@ export default function () {
           underOdds: Number(this.underOdds),
           isB2b: this.isB2b,
           referenceBook: this.referenceBook.trim(),
+          minutesMultiplier: this.minutesMult !== '' ? Number(this.minutesMult) : null,
         });
         if (!data || data.success !== true) {
           this.propError = data?.error || 'Prop EV request failed.';
