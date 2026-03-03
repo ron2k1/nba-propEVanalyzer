@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Scan commands: roster_sweep — scans LineStore snapshots and journals qualifying signals."""
 
-from datetime import datetime, timezone
+from datetime import date
 
 
 def _handle_roster_sweep(argv):
@@ -16,10 +16,13 @@ def _handle_roster_sweep(argv):
     from core.nba_line_store import LineStore
     from core.nba_decision_journal import DecisionJournal, _qualifies
     from core.nba_model_training import american_to_implied_prob, compute_prop_ev
-    from core.nba_data_collection import safe_round, get_yesterdays_team_abbrs, get_todays_game_totals
+    from core.nba_data_collection import safe_round, get_yesterdays_team_abbrs, get_todays_game_totals, get_player_team_map
     from nba_api.stats.static import players as nba_players_static
 
-    date_str = argv[2] if len(argv) > 2 else datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # Use local date by default — snapshots are filed by local game day,
+    # not UTC.  Games at 10 PM ET on Mar 2 have UTC timestamps of Mar 3
+    # but belong to the Mar 2 game day.
+    date_str = argv[2] if len(argv) > 2 else date.today().isoformat()
 
     # Build game context once before the loop (one scoreboard call + one Odds API call).
     yesterday_teams = get_yesterdays_team_abbrs(date_str)   # free — NBA scoreboard
@@ -82,49 +85,15 @@ def _handle_roster_sweep(argv):
             if BOOK_PRIO.get(book, 99) < BOOK_PRIO.get(existing.get("book", ""), 99):
                 best_per_player_stat[key2] = snap
 
-    # Build player_name → team_abbr mapping from current rosters of today's
-    # playing teams only.  CommonTeamRoster reflects trades immediately,
-    # unlike LeagueDashPlayerStats which aggregates across the full season.
+    # Build player_name → team_abbr mapping from LeagueDashPlayerStats (one API call).
+    # Reflects mid-season trades immediately.
     import re as _re
 
     def _norm_name(n):
         """Normalize player name for matching: strip periods, hyphens, lowercase."""
         return _re.sub(r"[.\-'']", "", str(n)).lower().strip()
 
-    _player_team_map = {}  # normalized player name → uppercase team abbr
-    try:
-        from nba_api.stats.endpoints import commonteamroster as _ctr
-        from nba_api.stats.static import teams as _nba_teams
-        from core.nba_data_collection import CURRENT_SEASON, retry_api_call, API_DELAY
-        import time as _time
-
-        # Collect unique team abbreviations from today's snapshots
-        _playing_abbrs = set()
-        for _s in snaps:
-            for _k in ("home_team_abbr", "away_team_abbr"):
-                _v = (_s.get(_k) or "").upper()
-                if _v:
-                    _playing_abbrs.add(_v)
-
-        for _abbr in _playing_abbrs:
-            _tinfo = _nba_teams.find_team_by_abbreviation(_abbr)
-            if not _tinfo:
-                continue
-            try:
-                _time.sleep(API_DELAY)
-                _roster = retry_api_call(
-                    lambda tid=str(_tinfo["id"]): _ctr.CommonTeamRoster(
-                        team_id=tid, season=CURRENT_SEASON, timeout=30,
-                    )
-                ).get_normalized_dict().get("CommonTeamRoster", [])
-                for _row in _roster:
-                    _pn = _norm_name(_row.get("PLAYER", ""))
-                    if _pn:
-                        _player_team_map[_pn] = _abbr
-            except Exception:
-                continue
-    except Exception:
-        pass  # fallback: skip enrichment, rely on snapshot fields
+    _player_team_map = get_player_team_map()  # cached, single API call
 
     scanned = 0
     logged = 0
@@ -292,12 +261,19 @@ def _handle_roster_sweep(argv):
 
     top5 = sorted(top_results, key=lambda x: -x["edge"])[:5]
 
+    # Summarize skip reasons for diagnostics
+    skip_reasons = {}
+    for s in skipped_list:
+        r = s.get("reason", "unknown")
+        skip_reasons[r] = skip_reasons.get(r, 0) + 1
+
     return {
         "success": True,
         "date": date_str,
         "scanned": scanned,
         "logged": logged,
         "skipped": len(skipped_list),
+        "skipReasons": skip_reasons,
         "top5": top5,
     }
 

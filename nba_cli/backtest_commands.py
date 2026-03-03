@@ -16,7 +16,8 @@ def _handle_backtest(argv):
                 "[--model full|simple|both] [--save] [--fast] "
                 "[--data-source nba|bref|local] [--local] [--bref-dir <path>] "
                 "[--local-index <path>] [--odds-source local_history] [--odds-db <path>] "
-                "[--real-only] [--clv] [--walk-forward]"
+                "[--real-only] [--clv] [--walk-forward] "
+                "[--emit-bets] [--emit-bets-path <path>]"
             )
         }
     date_from = argv[2]
@@ -37,6 +38,8 @@ def _handle_backtest(argv):
     odds_only = False
     compute_clv = False
     walk_forward = False
+    emit_bets = False
+    emit_bets_path = None
     while idx < len(argv):
         token = str(argv[idx]).strip().lower()
         if token == "--model" and idx + 1 < len(argv):
@@ -87,6 +90,15 @@ def _handle_backtest(argv):
             walk_forward = True
             idx += 1
             continue
+        if token == "--emit-bets":
+            emit_bets = True
+            idx += 1
+            continue
+        if token == "--emit-bets-path" and idx + 1 < len(argv):
+            emit_bets_path = str(argv[idx + 1]).strip()
+            emit_bets = True  # implied
+            idx += 2
+            continue
         return {
             "error": (
                 "Invalid backtest arguments. "
@@ -94,16 +106,34 @@ def _handle_backtest(argv):
                 "[--save] [--fast] [--data-source nba|bref|local] [--local] "
                 "[--bref-dir <path>] [--local-index <path>] "
                 "[--odds-source local_history] [--odds-db <path>] [--real-only] [--clv] "
-                "[--walk-forward]"
+                "[--walk-forward] [--emit-bets] [--emit-bets-path <path>]"
             )
         }
-    return run_backtest(date_from=date_from, date_to=date_to, model=model,
-                        save_results=save_results, fast=fast,
-                        data_source=data_source, bref_dir=bref_dir,
-                        odds_source=odds_source, odds_db=odds_db,
-                        local_index=local_index, odds_only=odds_only,
-                        compute_clv=compute_clv,
-                        walk_forward=walk_forward)
+    result = run_backtest(date_from=date_from, date_to=date_to, model=model,
+                          save_results=save_results, fast=fast,
+                          data_source=data_source, bref_dir=bref_dir,
+                          odds_source=odds_source, odds_db=odds_db,
+                          local_index=local_index, odds_only=odds_only,
+                          compute_clv=compute_clv,
+                          walk_forward=walk_forward,
+                          emit_bets=emit_bets)
+
+    # Write bet records to JSONL file if path specified
+    if emit_bets_path and result.get("bets"):
+        bets = result["bets"]
+        # bets is either a list (single model) or dict of lists (both models)
+        bet_list = bets if isinstance(bets, list) else []
+        if isinstance(bets, dict):
+            for _m_bets in bets.values():
+                bet_list.extend(_m_bets)
+        os.makedirs(os.path.dirname(os.path.abspath(emit_bets_path)), exist_ok=True)
+        with open(emit_bets_path, "w", encoding="utf-8") as _bf:
+            for rec in bet_list:
+                _bf.write(json.dumps(rec) + "\n")
+        result["emitBetsPath"] = emit_bets_path
+        result["emitBetsCount"] = len(bet_list)
+
+    return result
 
 
 def _handle_backtest_60d(argv):

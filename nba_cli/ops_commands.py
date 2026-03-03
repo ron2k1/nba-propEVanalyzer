@@ -15,9 +15,9 @@ def _handle_daily_ops(argv):
     """
     dry_run = "--dry-run" in argv
 
-    results = {"success": True, "steps": {}}
+    results = {"success": False, "steps": {}}
 
-    # Step 1: collect_lines
+    # Step 1: collect_lines — must succeed for downstream steps to be useful
     try:
         from nba_cli.line_commands import _COMMANDS as _LINE_CMDS
         collect_argv = [
@@ -28,7 +28,7 @@ def _handle_daily_ops(argv):
         collect_result = _LINE_CMDS["collect_lines"](collect_argv)
         results["steps"]["collect_lines"] = {
             "success": collect_result.get("success", False),
-            "snapshotsWritten": collect_result.get("snapshotsWritten", 0),
+            "snapshotCount": collect_result.get("snapshotCount", 0),
             "error": collect_result.get("error"),
         }
     except Exception as ex:
@@ -71,6 +71,8 @@ def _handle_daily_ops(argv):
         results["steps"]["best_today"] = {"success": False, "error": str(ex)}
 
     results["dryRun"] = dry_run
+    # Top-level success requires collect_lines (feeds everything downstream)
+    results["success"] = results["steps"].get("collect_lines", {}).get("success", False)
     return results
 
 

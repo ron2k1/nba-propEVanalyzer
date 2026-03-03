@@ -10,6 +10,7 @@ from core.nba_bet_tracking import log_prop_ev_entry
 from core.nba_decision_journal import DecisionJournal, _qualifies
 from core.nba_data_collection import safe_round
 from core.nba_data_prep import compute_usage_adjustment
+from core.nba_prep_projection import _SHRINK_K
 from core.nba_injury_news import fetch_nba_injury_news
 from core.nba_llm_engine import llm_full_analysis
 from core.nba_model_training import (
@@ -115,6 +116,7 @@ def _build_signal_context(source, result, stat, stat_proj, intraday_clv=None):
         ctx["recentHighVariance"] = recent_hv
     if intraday_clv is not None:
         ctx["intradayClvLine"] = intraday_clv
+    ctx["shrink_k"] = _SHRINK_K
     return ctx
 
 
@@ -169,7 +171,26 @@ def _handle_prop_ev(argv):
         return err
 
     no_blend = "--no-blend" in argv
-    clean_argv = [a for a in argv if a != "--no-blend"]
+
+    # Extract --mins-mult <value> flag if present
+    _mins_mult = None
+    _filtered_argv = []
+    _skip = False
+    for i, a in enumerate(argv):
+        if _skip:
+            _skip = False
+            continue
+        if a == "--mins-mult" and i + 1 < len(argv):
+            try:
+                _mins_mult = float(argv[i + 1])
+            except (ValueError, TypeError):
+                pass
+            _skip = True
+            continue
+        if a == "--no-blend":
+            continue
+        _filtered_argv.append(a)
+    clean_argv = _filtered_argv
 
     opponent = clean_argv[3]
     is_home = clean_argv[4] == "1"
@@ -194,6 +215,7 @@ def _handle_prop_ev(argv):
         player_team_abbr=player_team_abbr,
         reference_book=reference_book,
         no_blend=no_blend,
+        minutes_multiplier=_mins_mult,
     )
 
     result = _apply_usage_adjustment(
