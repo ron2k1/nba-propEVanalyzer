@@ -16,22 +16,29 @@ Private NBA player-prop EV engine. **Stat priority:** pts > reb > ast > pra > to
 
 ## 2. Workflow Principles
 
-**Plan first, verify last.** Enter plan mode for any non-trivial task (3+ steps or architectural decisions). If something goes sideways, STOP and re-plan — don't keep pushing.
+### Workflow Orchestration
 
-- **Simplicity first** — make every change as simple as possible, touch minimal code, find root causes not temporary fixes
-- **Subagents** — offload research, exploration, and parallel analysis to keep main context clean. One task per subagent
-- **Verify before done** — never mark complete without proving it works. Run tests, check logs, demonstrate correctness. Ask: "Would a staff engineer approve this?"
-- **Demand elegance** — for non-trivial changes, pause and ask "is there a more elegant way?" Skip for obvious fixes
-- **Autonomous bug fixing** — given a bug report, just fix it. Point at logs/errors/tests, then resolve. Zero hand-holding
-- **Self-improvement** — after ANY correction from the user, capture the pattern in `tasks/lessons.md`. Write rules that prevent the same mistake. Review lessons at session start
+1. **Plan Node Default** — enter plan mode for ANY non-trivial task (3+ steps or architectural decisions). If something goes sideways, STOP and re-plan immediately — don't keep pushing. Use plan mode for verification steps, not just building. Write detailed specs upfront to reduce ambiguity.
+2. **Subagent Strategy** — use subagents liberally to keep main context window clean. Offload research, exploration, and parallel analysis to subagents. For complex problems, throw more compute at it via subagents. One task per subagent for focused execution.
+3. **Self-Improvement Loop** — after ANY correction from the user: update `tasks/lessons.md` with the pattern. Write rules that prevent the same mistake. Ruthlessly iterate on these lessons until mistake rate drops. Review lessons at session start for relevant project.
+4. **Verification Before Done** — never mark a task complete without proving it works. Diff behavior between main and your changes when relevant. Ask yourself: "Would a staff engineer approve this?" Run tests, check logs, demonstrate correctness.
+5. **Demand Elegance (Balanced)** — for non-trivial changes: pause and ask "Is there a more elegant way?" If a fix feels hacky: "Knowing everything I know now, implement the elegant solution." Skip this for simple, obvious fixes — don't over-engineer. Challenge your own work before presenting it.
+6. **Autonomous Bug Fixing** — when given a bug report: just fix it. Don't ask for hand-holding. Point at logs, errors, failing tests — then resolve them. Zero context switching required from the user. Go fix failing CI tests without being told how.
 
 ### Task Management
 
 1. **Plan first** — write plan to `tasks/todo.md` with checkable items before starting
 2. **Verify plan** — check in before starting implementation on non-trivial changes
 3. **Track progress** — mark items complete as you go, explain changes at each step
-4. **Document results** — add review section to `tasks/todo.md` when done
-5. **Capture lessons** — update `tasks/lessons.md` after corrections. Ruthlessly iterate until mistake rate drops
+4. **Explain changes** — high-level summary at each step
+5. **Document results** — add review section to `tasks/todo.md` when done
+6. **Capture lessons** — update `tasks/lessons.md` after corrections. Ruthlessly iterate until mistake rate drops
+
+### Core Principles
+
+- **Simplicity first** — make every change as simple as possible. Impact minimal code
+- **No laziness** — find root causes. No temporary fixes. Senior developer standards
+- **Minimal impact** — changes should only touch what's necessary. Avoid introducing bugs
 
 ### Roles
 
@@ -60,6 +67,7 @@ powershell -ExecutionPolicy Bypass -File ".\run_ui.ps1" -OddsApiKey "KEY"
 .\.venv\Scripts\python.exe nba_mod.py auto_sweep "Anthony Edwards" MIN ORL 1 pts 0 us "betmgm,draftkings,fanduel" basketball_nba 15
 # Daily ops
 .\.venv\Scripts\python.exe nba_mod.py best_today 15
+.\.venv\Scripts\python.exe nba_mod.py top_picks 5
 .\.venv\Scripts\python.exe nba_mod.py settle_yesterday
 .\.venv\Scripts\python.exe nba_mod.py results_yesterday 50
 # Data queries
@@ -156,6 +164,8 @@ CLV rule: `clvLine > 0` AND `clvOddsPct > 0` required for high-quality bets. Pos
 # Before games (2-3x: 11am, 2pm, 5pm ET)
 .\.venv\Scripts\python.exe nba_mod.py collect_lines --books betmgm,draftkings,fanduel --stats pts,reb,ast,pra
 .\.venv\Scripts\python.exe nba_mod.py best_today 20
+# Pre-tip (6:30 PM ET) — top picks + best parlay
+.\.venv\Scripts\python.exe nba_mod.py top_picks 5
 # End-of-day
 .\.venv\Scripts\python.exe nba_mod.py line_bridge --books betmgm,draftkings,fanduel --stats pts,reb,ast,pra
 .\.venv\Scripts\python.exe nba_mod.py odds_build_closes
