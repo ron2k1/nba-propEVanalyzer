@@ -17,6 +17,7 @@ def _handle_roster_sweep(argv):
     from core.nba_decision_journal import DecisionJournal, _qualifies
     from core.nba_model_training import american_to_implied_prob, compute_prop_ev
     from core.nba_data_collection import safe_round, get_yesterdays_team_abbrs, get_todays_game_totals, get_player_team_map
+    from core.nba_bet_tracking import log_prop_ev_entry
     from nba_api.stats.static import players as nba_players_static
 
     # Use local date by default — snapshots are filed by local game day,
@@ -248,6 +249,24 @@ def _handle_roster_sweep(argv):
                     "probOver": safe_round(float(ev.get("probOver") or 0.0), 4),
                     "book": book,
                 })
+                # Bridge: also write to prop_journal.jsonl so best_today can see it
+                try:
+                    log_prop_ev_entry(
+                        result,
+                        player_id=player_id,
+                        player_identifier=player_name,
+                        player_team_abbr=team_abbr or "",
+                        opponent_abbr=opp_abbr,
+                        is_home=bool(is_home) if is_home is not None else True,
+                        stat=stat,
+                        line=float(line),
+                        over_odds=int(over_odds or -110),
+                        under_odds=int(under_odds or -110),
+                        is_b2b=False,
+                        source="roster_sweep",
+                    )
+                except Exception:
+                    pass  # non-fatal — SQLite log is the primary record
             else:
                 skipped_list.append({
                     "player": pname, "stat": stat,

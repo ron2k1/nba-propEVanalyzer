@@ -21,6 +21,7 @@ from .nba_data_collection import (
 from .nba_bref_data import load_bref_store
 from .nba_data_prep import compute_projection, compute_projection_simple
 from .nba_model_training import compute_ev
+from .gates import _qualifies as _live_qualifies
 
 TRACKED_STATS = ["pts", "reb", "ast", "fg3m", "pra", "stl", "blk", "tov"]
 DEFAULT_SYNTHETIC_OVER_ODDS = -110
@@ -334,6 +335,10 @@ def _new_accumulator():
         "olvFavorableCount": 0,
         "roiOlvFavorable":   {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
         "roiOlvUnfavorable": {"betsPlaced": 0, "wins": 0, "losses": 0, "pushes": 0, "pnlUnits": 0.0},
+        # Match-live gate tracking
+        "_ml_gate_rejections": {},       # reason_prefix -> count
+        "_ml_total_evaluated": 0,
+        "_ml_gates_unavailable": 0,      # bets that passed but had gates 6/8/10 skipped
     }
 
 
@@ -430,6 +435,9 @@ def _finalize_accumulator(acc):
         "roiSynth":          _finalize_roi_seg(acc["roiSynth"]),
         "realLineStatRoi":   {s: _finalize_roi_seg(acc["realLineStatRoi"][s])
                               for s in TRACKED_STATS},
+        "matchLiveRejections": acc.get("_ml_gate_rejections") or {},
+        "matchLiveTotalEvaluated": acc.get("_ml_total_evaluated") or 0,
+        "matchLiveGatesUnavailable": acc.get("_ml_gates_unavailable") or 0,
         "clv": _finalize_clv(acc),
         "olv": _finalize_olv(acc),
         "realLineCalibBins": [
@@ -474,6 +482,7 @@ def run_backtest(
     walk_forward=False,
     emit_bets=False,
     emit_all=False,
+    match_live=False,
 ):
     """
     Backtest projection + EV quality for one day or a date range.
@@ -518,6 +527,11 @@ def run_backtest(
     source_key = str(data_source or "nba").lower().strip()
     if source_key not in {"nba", "bref", "local"}:
         return {"success": False, "error": "data_source must be one of: nba, bref, local"}
+
+    # --match-live implies real lines only (no synthetic), local_history odds source
+    if match_live:
+        odds_source = "local_history"
+        odds_only = True
 
     odds_key = str(odds_source or "").lower().strip()
     if odds_key and odds_key not in {"local_history"}:
@@ -574,9 +588,10 @@ def run_backtest(
     event_id_cache = {}   # (date_str, homeAbbr, awayAbbr) -> odds event_id or None
     player_name_cache = {}  # player_id -> full_name string
 
+    _ml_label = " MATCH-LIVE" if match_live else ""
     print(
         f"[backtest] {start} -> {end}  model={model_key}  delay={_delay:.2f}s  "
-        f"save={save_results}  source={source_key}",
+        f"save={save_results}  source={source_key}{_ml_label}",
         file=_sys.stderr,
         flush=True,
     )
@@ -707,6 +722,26 @@ def run_backtest(
                     is_b2b = team_id in b2b_team_ids
                     actual = _actual_stats(row)
 
+                    # Pre-resolve blend lines for --match-live projection blending.
+                    # Known conservative bias: live pipeline blends against the
+                    # *current* line at evaluation time (hours before close). Here
+                    # we blend against *closing* lines, which have absorbed sharp
+                    # money and are typically sharper. This makes the matched backtest
+                    # pessimistic vs live — the safer direction to be wrong.
+                    _blend_lines = None
+                    if match_live and odds_store and odds_event_id and _player_full_name:
+                        _blend_lines = {}
+                        for _bs in TRACKED_STATS:
+                            _bm = _odds_stat_to_market.get(_bs)
+                            if _bm:
+                                _bcl = odds_store.get_closing_line(
+                                    odds_event_id, _bm, _player_full_name
+                                )
+                                if _bcl and _bcl.get("close_line") is not None:
+                                    _blend_lines[_bs] = _bcl["close_line"]
+                        if not _blend_lines:
+                            _blend_lines = None
+
                     for model_name in models:
                         acc = accumulators[model_name]
                         cache_key = (
@@ -716,6 +751,7 @@ def run_backtest(
                             opponent_abbr,
                             int(is_home),
                             int(is_b2b),
+                            tuple(sorted((_blend_lines or {}).items())),
                         )
                         if cache_key not in projection_cache:
                             fn = _model_callable(model_name)
@@ -726,6 +762,7 @@ def run_backtest(
                                 is_b2b=is_b2b,
                                 season=season,
                                 as_of_date=as_of_date,
+                                blend_with_line=_blend_lines,
                             )
                             acc["projectionCalls"] += 1
                             day_proj_calls += 1
@@ -769,7 +806,31 @@ def run_backtest(
                             under_odds = DEFAULT_SYNTHETIC_UNDER_ODDS
                             line       = _synthetic_line(proj_stat)
                             _used_real_line = False
-                            if (
+                            _market = None
+                            if match_live:
+                                # match_live: require real closing line with real odds.
+                                # No synthetic fallback, no -110 defaults.
+                                _market = _odds_stat_to_market.get(stat)
+                                if _market and odds_store and odds_event_id and _player_full_name:
+                                    _cl = odds_store.get_closing_line(
+                                        odds_event_id, _market, _player_full_name
+                                    )
+                                    if (
+                                        _cl
+                                        and _cl.get("close_line") is not None
+                                        and _cl.get("close_over_odds") is not None
+                                        and _cl.get("close_under_odds") is not None
+                                    ):
+                                        line = _cl["close_line"]
+                                        over_odds = _cl["close_over_odds"]
+                                        under_odds = _cl["close_under_odds"]
+                                        acc["realLineSamples"] += 1
+                                        _used_real_line = True
+                                    else:
+                                        continue  # skip stat — no real line
+                                else:
+                                    continue  # skip stat — no market mapping or no odds store
+                            elif (
                                 odds_store is not None
                                 and odds_event_id
                                 and _player_full_name
@@ -808,7 +869,7 @@ def run_backtest(
                             if not ev:
                                 continue
 
-                            prob_over = float(ev.get("probOver", 0.5) or 0.5)
+                            prob_over = float(ev.get("probOver") or 0.0)
                             actual_over = 1.0 if actual_val > line else 0.0
                             err = abs(projected - actual_val)
                             brier = (prob_over - actual_over) ** 2
@@ -838,10 +899,44 @@ def run_backtest(
                                 chosen_odds = under_odds
 
                             edge = abs(float(chosen.get("edge") or 0.0))
-                            if walk_forward:
+                            _has_positive_ev = float(chosen.get("evPercent") or 0.0) > 0.0
+                            _ml_reason = None
+                            _ml_gates_unavail = []
+
+                            if match_live:
+                                # 10-gate live pipeline policy via _live_qualifies()
+                                _ml_prop = {
+                                    "ev": ev,
+                                    "minutesProjection": proj_data.get("minutesProjection", {}),
+                                    "projection": proj_stat,   # has recentHighVariance field
+                                }
+                                acc["_ml_total_evaluated"] += 1
+                                _qualifies_ok, _ml_reason = _live_qualifies(
+                                    _ml_prop, stat, used_real_line=True
+                                )
+                                _policy_pass = _has_positive_ev and _qualifies_ok
+                                if not _qualifies_ok:
+                                    _reason_prefix = (_ml_reason or "unknown").split(":")[0]
+                                    acc["_ml_gate_rejections"][_reason_prefix] = (
+                                        acc["_ml_gate_rejections"].get(_reason_prefix, 0) + 1
+                                    )
+                                else:
+                                    # Gates 6 (CLV), 8 (Pinnacle), 10 (market-depth) are always
+                                    # unavailable in backtest — no historical data for these.
+                                    _ml_gates_unavail = [6, 8, 10]
+                                    acc["_ml_gates_unavailable"] += 1
+                                # For bet record compatibility
+                                _stat_ok = True
+                                _bin_ok = True
+                                meets_threshold = True
+                            elif walk_forward:
                                 _stat_ok = stat in _day_policy["stat_whitelist"]
                                 _bin_ok = bin_idx not in _day_policy["blocked_bins"]
                                 meets_threshold = edge >= _day_policy["min_edge"]
+                                _policy_pass = (
+                                    _has_positive_ev and meets_threshold
+                                    and _stat_ok and _bin_ok
+                                )
                             else:
                                 _bp = BETTING_POLICY
                                 _stat_ok = stat in _bp.get("stat_whitelist", TRACKED_STATS)
@@ -849,16 +944,16 @@ def run_backtest(
                                 meets_threshold = bool(chosen.get("meetsThreshold")) or (
                                     edge >= float(PROJECTION_CONFIG.get("min_edge_threshold", 0.05))
                                 )
-
-                            # Three-boolean gate for policy sensitivity analysis
-                            _has_positive_ev = float(chosen.get("evPercent") or 0.0) > 0.0
-                            _policy_pass = (
-                                _has_positive_ev and meets_threshold
-                                and _stat_ok and _bin_ok
-                            )
+                                _policy_pass = (
+                                    _has_positive_ev and meets_threshold
+                                    and _stat_ok and _bin_ok
+                                )
 
                             # Determine if we need outcome grading
                             _should_emit = (
+                                (emit_all and _has_positive_ev and _used_real_line)
+                                or (emit_bets and _policy_pass)
+                            ) if match_live else (
                                 (emit_all and _has_positive_ev)
                                 or (emit_bets and _policy_pass)
                             )
@@ -982,7 +1077,14 @@ def run_backtest(
                                                 _olv_seg["pushes"] += 1
 
                                 _ps = proj_stat or {}
-                                acc["_bet_records"].append({
+                                _data_quality = (
+                                    "real" if (_used_real_line
+                                               and over_odds != DEFAULT_SYNTHETIC_OVER_ODDS
+                                               and under_odds != DEFAULT_SYNTHETIC_UNDER_ODDS)
+                                    else "partial" if _used_real_line
+                                    else "synthetic"
+                                )
+                                _bet_record = {
                                     "date": day.isoformat(),
                                     "player_id": player_id,
                                     "player_name": _player_full_name,
@@ -998,21 +1100,31 @@ def run_backtest(
                                     "outcome": outcome,
                                     "pnl": float(pnl),
                                     "used_real_line": _used_real_line,
+                                    "data_quality": _data_quality,
                                     "n_games": int(_ps.get("nGames") or 0),
                                     "shrink_weight": float(_ps.get("shrinkWeight") or 0.0),
                                     "has_positive_ev": _has_positive_ev,
                                     "meets_threshold": meets_threshold,
                                     "policy_pass": _policy_pass,
-                                    "policy_detail": {
-                                        "stat_in_whitelist": _stat_ok,
-                                        "bin_in_blocklist": not _bin_ok,
-                                        "blocked_stat": None if _stat_ok else stat,
-                                        "blocked_bin": None if _bin_ok else bin_idx,
-                                    },
+                                    "policy_detail": (
+                                        {
+                                            "gate": "match_live",
+                                            "reason": _ml_reason,
+                                            "gatesUnavailable": _ml_gates_unavail,
+                                        }
+                                        if match_live
+                                        else {
+                                            "stat_in_whitelist": _stat_ok,
+                                            "bin_in_blocklist": not _bin_ok,
+                                            "blocked_stat": None if _stat_ok else stat,
+                                            "blocked_bin": None if _bin_ok else bin_idx,
+                                        }
+                                    ),
                                     "opening_line": _open_line_val,
                                     "line_movement": round(_line_movement, 2) if _line_movement is not None else None,
                                     "olv_favorable": _olv_favorable,
-                                })
+                                }
+                                acc["_bet_records"].append(_bet_record)
 
             # End-of-day summary + checkpoint.
             day_samples = sum(accumulators[m]["sampleCount"] for m in models) - day_samples_start
@@ -1088,6 +1200,8 @@ def run_backtest(
 
         response["fast"] = fast
         response["walkForward"] = walk_forward
+        if match_live:
+            response["matchLive"] = True
         if emit_all:
             response["emitAll"] = True
         if odds_key:
@@ -1108,9 +1222,10 @@ def run_backtest(
             )
             _os.makedirs(results_dir, exist_ok=True)
             model_tag = model_key.replace(",", "-")
-            realonly_tag = "_realonly" if odds_only else ""
+            ml_tag = "_matchlive" if match_live else ""
+            realonly_tag = "_realonly" if (odds_only and not match_live) else ""
             wf_tag = "_wf" if walk_forward else ""
-            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}{wf_tag}.json"
+            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}{ml_tag}{wf_tag}.json"
             fpath = _os.path.join(results_dir, fname)
             with open(fpath, "w", encoding="utf-8") as fh:
                 _json.dump(response, fh, indent=2)
