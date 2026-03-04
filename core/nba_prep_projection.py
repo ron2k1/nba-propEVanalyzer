@@ -28,6 +28,20 @@ from .nba_minutes_model import compute_minutes_multiplier
 # Fraction of the stdev to use as proj_stdev (post-regression shrinkage).
 _PROJ_STDEV_SHRINK = 0.75
 
+_STDEV_SHRINK_OVERRIDES = {}
+for _s in ("pts", "reb", "ast", "pra"):
+    _env_val = os.getenv(f"STDEV_SHRINK_{_s.upper()}")
+    if _env_val is not None:
+        try:
+            _STDEV_SHRINK_OVERRIDES[_s] = float(_env_val)
+        except ValueError:
+            pass
+
+
+def _get_stdev_shrink(stat):
+    """Return per-stat stdev shrinkage factor; falls back to global default."""
+    return _STDEV_SHRINK_OVERRIDES.get(stat, _PROJ_STDEV_SHRINK)
+
 # When blending 30% of the book line into the model projection, the model
 # receives this weight; the complementary book-line weight is 1 - this value.
 _LINE_BLEND_MODEL_WEIGHT = 0.70
@@ -43,6 +57,14 @@ _N_GAMES_REF = 25
 # Lower k = more shrinkage (stronger pull to season avg).
 # Override via SHRINK_K env var for sensitivity testing.
 _SHRINK_K = int(os.getenv("SHRINK_K", "8"))
+
+
+def _cclamp(val, lo, hi, counter):
+    """Clamp *val* to [lo, hi]; increment counter[0] when the cap fires."""
+    c = max(lo, min(hi, val))
+    counter[0] += (c != val)
+    return c
+
 
 _DEF_WEIGHTS = {
     "G": {
@@ -181,7 +203,7 @@ def _add_combo_projections(projections, logs, rolling):
             "confidence": conf,
             "seasonAvg": s_avg,
             "stdev": s_stdev,
-            "projStdev": safe_round(s_stdev * _PROJ_STDEV_SHRINK, 2),
+            "projStdev": safe_round(s_stdev * _get_stdev_shrink(key), 2),
             "recentHighVariance": False,
             "last5Avg": rolling.get(f"{key}_avg5", 0),
             "last10Avg": rolling.get(f"{key}_avg10", 0),
@@ -502,18 +524,18 @@ def compute_projection(
             stat_mult = def_adj_v * matchup_v
             lo, hi = PROJECTION_CONFIG["combined"]
             stat_mult = max(lo, min(hi, stat_mult))
+            _cap_hits = [0]
 
             # Opponent B2B pace adjustment (Phase 3b):
             # Opponent on B2B → faster pace, less rested defense → slight boost for pts/reb/ast.
             # Net effect: +1.5% at 50% weight = +0.75% boost; capped by combined range.
             if opponent_is_b2b and stat in ("pts", "reb", "ast"):
-                stat_mult = stat_mult * 1.015
-                stat_mult = max(lo, min(hi, stat_mult))
+                stat_mult = _cclamp(stat_mult * 1.015, lo, hi, _cap_hits)
 
             # Gap 8.18: 3-in-4 nights — compounded fatigue (1.5× normal B2B effect).
             # Normal B2B applies 0.93 rest multiplier. 3-in-4 adds an extra 0.96× on top.
             if _is_3in4 and stat in ("pts", "reb", "ast"):
-                stat_mult = max(lo, min(hi, stat_mult * 0.96))
+                stat_mult = _cclamp(stat_mult * 0.96, lo, hi, _cap_hits)
 
             # Game total pace adjustment (Phase 4a):
             # Season avg total ≈ 226. Per 5-point deviation: ±0.75% pts at 50% weight.
@@ -522,20 +544,19 @@ def compute_projection(
                 _total_deviation = (float(game_total) - 226.0) / 5.0
                 _total_mult = 1.0 + _total_deviation * 0.0075
                 _total_mult = max(0.93, min(1.07, _total_mult))
-                stat_mult = stat_mult * _total_mult
-                stat_mult = max(lo, min(hi, stat_mult))
+                stat_mult = _cclamp(stat_mult * _total_mult, lo, hi, _cap_hits)
 
             # Gap 8.17: Post-blowout urgency (pts/ast only)
             if stat in ("pts", "ast") and _blowout_adj_pts_ast != 1.0:
-                stat_mult = max(lo, min(hi, stat_mult * _blowout_adj_pts_ast))
+                stat_mult = _cclamp(stat_mult * _blowout_adj_pts_ast, lo, hi, _cap_hits)
 
             # Gap 8.19: Denver altitude — visiting player boost (pts/ast only)
             if stat in ("pts", "ast") and _altitude_mult != 1.0:
-                stat_mult = max(lo, min(hi, stat_mult * _altitude_mult))
+                stat_mult = _cclamp(stat_mult * _altitude_mult, lo, hi, _cap_hits)
 
             # Gap 8.22: Rest advantage interaction (player rested × opponent B2B)
             if stat in ("pts", "ast") and _rest_advantage:
-                stat_mult = max(lo, min(hi, stat_mult * 1.025))
+                stat_mult = _cclamp(stat_mult * 1.025, lo, hi, _cap_hits)
 
             # Gap 8.23: Hot/cold streak persistence (pts/ast only, need ≥8 logs)
             # High-usage scorers in hot streaks (≥6 of last 8 over) continue at 56-60%.
@@ -549,20 +570,20 @@ def compute_projection(
                 elif _over_rate_l8 <= 0.25:  # ≤2/8: cold streak — mean revert
                     _streak_mult = 0.98
                 if _streak_mult != 1.0:
-                    stat_mult = max(lo, min(hi, stat_mult * _streak_mult))
+                    stat_mult = _cclamp(stat_mult * _streak_mult, lo, hi, _cap_hits)
 
             # Gap 8.27: High-minutes fatigue (≥38 min previous game)
             # pts/ast: -3% (shot quality and decision-making); reb: -2% (boxing out energy).
             if _high_mins_fatigue:
                 if stat in ("pts", "ast"):
-                    stat_mult = max(lo, min(hi, stat_mult * 0.97))
+                    stat_mult = _cclamp(stat_mult * 0.97, lo, hi, _cap_hits)
                 elif stat == "reb":
-                    stat_mult = max(lo, min(hi, stat_mult * 0.98))
+                    stat_mult = _cclamp(stat_mult * 0.98, lo, hi, _cap_hits)
 
             # Gap 8.30: Road trip fatigue (≥3 consecutive away games including tonight)
             # Travel accumulation depresses pts/reb/ast by ~2%.
             if _road_trip_fatigue and stat in ("pts", "reb", "ast"):
-                stat_mult = max(lo, min(hi, stat_mult * 0.98))
+                stat_mult = _cclamp(stat_mult * 0.98, lo, hi, _cap_hits)
 
             model_projection = max(0.0, projected_minutes * per_min_rate * stat_mult)
             blend_line = _extract_blend_line(blend_with_line, stat)
@@ -595,7 +616,7 @@ def compute_projection(
             # directly fixes the 70-80% bin over-confidence (predicted 73%,
             # actual 40%) by narrowing the CDF and pushing probabilities toward
             # calibrated confidence levels.
-            _proj_stdev = stdev_val * _PROJ_STDEV_SHRINK
+            _proj_stdev = stdev_val * _get_stdev_shrink(stat)
 
             # --- #2: Line-blend stdev reduction ---
             # Blending (1 - _LINE_BLEND_MODEL_WEIGHT) of the book line anchors that
@@ -643,6 +664,7 @@ def compute_projection(
                 "streakMult": safe_round(_streak_mult, 3) if stat in ("pts", "ast") and _streak_mult != 1.0 else None,
                 "highMinsFatigueAdj": True if _high_mins_fatigue and stat in ("pts", "ast", "reb") else None,
                 "roadTripFatigueAdj": True if _road_trip_fatigue and stat in ("pts", "reb", "ast") else None,
+                "capHitCount": _cap_hits[0],
                 "min": rolling.get(f"{stat}_min", 0),
                 "max": rolling.get(f"{stat}_max", 0),
                 "perMinRate": safe_round(per_min_rate, 4),

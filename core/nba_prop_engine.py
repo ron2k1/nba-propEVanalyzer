@@ -103,7 +103,7 @@ def compute_prop_ev(
     model_variant="full",
     reference_book=None,
     auto_pinnacle=True,
-    no_blend=False,
+    no_blend=True,  # blend disabled 2026-03-03: -18.2pp blend effect confirmed by factorial (raw Brier wins 5/7 stats)
     opponent_is_b2b=False,
     game_total=None,
     minutes_multiplier=None,

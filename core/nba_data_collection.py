@@ -10,6 +10,7 @@
 # `nba_prop_engine.py`; this file mainly handles fetch/normalize/caching.
 
 import json
+import logging
 import time
 import math
 import os
@@ -21,6 +22,8 @@ import statistics
 from datetime import datetime, timedelta, timezone
 
 import requests
+
+_log = logging.getLogger("nba_engine.data")
 
 from nba_api.stats.endpoints import (
     scoreboardv3,
@@ -46,6 +49,10 @@ HEADERS = {
     "x-nba-stats-token":  "true",
 }
 API_DELAY = 0.7  # seconds between NBA Stats API calls
+_GAMELOG_CACHE_TTL = int(os.getenv("GAMELOG_CACHE_TTL", "3600"))
+_SPLITS_CACHE_TTL  = int(os.getenv("SPLITS_CACHE_TTL",  "3600"))
+_DEFENSE_CACHE_TTL = int(os.getenv("DEFENSE_CACHE_TTL", "3600"))
+_PVT_CACHE_TTL     = int(os.getenv("PVT_CACHE_TTL",     "3600"))
 PROJECTION_CONFIG = {
     "defense_adj":   (0.70, 1.40),   # defense multiplier min/max
     "home_away":     (0.85, 1.15),   # home/away split cap
@@ -60,7 +67,7 @@ PROJECTION_CONFIG = {
 
 BETTING_POLICY = {
     "stat_whitelist": {"pts", "ast"},  # reb removed 2026-02-28: -5.34% ROI; pra removed 2026-03-01: -3.81% ROI on 318 real-line bets
-    "blocked_prob_bins": {2, 3, 4, 5, 6, 7},  # 20-80% calibrated range; bin 7 added 2026-03-01: 51.4% hit/-9.88% ROI on 107 real-line bets (60d)
+    "blocked_prob_bins": {1, 2, 3, 4, 5, 6, 7, 8},  # bins 1+8 added 2026-03-03: bin 1 +4.3% ROI/28.9 cal error; bin 8 n=11 insufficient. Active: 0 (0-10%) + 9 (90-100%)
     "min_ev_pct": 0.0,                 # evPercent floor
 }
 CURRENT_SEASON = get_season_string()
@@ -120,7 +127,7 @@ def cache_get(key, ttl):
             if time.time() - entry["ts"] < ttl:
                 return entry["data"]
     except Exception:
-        pass
+        _log.debug("cache_get failed for key=%s: %s", key[:40], traceback.format_exc(limit=1).strip())
     return None
 
 def cache_set(key, data):
@@ -128,7 +135,7 @@ def cache_set(key, data):
         with open(_cache_path(key), "w") as f:
             json.dump({"ts": time.time(), "data": data}, f)
     except Exception:
-        pass
+        _log.debug("cache_set failed for key=%s: %s", key[:40], traceback.format_exc(limit=1).strip())
 
 def team_id_from_abbr(abbr):
     t = _ALL_TEAMS_BY_ABBR.get(abbr)
@@ -1288,7 +1295,7 @@ def get_player_game_log(player_id, season=None, last_n=25, as_of_date=None):
         cutoff_key = cutoff_date.isoformat() if cutoff_date else "full"
         last_n_key = "all" if last_n is None else int(last_n)
         cache_key = f"gamelog_{player_id}_{season}_{last_n_key}_{cutoff_key}"
-        cached = cache_get(cache_key, 900)
+        cached = cache_get(cache_key, _GAMELOG_CACHE_TTL)
         if cached:
             return cached
 
@@ -1428,7 +1435,7 @@ def get_player_splits(player_id, season=None, as_of_date=None):
     cutoff_date = _coerce_date(as_of_date)
     cutoff_key = cutoff_date.isoformat() if cutoff_date else "full"
     cache_key = f"splits_{player_id}_{season}_{cutoff_key}"
-    cached    = cache_get(cache_key, 900)
+    cached    = cache_get(cache_key, _SPLITS_CACHE_TTL)
     if cached:
         return cached
 
@@ -1501,7 +1508,7 @@ def get_team_defensive_ratings(as_of_date=None):
     cutoff_date = _coerce_date(as_of_date)
     cutoff_key = cutoff_date.isoformat() if cutoff_date else "full"
     cache_key = f"defense_{CURRENT_SEASON}_{cutoff_key}"
-    cached    = cache_get(cache_key, 1800)
+    cached    = cache_get(cache_key, _DEFENSE_CACHE_TTL)
     if cached:
         return cached
 
@@ -1859,7 +1866,7 @@ def get_position_vs_team(opponent_team_id, season=None, as_of_date=None):
     cutoff_key = cutoff_date.isoformat() if cutoff_date else "full"
 
     cache_key = f"pvt_{opponent_team_id}_{season}_{cutoff_key}"
-    cached    = cache_get(cache_key, 1800)
+    cached    = cache_get(cache_key, _PVT_CACHE_TTL)
     if cached:
         return cached
 
