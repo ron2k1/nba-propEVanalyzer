@@ -9,7 +9,9 @@ Then open:
 """
 
 import json
+import logging
 import mimetypes
+import os
 import subprocess
 import sys
 import traceback
@@ -22,6 +24,22 @@ load_dotenv(override=True)
 
 
 ROOT = Path(__file__).resolve().parent
+
+# ---------------------------------------------------------------------------
+# Logging — file + console; DEBUG only when NBA_LOG_LEVEL=DEBUG env is set.
+# Pipeline trace logs (nba_engine.*) go to data/logs/pipeline.log.
+# ---------------------------------------------------------------------------
+_LOG_DIR = ROOT / "data" / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_log_level = getattr(logging, os.getenv("NBA_LOG_LEVEL", "INFO").upper(), logging.INFO)
+logging.basicConfig(
+    level=_log_level,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    handlers=[
+        logging.FileHandler(str(_LOG_DIR / "pipeline.log"), encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
 WEB_DIR = ROOT / "web"
 NBA_SCRIPT = ROOT / "nba_mod.py"
 DEFAULT_TIMEOUT_SEC = 300

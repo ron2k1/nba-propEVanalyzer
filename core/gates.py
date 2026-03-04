@@ -16,14 +16,14 @@ SIGNAL_SPEC = {
         "min_edge":            0.08,   # raised 2026-03-01: 0.05→0.08 (87d real-line data)
         "min_edge_by_stat":    {"reb": 0.08, "ast": 0.09},  # ast: -1.11% ROI on 2,255 bets → higher bar
         "min_confidence":      0.60,   # raised 2026-03-01: 0.55→0.60 (marginal 55-60% bin losing)
-        "blocked_prob_bins":   {2, 3, 4, 5, 6, 7},  # 20-80% calibrated range; bin 7 added to match BETTING_POLICY (51.4% hit/-9.88% ROI on 107 real-line bets, 60d)
+        "blocked_prob_bins":   {1, 2, 3, 4, 5, 6, 7, 8},  # bins 1+8 added 2026-03-03: bin 1 +4.3% ROI/28.9 cal error; bin 8 n=11 insufficient. Active: 0 (0-10%) + 9 (90-100%)
         "real_line_required_stats": {"reb"},    # skip reb if no real Odds API line
         "paper_mode":          True,
         # Pinnacle confirmation gate (Phase 1a)
         # require_pinnacle=True: if referenceBook present, enforce threshold.
         # If referenceBook absent (backtest, no Pinnacle call), gate is skipped.
         "require_pinnacle":    True,
-        "pinnacle_thresholds": {0: 0.75, 1: 0.65},  # global bin → min no-vig for rec side
+        "pinnacle_thresholds": {0: 0.75, 9: 0.75},  # conservative on bin 9 (N=4, no calibration data); revisit at 30+ bets
         # Per-stat Pinnacle threshold (overrides global when set; gap #7)
         # ast is a sharper market — raise bar; pts is broader distribution — lower bar
         "pinnacle_min_no_vig_by_stat": {"pts": 0.62, "ast": 0.67, "reb": 0.62},

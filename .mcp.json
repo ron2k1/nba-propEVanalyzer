@@ -15,6 +15,23 @@
       "command": "cmd",
       "args": ["/c", ".venv\\Scripts\\python.exe", "-m", "lightrag_mcp", "--host", "localhost", "--port", "9621"],
       "env": {}
+    },
+    "claude-flow": {
+      "command": "cmd",
+      "args": ["/c", "npx", "claude-flow@v3alpha", "mcp", "start"],
+      "env": {}
+    },
+    "ruv-swarm": {
+      "command": "cmd",
+      "args": ["/c", "npx", "ruv-swarm", "mcp", "start"],
+      "env": {}
+    },
+    "obsidian-cli": {
+      "command": "cmd",
+      "args": ["/c", "npx", "obsidian-cli", "mcp"],
+      "env": {
+        "OBSIDIAN_VAULT_PATH": "C:\\Users\\thegr\\OneDrive\\Desktop\\nba data ver 2\\vault"
+      }
     }
   }
 }

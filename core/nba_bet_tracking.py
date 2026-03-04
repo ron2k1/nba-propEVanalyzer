@@ -590,10 +590,67 @@ def _get_playing_teams_today():
         return None  # graceful fallback — skip filter
 
 
+def _sqlite_fallback_entries(target):
+    """Fallback: read today's signals from DecisionJournal SQLite when JSONL is empty."""
+    try:
+        from .nba_decision_journal import DecisionJournal, _ct_day_utc_bounds
+        with DecisionJournal() as dj:
+            utc_start, utc_end = _ct_day_utc_bounds(target)
+            cur = dj._conn.execute(
+                """SELECT player_id, player_name, team_abbr, opponent_abbr,
+                          stat, line, book, over_odds, under_odds,
+                          projection, prob_over, prob_under,
+                          edge_over, edge_under, recommended_side, recommended_edge
+                   FROM signals
+                   WHERE ts_utc >= ? AND ts_utc < ?
+                   ORDER BY ts_utc DESC
+                   LIMIT 500""",
+                (utc_start, utc_end),
+            )
+            cols = [
+                "player_id", "player_name", "team_abbr", "opponent_abbr",
+                "stat", "line", "book", "over_odds", "under_odds",
+                "projection", "prob_over", "prob_under",
+                "edge_over", "edge_under", "recommended_side", "recommended_edge",
+            ]
+            entries = []
+            for row in cur.fetchall():
+                sig = dict(zip(cols, row))
+                rec_side = str(sig.get("recommended_side") or "").lower()
+                rec_edge = _as_float(sig.get("recommended_edge"), 0.0)
+                over_odds = _as_int(sig.get("over_odds"))
+                under_odds = _as_int(sig.get("under_odds"))
+                entries.append({
+                    "pickDate": target,
+                    "playerId": _as_int(sig.get("player_id")),
+                    "playerName": sig.get("player_name", ""),
+                    "playerTeamAbbr": str(sig.get("team_abbr") or "").upper(),
+                    "opponentAbbr": str(sig.get("opponent_abbr") or "").upper(),
+                    "stat": str(sig.get("stat") or "").lower(),
+                    "line": _as_float(sig.get("line")),
+                    "overOdds": over_odds,
+                    "underOdds": under_odds,
+                    "recommendedSide": rec_side,
+                    "recommendedEvPct": safe_round(rec_edge * 100.0, 2) if rec_edge else 0.0,
+                    "projection": _as_float(sig.get("projection")),
+                    "recommendedOdds": over_odds if rec_side == "over" else under_odds,
+                    "probOver": _as_float(sig.get("prob_over")),
+                    "probUnder": _as_float(sig.get("prob_under")),
+                    "settled": False,
+                    "source": "sqlite_fallback",
+                })
+            return entries
+    except Exception:
+        return []
+
+
 def best_plays_for_date(date_str=None, limit=15, unique_props=True):
     target = str(date_str or _today_local_str())
     entries = _load_journal_entries()
     filtered = [e for e in entries if str(e.get("pickDate")) == target]
+    # Fallback: if JSONL has no entries for today, try SQLite (primary store)
+    if not filtered:
+        filtered = _sqlite_fallback_entries(target)
     deduped = _dedupe_latest(filtered)
 
     # Filter out phantom signals: players whose teams aren't playing today

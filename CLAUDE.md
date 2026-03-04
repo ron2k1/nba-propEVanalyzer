@@ -10,9 +10,15 @@ Private NBA player-prop EV engine. **Stat priority:** pts > reb > ast > pra > to
 
 ### Accuracy Ceiling
 
-**60d baseline (Dec 28–Feb 25, real lines, current policy):** 283 bets | 72.09% hit | +32.03% roiReal | 95% CI [22%, 42%]. Bins 0-10%: 79.5% hit/+46.4% ROI; 10-20%: 60.6%/+10.0%. Edge concentrated in extreme probability tails (UNDER confidence 0-20%, OVER confidence 80%+). CLV filtering is the next lever for live deployment.
+**In-sample (Dec 28–Feb 25, variant E):** 250 bets | 86.0% hit | +58.63% roiReal | +146.6u PnL | 4.2/day. All policy params (temps, stat_whitelist, bins, thresholds, no-blend) tuned on this period — treat as upper bound, not forward estimate.
 
-**Do not:** chase BRef/RAPM/Bayesian priors for marginal accuracy gains. Do not try to beat 58% hit rate. Do not spend Odds API credits on fg3m/tov/stl/blk (not in stat whitelist). See `docs/PLAN_CLAUDE_CODE.md` for the full GO-LIVE master plan.
+**OOS (Oct 21–Nov 30, current temps):** 228 bets | 71.1% hit | +31.86% ROI | +72.6u | 5.6/day. pts: 146/65.8%/+22.6%, ast: 82/80.5%/+48.4%. Bin 0: 215/70.2%/+30.2%, Bin 9: 13/84.6%/+60.0%. Calibration temps contaminate bin assignment but edge is genuine (see no-cal run below).
+
+**OOS (Oct 21–Nov 30, no calibration):** 488 bets | 67.4% hit | +22.48% ROI | +109.7u | 11.9/day. pts: 243/63.8%/+19.1%, ast: 245/71.0%/+25.9%. Bin 0: 426/66.7%/+21.5%. More volume, lower per-bet quality. Edge survives without temp fitting — not a calibration artifact.
+
+**Forward estimate: +20-30% ROI** anchored on OOS bin-0 performance. Calibration improves selectivity (+31.9% vs +22.5%) but edge exists without it. Paper trading is the only uncontaminated validation. CLV filtering is the next lever for live deployment.
+
+**Do not:** chase BRef/RAPM/Bayesian priors for marginal accuracy gains. Do not spend Odds API credits on fg3m/tov/stl/blk (not in stat whitelist). See `docs/PLAN_CLAUDE_CODE.md` for the full GO-LIVE master plan.
 
 ## 2. Workflow Principles
 
@@ -113,7 +119,7 @@ Engine logic in `core/`. CLI in `nba_cli/`. Entrypoints (`server.py`, `nba_mod.p
 
 `compute_ev()`: always pass `stat=` for temperature-scaling calibration. Poisson for `{stl,blk,fg3m,tov}`, Normal CDF for others. Edge computed vs **no-vig fair probability**.
 
-**BETTING_POLICY** (in `nba_data_collection.py`): stat whitelist `{pts, ast}` (reb removed 2026-02-28: -5.34% ROI; pra removed 2026-03-01: -3.81% ROI), blocked bins `{2,3,4,5,6,7}` (20–80% calibrated range; bin 7 added 2026-03-01: 51.4% hit / -9.88% ROI on 107 real-line bets, 60d). Active betting bins: 0-10% and 10-20% (UNDER confidence) + 80-100% (OVER confidence).
+**BETTING_POLICY** (in `nba_data_collection.py`): stat whitelist `{pts, ast}` (reb removed 2026-02-28: -5.34% ROI; pra removed 2026-03-01: -3.81% ROI), blocked bins `{1,2,3,4,5,6,7,8}` (bins 1+8 added 2026-03-03: bin 1 +4.3% ROI/28.9 cal error, bin 8 n=11 insufficient). **Active betting bins: 0 (0-10%, UNDER) + 9 (90-100%, OVER) only.** Blend disabled 2026-03-03 in `compute_prop_ev()` (`no_blend=True` default): factorial confirmed -18.2pp blend effect, raw Brier wins 5/7 stats.
 
 **SIGNAL_SPEC** (in `nba_decision_journal.py`): `min_edge = 0.08`, `min_edge_by_stat = {reb: 0.08, ast: 0.09}` (ast raised 2026-03-01: -1.11% ROI on 2,255 bets), `min_confidence = 0.60` (raised 2026-03-01: was 0.55), `real_line_required_stats = {reb}`. Signals auto-logged on qualifying `prop_ev`/`auto_sweep` calls; deduped by `(player_id, stat, book, line, date)`.
 
@@ -143,7 +149,7 @@ Verdicts: `<0` Negative EV | `<0.08` Thin Edge | `0.08–0.12` Good Value | `≥
 Current temps (refitted 2026-03-01, 87d Dec 1–Feb 25, `--min-pred 0.01 --max-pred 0.25`): `pts=1.81 reb=3.79 ast=2.24 fg3m=1.49 pra=1.77 stl=1.39 blk=1.30 tov=1.25 _global=1.77`
 Per-bin temps: `pts: {0-10: 1.32, 10-20: 2.71}` | `ast: {0-10: 1.76, 10-20: 3.21}` | `reb: {0-10: 1.00, 10-20: 3.79}` | `pra: {0-10: 1.38, 10-20: 2.45}` | `blk: {0-10: 1.44, 10-20: 1.14}`
 
-Real-line ROI (60d Dec 28–Feb 25, post-bin7-block 2026-03-01): `pts=+29.9% ast=+35.0%` | overall roiReal=+32.03% on 283 bets | 72.09% hit rate. Active bins: 0-20% (UNDER) = 270 bets / 71.5% hit; 80-100% (OVER) = 13 bets / 69.2% hit.
+Real-line ROI (60d Dec 28–Feb 25, variant E go-live config, no-blend + bins 0+9 + stat_whitelist fix): `pts=+53.0% (146) ast=+66.6% (104)` | overall roiReal=+58.63% on 250 bets | 86.0% hit | +146.6u PnL | 4.2/day. Bin 0: 246 bets / 86.2% hit / +59.0% ROI. Bin 9: 4 bets / 75.0% hit (tiny sample). Match-live stat_whitelist fix 2026-03-04: reb correctly excluded (162 phantom bets removed).
 
 ### Pre-GO Calibration Checklist
 

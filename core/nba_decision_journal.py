@@ -10,11 +10,14 @@ signals  - pre-outcome EV signals that pass the quality filter
 outcomes - post-settlement win/loss/push + CLV data
 """
 
+import logging
 import os
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from os.path import abspath, dirname, join
+
+_log = logging.getLogger("nba_engine.journal")
 
 _ROOT = dirname(dirname(abspath(__file__)))
 _DEFAULT_DB_PATH = join(_ROOT, "data", "decision_journal", "decision_journal.sqlite")
@@ -148,6 +151,13 @@ class DecisionJournal:
     def _init_db(self):
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
 
     def close(self):
         try:
@@ -316,8 +326,9 @@ class DecisionJournal:
                             close_over_odds = cl.get("close_over_odds")
                             close_under_odds = cl.get("close_under_odds")
                             clv_delta = _clv_line_delta(rec_side, line, close_line)
-                except Exception:
-                    pass
+                except Exception as clv_ex:
+                    _log.warning("CLV enrichment failed for signal %s: %s",
+                                 sig.get("signal_id", "?"), clv_ex)
 
             try:
                 self._conn.execute(

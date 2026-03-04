@@ -17,7 +17,8 @@ def _handle_backtest(argv):
                 "[--data-source nba|bref|local] [--local] [--bref-dir <path>] "
                 "[--local-index <path>] [--odds-source local_history] [--odds-db <path>] "
                 "[--real-only] [--clv] [--walk-forward] "
-                "[--emit-bets] [--emit-bets-path <path>] [--emit-all] [--match-live]"
+                "[--emit-bets] [--emit-bets-path <path>] [--emit-all] [--match-live] "
+                "[--no-blend] [--no-gates]"
             )
         }
     date_from = argv[2]
@@ -42,6 +43,8 @@ def _handle_backtest(argv):
     emit_bets_path = None
     emit_all = False
     match_live = False
+    no_blend = False
+    no_gates = False
     while idx < len(argv):
         token = str(argv[idx]).strip().lower()
         if token == "--model" and idx + 1 < len(argv):
@@ -110,6 +113,14 @@ def _handle_backtest(argv):
             match_live = True
             idx += 1
             continue
+        if token == "--no-blend":
+            no_blend = True
+            idx += 1
+            continue
+        if token == "--no-gates":
+            no_gates = True
+            idx += 1
+            continue
         return {
             "error": (
                 "Invalid backtest arguments. "
@@ -117,7 +128,8 @@ def _handle_backtest(argv):
                 "[--save] [--fast] [--data-source nba|bref|local] [--local] "
                 "[--bref-dir <path>] [--local-index <path>] "
                 "[--odds-source local_history] [--odds-db <path>] [--real-only] [--clv] "
-                "[--walk-forward] [--emit-bets] [--emit-bets-path <path>] [--emit-all] [--match-live]"
+                "[--walk-forward] [--emit-bets] [--emit-bets-path <path>] [--emit-all] [--match-live] "
+                "[--no-blend] [--no-gates]"
             )
         }
     result = run_backtest(date_from=date_from, date_to=date_to, model=model,
@@ -129,7 +141,8 @@ def _handle_backtest(argv):
                           walk_forward=walk_forward,
                           emit_bets=emit_bets,
                           emit_all=emit_all,
-                          match_live=match_live)
+                          match_live=match_live,
+                          no_blend=no_blend, no_gates=no_gates)
 
     # Write bet records to JSONL file if path specified
     if emit_bets_path and result.get("bets"):

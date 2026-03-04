@@ -483,6 +483,8 @@ def run_backtest(
     emit_bets=False,
     emit_all=False,
     match_live=False,
+    no_blend=False,
+    no_gates=False,
 ):
     """
     Backtest projection + EV quality for one day or a date range.
@@ -527,6 +529,9 @@ def run_backtest(
     source_key = str(data_source or "nba").lower().strip()
     if source_key not in {"nba", "bref", "local"}:
         return {"success": False, "error": "data_source must be one of: nba, bref, local"}
+
+    if (no_blend or no_gates) and not match_live:
+        return {"success": False, "error": "--no-blend and --no-gates require --match-live"}
 
     # --match-live implies real lines only (no synthetic), local_history odds source
     if match_live:
@@ -588,7 +593,7 @@ def run_backtest(
     event_id_cache = {}   # (date_str, homeAbbr, awayAbbr) -> odds event_id or None
     player_name_cache = {}  # player_id -> full_name string
 
-    _ml_label = " MATCH-LIVE" if match_live else ""
+    _ml_label = (" MATCH-LIVE" + (" NO-BLEND" if no_blend else "") + (" NO-GATES" if no_gates else "")) if match_live else ""
     print(
         f"[backtest] {start} -> {end}  model={model_key}  delay={_delay:.2f}s  "
         f"save={save_results}  source={source_key}{_ml_label}",
@@ -729,7 +734,7 @@ def run_backtest(
                     # money and are typically sharper. This makes the matched backtest
                     # pessimistic vs live — the safer direction to be wrong.
                     _blend_lines = None
-                    if match_live and odds_store and odds_event_id and _player_full_name:
+                    if match_live and not no_blend and odds_store and odds_event_id and _player_full_name:
                         _blend_lines = {}
                         for _bs in TRACKED_STATS:
                             _bm = _odds_stat_to_market.get(_bs)
@@ -903,7 +908,7 @@ def run_backtest(
                             _ml_reason = None
                             _ml_gates_unavail = []
 
-                            if match_live:
+                            if match_live and not no_gates:
                                 # 10-gate live pipeline policy via _live_qualifies()
                                 _ml_prop = {
                                     "ev": ev,
@@ -914,20 +919,33 @@ def run_backtest(
                                 _qualifies_ok, _ml_reason = _live_qualifies(
                                     _ml_prop, stat, used_real_line=True
                                 )
-                                _policy_pass = _has_positive_ev and _qualifies_ok
+                                # Also enforce BETTING_POLICY (stat_whitelist + blocked_bins)
+                                # so match-live backtest only counts bets production would place.
+                                _bp = BETTING_POLICY
+                                _stat_ok = stat in _bp.get("stat_whitelist", TRACKED_STATS)
+                                _bin_ok = bin_idx not in _bp.get("blocked_prob_bins", set())
+                                _policy_pass = (
+                                    _has_positive_ev and _qualifies_ok
+                                    and _stat_ok and _bin_ok
+                                )
                                 if not _qualifies_ok:
                                     _reason_prefix = (_ml_reason or "unknown").split(":")[0]
                                     acc["_ml_gate_rejections"][_reason_prefix] = (
                                         acc["_ml_gate_rejections"].get(_reason_prefix, 0) + 1
+                                    )
+                                elif not _stat_ok:
+                                    acc["_ml_gate_rejections"]["stat_not_in_whitelist"] = (
+                                        acc["_ml_gate_rejections"].get("stat_not_in_whitelist", 0) + 1
+                                    )
+                                elif not _bin_ok:
+                                    acc["_ml_gate_rejections"]["bin_not_in_policy"] = (
+                                        acc["_ml_gate_rejections"].get("bin_not_in_policy", 0) + 1
                                     )
                                 else:
                                     # Gates 6 (CLV), 8 (Pinnacle), 10 (market-depth) are always
                                     # unavailable in backtest — no historical data for these.
                                     _ml_gates_unavail = [6, 8, 10]
                                     acc["_ml_gates_unavailable"] += 1
-                                # For bet record compatibility
-                                _stat_ok = True
-                                _bin_ok = True
                                 meets_threshold = True
                             elif walk_forward:
                                 _stat_ok = stat in _day_policy["stat_whitelist"]
@@ -1202,6 +1220,10 @@ def run_backtest(
         response["walkForward"] = walk_forward
         if match_live:
             response["matchLive"] = True
+        if no_blend:
+            response["noBlend"] = True
+        if no_gates:
+            response["noGates"] = True
         if emit_all:
             response["emitAll"] = True
         if odds_key:
@@ -1223,9 +1245,11 @@ def run_backtest(
             _os.makedirs(results_dir, exist_ok=True)
             model_tag = model_key.replace(",", "-")
             ml_tag = "_matchlive" if match_live else ""
+            noblend_tag = "_noblend" if no_blend else ""
+            nogates_tag = "_nogates" if no_gates else ""
             realonly_tag = "_realonly" if (odds_only and not match_live) else ""
             wf_tag = "_wf" if walk_forward else ""
-            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}{ml_tag}{wf_tag}.json"
+            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}{ml_tag}{noblend_tag}{nogates_tag}{wf_tag}.json"
             fpath = _os.path.join(results_dir, fname)
             with open(fpath, "w", encoding="utf-8") as fh:
                 _json.dump(response, fh, indent=2)
