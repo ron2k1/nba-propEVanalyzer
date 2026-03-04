@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Scan commands: roster_sweep — scans LineStore snapshots and journals qualifying signals."""
 
+import logging
 from datetime import date
+
+_log = logging.getLogger("nba_engine.scan")
 
 
 def _handle_roster_sweep(argv):
@@ -16,7 +19,7 @@ def _handle_roster_sweep(argv):
     from core.nba_line_store import LineStore
     from core.nba_decision_journal import DecisionJournal, _qualifies
     from core.nba_model_training import american_to_implied_prob, compute_prop_ev
-    from core.nba_data_collection import safe_round, get_yesterdays_team_abbrs, get_todays_game_totals, get_player_team_map
+    from core.nba_data_collection import safe_round, get_yesterdays_team_abbrs, get_todays_game_totals, get_player_team_map, get_team_defensive_ratings, get_position_vs_team
     from core.nba_bet_tracking import log_prop_ev_entry
     from nba_api.stats.static import players as nba_players_static
 
@@ -96,6 +99,21 @@ def _handle_roster_sweep(argv):
 
     _player_team_map = get_player_team_map()  # cached, single API call
 
+    # Pre-warm defense + PVT caches: one fetch per unique opponent instead of per-player.
+    _def_data = get_team_defensive_ratings()
+    if _def_data.get("success"):
+        _team_lookup = {t["abbreviation"]: t.get("teamId") for t in _def_data.get("teams", [])}
+        _opp_abbrs = {(s.get("opponent_abbr") or "").upper() for s in best_per_player_stat.values()} - {""}
+        for _oa in _opp_abbrs:
+            _tid = _team_lookup.get(_oa)
+            if _tid:
+                get_position_vs_team(_tid)
+
+    # Accept --verbose flag for debug-level trace logging
+    _verbose = "--verbose" in argv or "-v" in argv
+    if _verbose:
+        logging.getLogger("nba_engine").setLevel(logging.DEBUG)
+
     scanned = 0
     logged = 0
     skipped_list = []
@@ -154,6 +172,7 @@ def _handle_roster_sweep(argv):
                 (team_abbr or "").upper(), opp_abbr.upper()
             }))
 
+            _log.debug("Evaluating %s/%s: line=%.1f book=%s opp=%s", pname, stat, float(line), book, opp_abbr)
             result = compute_prop_ev(
                 player_id=player_id,
                 opponent_abbr=opp_abbr,
@@ -194,6 +213,13 @@ def _handle_roster_sweep(argv):
                     }
 
             qualifies_ok, skip_reason = _qualifies(result, stat, used_real_line=True)
+            _ev = result.get("ev") or {}
+            _eo_dbg = float((_ev.get("over") or {}).get("edge") or 0.0)
+            _eu_dbg = float((_ev.get("under") or {}).get("edge") or 0.0)
+            _log.debug("  %s/%s: edge=%.4f conf=%.4f probOver=%.4f qualifies=%s reason=%s",
+                        pname, stat, max(_eo_dbg, _eu_dbg),
+                        max(float(_ev.get("probOver") or 0.0), float(_ev.get("probUnder") or 0.0)),
+                        float(_ev.get("probOver") or 0.0), qualifies_ok, skip_reason or "")
             if not qualifies_ok:
                 skipped_list.append({"player": pname, "stat": stat, "reason": skip_reason})
                 continue
@@ -265,8 +291,8 @@ def _handle_roster_sweep(argv):
                         is_b2b=False,
                         source="roster_sweep",
                     )
-                except Exception:
-                    pass  # non-fatal — SQLite log is the primary record
+                except Exception as _bridge_ex:
+                    _log.warning("JSONL bridge write failed for %s/%s: %s", pname, stat, _bridge_ex)
             else:
                 skipped_list.append({
                     "player": pname, "stat": stat,
@@ -274,6 +300,7 @@ def _handle_roster_sweep(argv):
                 })
 
         except Exception as ex:
+            _log.warning("roster_sweep error for %s/%s: %s", pname, stat, ex)
             skipped_list.append({"player": pname, "stat": stat, "reason": str(ex)})
 
     dj.close()
