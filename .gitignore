@@ -58,3 +58,13 @@ NBA Database (1947 - Present)/
 
 # ── External repos nested here (handle as submodule or keep out entirely) ─────
 Win-CodexBar/
+
+# Obsidian vault (personal notes)
+vault/
+
+# Ruflo clone
+ruflo/
+
+# Claude Flow runtime
+.claude-flow/
+.swarm/
