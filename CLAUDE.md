@@ -1,67 +1,70 @@
 # CLAUDE.md
 
-## 1. Mission
+## 1. Mission + Project Map
 
-Private NBA player-prop EV engine. **Stat priority:** pts > reb > ast > pra > tov >> stl > fg3m > blk. **Book priority:** BetMGM > DraftKings > FanDuel.
+Private NBA player-prop EV engine. **Stat priority:** pts > reb > ast > pra > tov >> stl > fg3m > blk. **Book priority:** BetMGM > DraftKings > FanDuel. **Forward estimate: +20-30% ROI** anchored on OOS bin-0 performance.
 
 - blk/fg3m: structural Poisson bias — do not act on >60% confidence until recalibrated
 - Real-line edge beats synthetic-line confidence. CLV (`clvLine > 0` AND `clvOddsPct > 0`) is the primary validity signal
-- Synthetic ROI (+20–24%) is a calibration diagnostic, not a real-money estimate
+- Synthetic ROI is a calibration diagnostic, not a real-money estimate
 
-### Accuracy Ceiling
+```
+core/           21 engine modules (EV, projection, odds, journal, backtest — FROZEN)
+nba_cli/        16 CLI command handlers (FROZEN)
+scripts/        48 standalone utilities (calibration, backfill, analysis, MCP server)
+web/            Alpine.js frontend (index.html + 8 modules, 7 tabs)
+models/         prob_calibration.json, policy_history.json, walk_forward/
+data/           runtime data (gitignored: SQLite, JSONL, journals, odds)
+docs/           plans/, runbooks/, guides/, reports/, prompts/ — see docs/README.md
+tasks/          lessons.md, FREEZE_2026-03-01.md
+tests/          test_betting_policy, test_compute_ev, test_gates
+```
 
-**In-sample (Dec 28–Feb 25, variant E):** 250 bets | 86.0% hit | +58.63% roiReal | +146.6u PnL | 4.2/day. All policy params (temps, stat_whitelist, bins, thresholds, no-blend) tuned on this period — treat as upper bound, not forward estimate.
+## 2. Recent Changes
 
-**OOS (Oct 21–Nov 30, current temps):** 228 bets | 71.1% hit | +31.86% ROI | +72.6u | 5.6/day. pts: 146/65.8%/+22.6%, ast: 82/80.5%/+48.4%. Bin 0: 215/70.2%/+30.2%, Bin 9: 13/84.6%/+60.0%. Calibration temps contaminate bin assignment but edge is genuine (see no-cal run below).
+- **2026-03-05:** reb signal leak fixed — `gate_check()` now filters by BETTING_POLICY before GO-LIVE metrics
+- **2026-03-04:** match-live `stat_whitelist` fix in `nba_backtest.py` (162 phantom reb bets removed)
+- **2026-03-03:** blend disabled (`no_blend=True`), bins tightened to 0+9 only (bins 1+8 blocked)
+- **2026-03-01:** `min_edge=0.08`, `min_confidence=0.60`, **FREEZE started** — no model/calibration/policy changes
+- **2026-02-28:** reb removed from stat_whitelist (-5.34% ROI)
 
-**OOS (Oct 21–Nov 30, no calibration):** 488 bets | 67.4% hit | +22.48% ROI | +109.7u | 11.9/day. pts: 243/63.8%/+19.1%, ast: 245/71.0%/+25.9%. Bin 0: 426/66.7%/+21.5%. More volume, lower per-bet quality. Edge survives without temp fitting — not a calibration artifact.
+## 3. Current State (FROZEN until ~2026-03-15)
 
-**Forward estimate: +20-30% ROI** anchored on OOS bin-0 performance. Calibration improves selectivity (+31.9% vs +22.5%) but edge exists without it. Paper trading is the only uncontaminated validation. CLV filtering is the next lever for live deployment.
+**BETTING_POLICY** (`core/nba_data_collection.py`):
+- `stat_whitelist`: `{pts, ast}` — only these count for GO-LIVE gate
+- `blocked_prob_bins`: `{1,2,3,4,5,6,7,8}` — **active bins: 0 (UNDER) + 9 (OVER) only**
+- `no_blend=True` default in `compute_prop_ev()`
 
-**Do not:** chase BRef/RAPM/Bayesian priors for marginal accuracy gains. Do not spend Odds API credits on fg3m/tov/stl/blk (not in stat whitelist). See `docs/PLAN_CLAUDE_CODE.md` for the full GO-LIVE master plan.
+**SIGNAL_SPEC** (`core/nba_decision_journal.py` + `core/gates.py`):
+- `eligible_stats`: `{pts, reb, ast}` — reb logged for research, NOT for betting
+- `min_edge`: 0.08 | per-stat: `{reb: 0.08, ast: 0.09}`
+- `min_confidence`: 0.60 | `real_line_required_stats`: `{reb}`
 
-## 2. Workflow Principles
+**Two-layer architecture:** `gate_check()` returns: (1) **metrics** — policy-qualified (pts+ast), drives GO-LIVE; (2) **model_leans** — all eligible signals; (3) **research_stats** — eligible but not in whitelist (reb); (4) **edge_at_emission** — pick-time edge stats.
 
-### Workflow Orchestration
+**Calibration temps** (refitted 2026-03-01): `pts=1.81 reb=3.79 ast=2.24 fg3m=1.49 pra=1.77 stl=1.39 blk=1.30 tov=1.25`
 
-1. **Plan Node Default** — enter plan mode for ANY non-trivial task (3+ steps or architectural decisions). If something goes sideways, STOP and re-plan immediately — don't keep pushing. Use plan mode for verification steps, not just building. Write detailed specs upfront to reduce ambiguity.
-2. **Subagent Strategy** — use subagents liberally to keep main context window clean. Offload research, exploration, and parallel analysis to subagents. For complex problems, throw more compute at it via subagents. One task per subagent for focused execution.
-3. **Self-Improvement Loop** — after ANY correction from the user: update `tasks/lessons.md` with the pattern. Write rules that prevent the same mistake. Ruthlessly iterate on these lessons until mistake rate drops. Review lessons at session start for relevant project.
-4. **Verification Before Done** — never mark a task complete without proving it works. Diff behavior between main and your changes when relevant. Ask yourself: "Would a staff engineer approve this?" Run tests, check logs, demonstrate correctness.
-5. **Demand Elegance (Balanced)** — for non-trivial changes: pause and ask "Is there a more elegant way?" If a fix feels hacky: "Knowing everything I know now, implement the elegant solution." Skip this for simple, obvious fixes — don't over-engineer. Challenge your own work before presenting it.
-6. **Autonomous Bug Fixing** — when given a bug report: just fix it. Don't ask for hand-holding. Point at logs, errors, failing tests — then resolve them. Zero context switching required from the user. Go fix failing CI tests without being told how.
+## 4. Workflow Principles
 
-### Task Management
+1. **Plan first** — enter plan mode for non-trivial tasks (3+ steps). If something goes sideways, STOP and re-plan
+2. **Subagent strategy** — offload research/exploration to subagents. One task per subagent
+3. **Self-improvement loop** — after ANY correction: update `tasks/lessons.md`. Review at session start
+4. **Verify before done** — never mark complete without proof. Run tests, check logs, demonstrate correctness
+5. **Autonomous bug fixing** — just fix it. No hand-holding. Point at logs, then resolve
+6. **Simplicity first** — minimal changes. Find root causes. Senior developer standards
 
-1. **Plan first** — write plan to `tasks/todo.md` with checkable items before starting
-2. **Verify plan** — check in before starting implementation on non-trivial changes
-3. **Track progress** — mark items complete as you go, explain changes at each step
-4. **Explain changes** — high-level summary at each step
-5. **Document results** — add review section to `tasks/todo.md` when done
-6. **Capture lessons** — update `tasks/lessons.md` after corrections. Ruthlessly iterate until mistake rate drops
+**Roles:** Claude/Cursor writes features. Codex reviews diffs. Ollama (`gpt-oss:20b` @ `localhost:11434`) does runtime LLM; Claude (`claude-sonnet-4-6`) is fallback.
 
-### Core Principles
-
-- **Simplicity first** — make every change as simple as possible. Impact minimal code
-- **No laziness** — find root causes. No temporary fixes. Senior developer standards
-- **Minimal impact** — changes should only touch what's necessary. Avoid introducing bugs
-
-### Roles
-
-- **Claude/Cursor** — writes features, refactors, produces reports, plans
-- **Codex** — reviews diffs, debugs import/logic errors
-- **Ollama** (`gpt-oss:20b` @ `localhost:11434`) — runtime LLM inference; Claude (`claude-sonnet-4-6`) is fallback
-
-## 3. Environment
+## 5. Environment
 
 - Python 3.14, `.venv/` — all commands: `.\.venv\Scripts\python.exe`
 - WinError 10013 (stats.nba.com blocked) → use `run_ui.ps1` with admin elevation
 - `.env` (never committed): `ODDS_API_KEY`, `NEWS_API_KEY`, `ANTHROPIC_API_KEY`, `LLM_PROVIDER_ORDER=ollama_first`
 - Setup: `python -m venv .venv && .\.venv\Scripts\python.exe -m pip install -r requirements.txt`
 
-## 4. Key Commands
+## 6. Key Commands
 
-Last stdout line is always the parseable JSON payload. Use `--model full` unless testing simple.
+Last stdout line is always parseable JSON. Use `--model full` unless testing simple.
 
 ```powershell
 # Server
@@ -76,13 +79,9 @@ powershell -ExecutionPolicy Bypass -File ".\run_ui.ps1" -OddsApiKey "KEY"
 .\.venv\Scripts\python.exe nba_mod.py top_picks 5
 .\.venv\Scripts\python.exe nba_mod.py settle_yesterday
 .\.venv\Scripts\python.exe nba_mod.py results_yesterday 50
-# Data queries
-.\.venv\Scripts\python.exe nba_mod.py games
-.\.venv\Scripts\python.exe nba_mod.py player_lookup "anthony edwards" 10
-.\.venv\Scripts\python.exe nba_mod.py player_log "Anthony Edwards" 20
-.\.venv\Scripts\python.exe nba_mod.py roster_status MIN
-.\.venv\Scripts\python.exe nba_mod.py defense
-# Decision journal & paper trading
+# Paper trading
+.\.venv\Scripts\python.exe nba_mod.py collect_lines --books betmgm,draftkings,fanduel --stats pts,reb,ast,pra
+.\.venv\Scripts\python.exe nba_mod.py line_bridge --books betmgm,draftkings,fanduel --stats pts,reb,ast,pra
 .\.venv\Scripts\python.exe nba_mod.py paper_settle 2026-03-01
 .\.venv\Scripts\python.exe nba_mod.py paper_summary --window-days 14
 .\.venv\Scripts\python.exe nba_mod.py journal_gate
@@ -90,121 +89,54 @@ powershell -ExecutionPolicy Bypass -File ".\run_ui.ps1" -OddsApiKey "KEY"
 .\.venv\Scripts\python.exe nba_mod.py backtest 2026-01-26 2026-02-25 --model full --local --save
 .\.venv\Scripts\python.exe nba_mod.py minutes_eval 2026-01-26 2026-02-25 --local
 # Lines & CLV
-.\.venv\Scripts\python.exe nba_mod.py collect_lines --books betmgm,draftkings,fanduel --stats pts,reb,ast,pra
-.\.venv\Scripts\python.exe nba_mod.py line_bridge --books betmgm,draftkings,fanduel --stats pts,reb,ast,pra
 .\.venv\Scripts\python.exe nba_mod.py odds_build_closes
 # Quality gate (required before every commit)
 .\.venv\Scripts\python.exe scripts\quality_gate.py --json
 ```
 
-## 5. Architecture & Import Policy
+## 7. Architecture & Import Policy
 
 Engine logic in `core/`. CLI in `nba_cli/`. Entrypoints (`server.py`, `nba_mod.py`) contain no engine imports.
 
 - `core/` → relative imports: `from .nba_X import Y`
 - `nba_cli/` and `scripts/` → absolute: `from core.nba_X import Y`
 - New commands → wire in `nba_cli/router.py` + handler. Never add logic to `nba_mod.py`
+- Data paths in `core/` → use `dirname(dirname(__file__))` for repo root
 
 | What | Where |
 |------|-------|
-| API/cache | `core/nba_data_collection.py` |
-| Projections | `core/nba_prep_projection.py` |
-| EV math | `core/nba_ev_engine.py` |
-| Props/sweep | `core/nba_prop_engine.py` |
-| Decision journal | `core/nba_decision_journal.py` |
+| API/cache + BETTING_POLICY | `core/nba_data_collection.py` |
+| Projections + shrinkage | `core/nba_prep_projection.py` |
+| EV math (Normal/Poisson) | `core/nba_ev_engine.py` |
+| Props/sweep/line matching | `core/nba_prop_engine.py` |
+| Decision journal + SIGNAL_SPEC | `core/nba_decision_journal.py` |
+| Gates + two-layer signals | `core/gates.py` |
+| Odds store + closing lines | `core/nba_odds_store.py` |
+| Bet tracking/settlement | `core/nba_bet_tracking.py` |
 | Minutes model | `core/nba_minutes_model.py` |
 | CLI commands | `nba_cli/router.py` + `*_commands.py` |
 
-## 6. EV Engine Rules
+See `docs/architecture.md` for full module map and data layer details.
+
+## 8. EV Engine Rules
 
 `compute_ev()`: always pass `stat=` for temperature-scaling calibration. Poisson for `{stl,blk,fg3m,tov}`, Normal CDF for others. Edge computed vs **no-vig fair probability**.
 
-**BETTING_POLICY** (in `nba_data_collection.py`): stat whitelist `{pts, ast}` (reb removed 2026-02-28: -5.34% ROI; pra removed 2026-03-01: -3.81% ROI), blocked bins `{1,2,3,4,5,6,7,8}` (bins 1+8 added 2026-03-03: bin 1 +4.3% ROI/28.9 cal error, bin 8 n=11 insufficient). **Active betting bins: 0 (0-10%, UNDER) + 9 (90-100%, OVER) only.** Blend disabled 2026-03-03 in `compute_prop_ev()` (`no_blend=True` default): factorial confirmed -18.2pp blend effect, raw Brier wins 5/7 stats.
+Verdicts: `<0` Negative EV | `<0.08` Thin Edge | `0.08–0.12` Good Value | `>=0.12` Strong Value.
 
-**SIGNAL_SPEC** (in `nba_decision_journal.py`): `min_edge = 0.08`, `min_edge_by_stat = {reb: 0.08, ast: 0.09}` (ast raised 2026-03-01: -1.11% ROI on 2,255 bets), `min_confidence = 0.60` (raised 2026-03-01: was 0.55), `real_line_required_stats = {reb}`. Signals auto-logged on qualifying `prop_ev`/`auto_sweep` calls; deduped by `(player_id, stat, book, line, date)`.
+**GO-LIVE gate:** `paper_summary` → `gate.gatePass`: `sample >= 50` | `roi > 0.0` | `positive_clv_pct >= 50.0` | no stat with >=20 signals AND hit rate < 45%.
 
-Verdicts: `<0` Negative EV | `<0.08` Thin Edge | `0.08–0.12` Good Value | `≥0.12` Strong Value.
-
-## 7. Calibration & Backtest
-
-**No-lookahead rule:** `date_to` must be strictly before today. Never feed future outcomes to the model.
-
-```powershell
-# Full backtest — zero API calls
-.\.venv\Scripts\python.exe nba_mod.py backtest 2026-01-26 2026-02-25 --model full --local --save
-# With real closing lines
-.\.venv\Scripts\python.exe nba_mod.py backtest 2026-01-26 2026-02-25 --model full --local --odds-source local_history --save
-# Minutes model evaluation
-.\.venv\Scripts\python.exe nba_mod.py minutes_eval 2026-01-26 2026-02-25 --local
-# Fit calibration from backtest
-.\.venv\Scripts\python.exe scripts\fit_calibration.py --input data/backtest_results/2026-01-26_to_2026-02-25_full_local.json --output models/prob_calibration.json
-# 60-day backtest + auto-log to data/backtest_60d_log.jsonl (run weekly)
-.\.venv\Scripts\python.exe nba_mod.py backtest_60d           # date_to = yesterday
-.\.venv\Scripts\python.exe nba_mod.py backtest_60d 2026-02-27  # explicit date_to
-# Odds API historical backfill (use --resume + --max-requests to cap credits)
-.\.venv\Scripts\python.exe nba_mod.py odds_backfill 2025-10-01 2026-02-27 --books betmgm,draftkings,fanduel --stats pts,ast,pra --offset-minutes 60 --max-requests 90000 --resume
-.\.venv\Scripts\python.exe nba_mod.py odds_build_closes 2025-10-01 2026-02-27
-```
-
-Current temps (refitted 2026-03-01, 87d Dec 1–Feb 25, `--min-pred 0.01 --max-pred 0.25`): `pts=1.81 reb=3.79 ast=2.24 fg3m=1.49 pra=1.77 stl=1.39 blk=1.30 tov=1.25 _global=1.77`
-Per-bin temps: `pts: {0-10: 1.32, 10-20: 2.71}` | `ast: {0-10: 1.76, 10-20: 3.21}` | `reb: {0-10: 1.00, 10-20: 3.79}` | `pra: {0-10: 1.38, 10-20: 2.45}` | `blk: {0-10: 1.44, 10-20: 1.14}`
-
-Real-line ROI (60d Dec 28–Feb 25, variant E go-live config, no-blend + bins 0+9 + stat_whitelist fix): `pts=+53.0% (146) ast=+66.6% (104)` | overall roiReal=+58.63% on 250 bets | 86.0% hit | +146.6u PnL | 4.2/day. Bin 0: 246 bets / 86.2% hit / +59.0% ROI. Bin 9: 4 bets / 75.0% hit (tiny sample). Match-live stat_whitelist fix 2026-03-04: reb correctly excluded (162 phantom bets removed).
-
-### Pre-GO Calibration Checklist
-
-- [ ] Avg Brier < 0.235 (current baseline: 0.2325)
-- [ ] All 8 stats show Brier improvement vs uncalibrated
-- [x] Minutes 35+ bucket bias < ±3.0 min (fixed 2026-02-28: +6.24→+2.39 min, _DECAY=0.30)
-- [ ] `models/prob_calibration.json` exists; `_fitted_at` < 60 days old
-- [ ] blk/fg3m 60–80% bin gaps documented; NOT used as GO signals
-- [ ] reb 60-70% bin gap < 12% (currently 9.2% post-cal)
-
-## 8. Live Edge Pipeline
-
-CLV rule: `clvLine > 0` AND `clvOddsPct > 0` required for high-quality bets. Positive model EV alone is not sufficient.
-
-### Daily Paper-Trading Routine (Game Days)
-
-```powershell
-# Before games (2-3x: 11am, 2pm, 5pm ET)
-.\.venv\Scripts\python.exe nba_mod.py collect_lines --books betmgm,draftkings,fanduel --stats pts,reb,ast,pra
-.\.venv\Scripts\python.exe nba_mod.py best_today 20
-# Pre-tip (6:30 PM ET) — top picks + best parlay
-.\.venv\Scripts\python.exe nba_mod.py top_picks 5
-# End-of-day
-.\.venv\Scripts\python.exe nba_mod.py line_bridge --books betmgm,draftkings,fanduel --stats pts,reb,ast,pra
-.\.venv\Scripts\python.exe nba_mod.py odds_build_closes
-# Next morning
-.\.venv\Scripts\python.exe nba_mod.py paper_settle <yesterday>
-.\.venv\Scripts\python.exe nba_mod.py results_yesterday 50
-.\.venv\Scripts\python.exe nba_mod.py paper_summary --window-days 14
-```
-
-### Odds Backfill
-
-`--max-requests 1950` per chunk ≈ 19,500 credits. Start with `pts,reb,ast`. Bridge is idempotent (`INSERT OR IGNORE`). See `docs/PLAN_CLAUDE_CODE.md` for full runbook and chunk commands.
-
-### GO-LIVE Gate
-
-`paper_summary` → `gate.gatePass`: `sample >= 50` | `roi > 0.0` | `positive_clv_pct >= 50.0` | no stat with ≥20 signals AND hit rate < 45%.
-
-**Model comparison protocol:** same date range, same books/stats, same odds DB. Compare `roiReal`, `hitRate` on real-line subset, and `realLineSamples` count only.
+See `docs/ev-rules.md` for calibration temps, per-bin overrides, accuracy baselines, and pre-GO checklist.
 
 ## 9. Quality Gates & Definition of Done
 
 ```powershell
 # Required before every commit
 .\.venv\Scripts\python.exe scripts\quality_gate.py --json
-# Required before any GO decision
-.\.venv\Scripts\python.exe scripts\quality_gate.py --full --json
 # Smoke tests — run after any core/ change
 .\.venv\Scripts\python.exe nba_mod.py games
 .\.venv\Scripts\python.exe nba_mod.py prop_ev "Anthony Edwards" ORL 1 pts 25.5 -110 -110 0 MIN
-.\.venv\Scripts\python.exe nba_mod.py backtest 2026-02-19 2026-02-22 --model full --local
 ```
-
-Pass: `quality_gate.py` → `"ok": true`; `prop_ev` → `"success": true` with `distributionMode`; backtest → `sampleCount > 0`, errors < 5%.
 
 Hard blockers (do not commit):
 - `python_compile` failure in `core/` or `nba_cli/`
@@ -226,8 +158,6 @@ A change is done when ALL pass:
 - **Commit:** `.py`, `.js`, `.html`, `requirements.txt`, `models/prob_calibration.json`
 - **Never commit:** `.env`, `.nba_cache/`, `data/`, `models/*.pkl`
 
-Data: `data/line_history/YYYY-MM-DD.jsonl` | `data/alerts/YYYY-MM-DD.jsonl` | `data/decision_journal/decision_journal.sqlite` | `data/reference/odds_history/odds_history.sqlite` (all gitignored via `data/`)
-
 ## 11. Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -238,8 +168,15 @@ Data: `data/line_history/YYYY-MM-DD.jsonl` | `data/alerts/YYYY-MM-DD.jsonl` | `d
 | Calibration no-op in backtest | `stat=` missing | Add `stat=stat` to `compute_ev()` |
 | `probOver` unchanged post-cal | `_PROB_CAL` empty | Verify `models/prob_calibration.json` exists |
 | `realLineSamples=0` | Team name mismatch | Check `_ABBR_TO_NAME_PART` in `nba_odds_store.py` |
-| `missingLineSamples` high | Snapshots not built | Run `backfill_odds_history` + `build_closing_lines` |
 | `--local` falls back to API | `date_to` too recent | Use earlier `date_to` or rebuild index |
 | Signal not logged | Filter blocked | Stat/edge/confidence/bin blocked by `_qualifies` |
-| `journalDuplicateSignal` | Same-day re-run | Expected — one signal per `(player, stat, book, line, date)` |
 | LLM returns stub | Ollama offline | Set `LLM_PROVIDER_ORDER=claude_first` in `.env` |
+
+## 12. Deep Dives
+
+- `docs/ev-rules.md` — calibration temps, per-bin overrides, Brier targets, accuracy baselines, Poisson trap
+- `docs/runbooks/paper-trading.md` — daily routine, CLV rule, GO-LIVE gate details
+- `docs/runbooks/backtest.md` — no-lookahead rules, local mode, calibration fit workflow
+- `docs/runbooks/odds-backfill.md` — credit budgeting, chunk commands, resume
+- `docs/architecture.md` — full module map, data layer, git exclusions
+- `docs/plans/master-plan.md` — comprehensive GO-LIVE master plan
