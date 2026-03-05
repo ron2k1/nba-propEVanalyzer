@@ -101,3 +101,24 @@ Specific failures:
 2. Always verify sample counts match expectations before interpreting gate results — 6 extra reb signals inflated the sample by 30%
 3. Two-layer architecture (SIGNAL_SPEC for research, BETTING_POLICY for betting) requires explicit filtering at every aggregation point
 4. The backtest, paper trading, and live pipeline must all enforce the same policy — check all three when adding a new filter
+
+## 2026-03-05 — Backtest vs paper trading conflation & Poisson accuracy trap
+
+**Mistake:** Model leans analysis presented 60d backtest (297 bets, 84.2% hit, +56% ROI) alongside paper trading numbers without clearly separating them. Also flagged fg3m (96.4%) and blk (88.5%) accuracy as "tempting" opportunities.
+
+**Corrections (from user):**
+
+1. **Backtest is not live performance.** The 297 bets at 84.2%/+56% ROI on Dec 28–Feb 25 is the *in-sample* result — calibration temps were fitted on this same period. The actual paper trading record is ~20 settled pts+ast bets at 80% hit rate. That's the only number that matters for the go-live decision.
+
+2. **fg3m/blk accuracy is a Poisson distribution artifact, not model skill.** A player projected for 1.8 threes with a line of 2.5 will almost always go under — not because the model is brilliant, but because Poisson distributions are heavily right-skewed at low means. The "accuracy" is mostly the distribution shape doing the work. Until Poisson calibration temps are verified and ROI is positive after juice, these are noise.
+
+3. **Accuracy and ROI diverge when lines are sharp.** pra at 83.1% accuracy with -3.81% ROI means the model picks the right direction but the books price it correctly — no edge after juice. The -3.81% was measured under the old blended config. Post-freeze: re-evaluate pra under no-blend + bins 0+9 to see if ROI turns positive.
+
+4. **The edge is narrow and specific.** Bin 0 unders on pts and ast using Normal CDF. That's the entire signal. Everything else is either blocked for good reason or unvalidated. Don't get distracted by blocked stats showing high accuracy.
+
+**Rules going forward:**
+1. Never present backtest numbers and paper trading numbers in the same table without explicit "IN-SAMPLE" / "PAPER TRADING" / "OOS" labels
+2. For Poisson stats (fg3m, blk, stl, tov): accuracy is meaningless without ROI-after-juice. The distribution does the prediction, not the model
+3. When accuracy is high but ROI is negative → the books are efficient on that market. Direction != edge
+4. Stay focused on accumulating paper trades for the proven signal (bin 0 unders, pts+ast, Normal CDF). Volume on that signal is the bottleneck, not expanding to more stats
+5. Any post-freeze pra re-evaluation must compare ROI under current config (no-blend + bins 0+9), not accuracy
