@@ -214,6 +214,7 @@ def handle_journal_command(command, argv):
         dj = DecisionJournal(db_path=db_path)
         try:
             sqlite_result = dj.settle_signals_for_date(date_str, odds_store=odds_store)
+            lean_result = dj.settle_leans_for_date(date_str)
         finally:
             dj.close()
             odds_store.close()
@@ -223,6 +224,7 @@ def handle_journal_command(command, argv):
             "date": date_str,
             "jsonlJournal": jsonl_result,
             "decisionJournal": sqlite_result,
+            "leans": lean_result,
         }
 
     # -----------------------------------------------------------------------
@@ -253,6 +255,69 @@ def handle_journal_command(command, argv):
             odds_store.close()
         return result
 
+    # -----------------------------------------------------------------------
+    # lean_signals [date] [--stat s] [--limit N] [--db <path>]
+    # -----------------------------------------------------------------------
+    if command == "lean_signals":
+        date_str = None
+        stat = None
+        limit = 50
+        db_path = None
+        idx = 2
+        while idx < len(argv):
+            tok = argv[idx]
+            if tok == "--stat" and idx + 1 < len(argv):
+                stat = argv[idx + 1]
+                idx += 2
+            elif tok == "--limit" and idx + 1 < len(argv):
+                try:
+                    limit = int(argv[idx + 1])
+                except ValueError:
+                    pass
+                idx += 2
+            elif tok == "--db" and idx + 1 < len(argv):
+                db_path = argv[idx + 1]
+                idx += 2
+            elif not tok.startswith("--") and date_str is None:
+                date_str = tok
+                idx += 1
+            else:
+                idx += 1
+
+        dj = DecisionJournal(db_path=db_path)
+        try:
+            result = dj.get_leans(date_str=date_str, stat=stat, limit=limit)
+        finally:
+            dj.close()
+        return result
+
+    # -----------------------------------------------------------------------
+    # lean_summary [--window-days 14] [--db <path>]
+    # -----------------------------------------------------------------------
+    if command == "lean_summary":
+        window_days = 14
+        db_path = None
+        idx = 2
+        while idx < len(argv):
+            if argv[idx] == "--window-days" and idx + 1 < len(argv):
+                try:
+                    window_days = int(argv[idx + 1])
+                except ValueError:
+                    pass
+                idx += 2
+            elif argv[idx] == "--db" and idx + 1 < len(argv):
+                db_path = argv[idx + 1]
+                idx += 2
+            else:
+                idx += 1
+
+        dj = DecisionJournal(db_path=db_path)
+        try:
+            result = dj.lean_accuracy(window_days=window_days)
+        finally:
+            dj.close()
+        return {"success": True, **result}
+
     return None
 
 
@@ -264,4 +329,6 @@ _COMMANDS = {
     "journal_clv_backfill":  lambda argv: handle_journal_command("journal_clv_backfill", argv),
     "paper_summary":         lambda argv: handle_journal_command("paper_summary", argv),
     "paper_settle":          lambda argv: handle_journal_command("paper_settle", argv),
+    "lean_signals":          lambda argv: handle_journal_command("lean_signals", argv),
+    "lean_summary":          lambda argv: handle_journal_command("lean_summary", argv),
 }

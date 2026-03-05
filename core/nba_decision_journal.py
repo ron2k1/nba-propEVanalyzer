@@ -131,6 +131,47 @@ CREATE INDEX IF NOT EXISTS idx_outcomes_signal_id   ON outcomes(signal_id);
 CREATE INDEX IF NOT EXISTS idx_outcomes_settle_date ON outcomes(settle_date);
 CREATE INDEX IF NOT EXISTS idx_signals_stat         ON signals(stat);
 CREATE INDEX IF NOT EXISTS idx_signals_ts_utc       ON signals(ts_utc);
+
+CREATE TABLE IF NOT EXISTS leans (
+    lean_id          TEXT PRIMARY KEY,
+    ts_utc           TEXT NOT NULL,
+    player_id        INTEGER,
+    player_name      TEXT,
+    team_abbr        TEXT,
+    opponent_abbr    TEXT,
+    stat             TEXT,
+    line             REAL,
+    book             TEXT,
+    over_odds        INTEGER,
+    under_odds       INTEGER,
+    projection       REAL,
+    prob_over        REAL,
+    prob_under       REAL,
+    edge_over        REAL,
+    edge_under       REAL,
+    recommended_side TEXT,
+    recommended_edge REAL,
+    confidence       REAL,
+    skip_reason      TEXT,
+    context_json     TEXT
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_leans_dedup
+    ON leans (player_id, stat, book, line, substr(ts_utc, 1, 10));
+
+CREATE TABLE IF NOT EXISTS lean_outcomes (
+    outcome_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    lean_id          TEXT NOT NULL REFERENCES leans(lean_id),
+    settle_date      TEXT,
+    result           TEXT CHECK (result IN ('win','loss','push')),
+    pnl_units        REAL,
+    actual_stat      REAL,
+    settled_at       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_lean_outcomes_lean_id     ON lean_outcomes(lean_id);
+CREATE INDEX IF NOT EXISTS idx_lean_outcomes_settle_date ON lean_outcomes(settle_date);
+CREATE INDEX IF NOT EXISTS idx_leans_ts_utc              ON leans(ts_utc);
 """
 
 
@@ -225,6 +266,224 @@ class DecisionJournal:
             return {"success": True, "signalId": signal_id, "isDuplicate": False}
         except Exception as e:
             return {"success": False, "error": str(e), "signalId": None, "isDuplicate": False}
+
+    # ------------------------------------------------------------------
+    # Lean logging
+    # ------------------------------------------------------------------
+
+    def log_lean(
+        self, *,
+        player_id, player_name, team_abbr, opponent_abbr,
+        stat, line, book, over_odds, under_odds,
+        projection, prob_over, prob_under,
+        edge_over, edge_under, recommended_side, recommended_edge, confidence,
+        skip_reason=None, context=None,
+    ) -> dict:
+        """Log a model lean (positive edge but didn't pass _qualifies). Returns {success, leanId, isDuplicate}."""
+        import json as _json
+        lean_id = str(uuid.uuid4())
+        ts_utc = _now_utc_iso()
+        context_json = _json.dumps(context, separators=(",", ":")) if context else None
+        try:
+            cur = self._conn.execute(
+                """INSERT OR IGNORE INTO leans (
+                    lean_id, ts_utc,
+                    player_id, player_name, team_abbr, opponent_abbr,
+                    stat, line, book, over_odds, under_odds,
+                    projection, prob_over, prob_under,
+                    edge_over, edge_under, recommended_side, recommended_edge, confidence,
+                    skip_reason, context_json
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    lean_id, ts_utc,
+                    int(player_id) if player_id is not None else None,
+                    str(player_name or ""),
+                    str(team_abbr or "").upper(),
+                    str(opponent_abbr or "").upper(),
+                    str(stat or "").lower(),
+                    float(line) if line is not None else None,
+                    str(book or ""),
+                    int(over_odds) if over_odds is not None else None,
+                    int(under_odds) if under_odds is not None else None,
+                    float(projection) if projection is not None else None,
+                    float(prob_over) if prob_over is not None else None,
+                    float(prob_under) if prob_under is not None else None,
+                    float(edge_over) if edge_over is not None else None,
+                    float(edge_under) if edge_under is not None else None,
+                    str(recommended_side or ""),
+                    float(recommended_edge) if recommended_edge is not None else None,
+                    float(confidence) if confidence is not None else None,
+                    str(skip_reason) if skip_reason else None,
+                    context_json,
+                ),
+            )
+            self._conn.commit()
+            if cur.rowcount == 0:
+                return {"success": True, "leanId": None, "isDuplicate": True}
+            return {"success": True, "leanId": lean_id, "isDuplicate": False}
+        except Exception as e:
+            return {"success": False, "error": str(e), "leanId": None, "isDuplicate": False}
+
+    # ------------------------------------------------------------------
+    # Lean settlement
+    # ------------------------------------------------------------------
+
+    def settle_leans_for_date(self, date_str) -> dict:
+        """Settle unsettled leans for date_str using player game logs."""
+        import time
+        try:
+            date_obj = datetime.strptime(str(date_str), "%Y-%m-%d").date()
+        except ValueError:
+            return {"success": False, "error": "Invalid date. Use YYYY-MM-DD.", "date": str(date_str)}
+
+        utc_start, utc_end = _ct_day_utc_bounds(date_str)
+        cur = self._conn.execute(
+            """SELECT l.lean_id, l.player_id, l.player_name, l.stat, l.line,
+                      l.over_odds, l.under_odds, l.recommended_side
+               FROM leans l
+               WHERE l.ts_utc >= ? AND l.ts_utc < ?
+               AND l.lean_id NOT IN (SELECT lean_id FROM lean_outcomes)""",
+            (utc_start, utc_end),
+        )
+        rows = cur.fetchall()
+        cols = ["lean_id", "player_id", "player_name", "stat", "line",
+                "over_odds", "under_odds", "recommended_side"]
+        pending = [dict(zip(cols, r)) for r in rows]
+        if not pending:
+            return {"success": True, "date": date_str, "settled": 0, "unresolved": 0, "errors": 0}
+
+        season = _season_from_date(date_obj)
+        logs_cache = {}
+        settled = 0
+        unresolved = 0
+        errors = 0
+
+        for lean in pending:
+            player_id = _as_int(lean.get("player_id"), 0)
+            if player_id <= 0:
+                unresolved += 1
+                continue
+
+            cache_key = (player_id, season)
+            if cache_key not in logs_cache:
+                if logs_cache:
+                    time.sleep(0.6)
+                try:
+                    logs_cache[cache_key] = _fetch_player_logs(player_id, season)
+                except Exception:
+                    logs_cache[cache_key] = []
+
+            row = _find_game_row(logs_cache[cache_key], date_obj)
+            if not row:
+                unresolved += 1
+                continue
+
+            actual = _extract_stat_from_row(row, lean.get("stat"))
+            if actual is None:
+                unresolved += 1
+                continue
+
+            line = _as_float(lean.get("line"))
+            rec_side = str(lean.get("recommended_side") or "").lower()
+            result = _grade_side(actual, line, rec_side)
+            if result not in ("win", "loss", "push"):
+                unresolved += 1
+                continue
+
+            rec_odds = lean.get("over_odds") if rec_side == "over" else lean.get("under_odds")
+            pnl = _pnl_for_outcome(result, rec_odds)
+
+            try:
+                self._conn.execute(
+                    """INSERT INTO lean_outcomes
+                       (lean_id, settle_date, result, pnl_units, actual_stat, settled_at)
+                       VALUES (?,?,?,?,?,?)""",
+                    (lean["lean_id"], date_str, result, pnl, actual, _now_utc_iso()),
+                )
+                self._conn.commit()
+                settled += 1
+            except Exception:
+                errors += 1
+
+        return {"success": True, "date": date_str, "settled": settled, "unresolved": unresolved, "errors": errors}
+
+    # ------------------------------------------------------------------
+    # Lean accuracy report
+    # ------------------------------------------------------------------
+
+    def lean_accuracy(self, window_days=14) -> dict:
+        """Report lean accuracy over the last N days."""
+        date_to = datetime.now(timezone.utc).date()
+        date_from = date_to - timedelta(days=window_days)
+
+        cur = self._conn.execute(
+            """SELECT l.stat, l.recommended_edge, l.skip_reason, l.confidence,
+                      l.player_name, l.line, l.recommended_side,
+                      lo.result, lo.pnl_units, lo.actual_stat
+               FROM leans l
+               LEFT JOIN lean_outcomes lo ON l.lean_id = lo.lean_id
+               WHERE DATE(l.ts_utc, '-6 hours') >= ? AND DATE(l.ts_utc, '-6 hours') <= ?""",
+            (date_from.isoformat(), date_to.isoformat()),
+        )
+        rows = cur.fetchall()
+        cols = ["stat", "recommended_edge", "skip_reason", "confidence",
+                "player_name", "line", "recommended_side",
+                "result", "pnl_units", "actual_stat"]
+        records = [dict(zip(cols, r)) for r in rows]
+
+        total = len(records)
+        settled = [r for r in records if r.get("result") in ("win", "loss", "push")]
+        wins = sum(1 for r in settled if r["result"] == "win")
+        non_push = sum(1 for r in settled if r["result"] in ("win", "loss"))
+        total_pnl = sum(_as_float(r.get("pnl_units"), 0.0) for r in settled)
+
+        # By stat
+        by_stat: dict = {}
+        for r in records:
+            s = str(r.get("stat") or "")
+            by_stat.setdefault(s, []).append(r)
+        stat_out = {}
+        for s, recs in by_stat.items():
+            s_settled = [r for r in recs if r.get("result") in ("win", "loss", "push")]
+            s_wins = sum(1 for r in s_settled if r["result"] == "win")
+            s_np = sum(1 for r in s_settled if r["result"] in ("win", "loss"))
+            s_pnl = sum(_as_float(r.get("pnl_units"), 0.0) for r in s_settled)
+            stat_out[s] = {
+                "count": len(recs),
+                "settled": len(s_settled),
+                "wins": s_wins,
+                "hitRate": safe_round(s_wins / s_np, 4) if s_np > 0 else None,
+                "pnl": safe_round(s_pnl, 2),
+                "roi": safe_round(s_pnl / len(s_settled), 4) if s_settled else None,
+            }
+
+        # By skip reason (why didn't it qualify?)
+        by_reason: dict = {}
+        for r in records:
+            reason = str(r.get("skip_reason") or "unknown").split(":")[0]
+            by_reason.setdefault(reason, []).append(r)
+        reason_out = {}
+        for reason, recs in by_reason.items():
+            r_settled = [r for r in recs if r.get("result") in ("win", "loss", "push")]
+            r_wins = sum(1 for r in r_settled if r["result"] == "win")
+            r_np = sum(1 for r in r_settled if r["result"] in ("win", "loss"))
+            reason_out[reason] = {
+                "count": len(recs),
+                "settled": len(r_settled),
+                "hitRate": safe_round(r_wins / r_np, 4) if r_np > 0 else None,
+            }
+
+        return {
+            "windowDays": window_days,
+            "total": total,
+            "settled": len(settled),
+            "wins": wins,
+            "hitRate": safe_round(wins / non_push, 4) if non_push > 0 else None,
+            "roi": safe_round(total_pnl / len(settled), 4) if settled else None,
+            "pnl": safe_round(total_pnl, 2),
+            "byStat": stat_out,
+            "bySkipReason": reason_out,
+        }
 
     # ------------------------------------------------------------------
     # Settlement
@@ -650,6 +909,7 @@ class DecisionJournal:
                     "maxEdge": safe_round(max(all_edges), 4) if all_edges else None,
                 },
             },
+            "lean_tracking": self.lean_accuracy(window_days=window_days),
             "config": {
                 "min_sample": min_sample,
                 "min_roi": min_roi,
@@ -770,4 +1030,44 @@ class DecisionJournal:
             "date": date_str,
             "count": len(signals),
             "signals": signals,
+        }
+
+    def get_leans(self, date_str=None, stat=None, limit=50) -> dict:
+        """Read-only lean listing with outcome data."""
+        clauses, vals = [], []
+        if date_str:
+            _ls_start, _ls_end = _ct_day_utc_bounds(date_str)
+            clauses.append("l.ts_utc >= ? AND l.ts_utc < ?")
+            vals.extend([_ls_start, _ls_end])
+        if stat:
+            clauses.append("l.stat=?")
+            vals.append(str(stat).lower())
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        limit_val = max(1, _as_int(limit, 50))
+        cur = self._conn.execute(
+            f"""SELECT l.lean_id, l.ts_utc, l.player_name, l.team_abbr, l.opponent_abbr,
+                       l.stat, l.line, l.book,
+                       l.recommended_side, l.recommended_edge, l.confidence,
+                       l.projection, l.prob_over, l.skip_reason,
+                       lo.result, lo.pnl_units, lo.actual_stat
+                FROM leans l
+                LEFT JOIN lean_outcomes lo ON l.lean_id = lo.lean_id
+                {where}
+                ORDER BY l.recommended_edge DESC
+                LIMIT ?""",
+            vals + [limit_val],
+        )
+        cols = [
+            "leanId", "tsUtc", "playerName", "teamAbbr", "opponentAbbr",
+            "stat", "line", "book",
+            "recommendedSide", "recommendedEdge", "confidence",
+            "projection", "probOver", "skipReason",
+            "result", "pnlUnits", "actualStat",
+        ]
+        leans = [dict(zip(cols, r)) for r in cur.fetchall()]
+        return {
+            "success": True,
+            "date": date_str,
+            "count": len(leans),
+            "leans": leans,
         }

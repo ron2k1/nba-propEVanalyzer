@@ -18,6 +18,7 @@ def _handle_roster_sweep(argv):
     """
     from core.nba_line_store import LineStore
     from core.nba_decision_journal import DecisionJournal, _qualifies
+    from core.gates import SIGNAL_SPEC, CURRENT_SIGNAL_VERSION
     from core.nba_model_training import american_to_implied_prob, compute_prop_ev
     from core.nba_data_collection import safe_round, get_yesterdays_team_abbrs, get_todays_game_totals, get_player_team_map, get_team_defensive_ratings, get_position_vs_team
     from core.nba_bet_tracking import log_prop_ev_entry
@@ -116,6 +117,7 @@ def _handle_roster_sweep(argv):
 
     scanned = 0
     logged = 0
+    lean_count = 0
     skipped_list = []
     top_results = []
 
@@ -222,6 +224,31 @@ def _handle_roster_sweep(argv):
                         float(_ev.get("probOver") or 0.0), qualifies_ok, skip_reason or "")
             if not qualifies_ok:
                 skipped_list.append({"player": pname, "stat": stat, "reason": skip_reason})
+                # Log as lean if: eligible stat + positive edge
+                _eligible = SIGNAL_SPEC[CURRENT_SIGNAL_VERSION]["eligible_stats"]
+                _max_edge = max(_eo_dbg, _eu_dbg)
+                if stat in _eligible and _max_edge > 0:
+                    _lean_side = "over" if _eo_dbg >= _eu_dbg else "under"
+                    _lean_proj = (result.get("projection") or {}).get("projection", 0.0)
+                    _lean_conf = max(
+                        float(_ev.get("probOver") or 0.0),
+                        float(_ev.get("probUnder") or 0.0),
+                    )
+                    dj.log_lean(
+                        player_id=player_id, player_name=player_name,
+                        team_abbr=team_abbr or "", opponent_abbr=opp_abbr,
+                        stat=stat, line=float(line), book=book,
+                        over_odds=int(over_odds or -110), under_odds=int(under_odds or -110),
+                        projection=float(_lean_proj),
+                        prob_over=float(_ev.get("probOver") or 0.0),
+                        prob_under=float(_ev.get("probUnder") or 0.0),
+                        edge_over=_eo_dbg, edge_under=_eu_dbg,
+                        recommended_side=_lean_side, recommended_edge=_max_edge,
+                        confidence=_lean_conf,
+                        skip_reason=skip_reason,
+                        context={"source": "roster_sweep", "book": book},
+                    )
+                    lean_count += 1
                 continue
 
             ev = result.get("ev") or {}
@@ -318,6 +345,7 @@ def _handle_roster_sweep(argv):
         "date": date_str,
         "scanned": scanned,
         "logged": logged,
+        "leansLogged": lean_count,
         "skipped": len(skipped_list),
         "skipReasons": skip_reasons,
         "top5": top5,

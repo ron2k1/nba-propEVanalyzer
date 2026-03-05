@@ -883,6 +883,105 @@ def paper_summary(
 
 
 # ---------------------------------------------------------------------------
+# Action Tools — 7 daily pipeline commands
+# ---------------------------------------------------------------------------
+
+_PYTHON = str(REPO_ROOT / ".venv" / "Scripts" / "python.exe")
+_ENTRY = str(REPO_ROOT / "nba_mod.py")
+
+PIPELINE_COMMANDS = {
+    "collect_lines", "roster_sweep", "best_today", "top_picks",
+    "paper_settle", "line_bridge", "odds_build_closes",
+}
+
+
+def _run_cli(argv: list[str], timeout: int = 600) -> str:
+    """Run an nba_mod.py CLI command and return the last JSON line."""
+    import subprocess
+    cmd = [_PYTHON, _ENTRY] + argv
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            cwd=str(REPO_ROOT),
+        )
+        lines = result.stdout.strip().splitlines()
+        if lines:
+            return lines[-1]
+        return json.dumps({"error": result.stderr.strip() or "no output"})
+    except subprocess.TimeoutExpired:
+        return json.dumps({"error": f"Command timed out after {timeout}s"})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+# 1. collect_lines
+@mcp.tool(
+    description="Collect odds snapshots from sportsbooks. Runs collect_lines with specified books and stats.",
+)
+def collect_lines(
+    books: str = "betmgm,draftkings,fanduel",
+    stats: str = "pts,reb,ast,pra",
+) -> str:
+    return _run_cli(["collect_lines", "--books", books, "--stats", stats])
+
+
+# 2. roster_sweep
+@mcp.tool(
+    description="Sweep all players in today's LineStore snapshots through the EV model. Logs qualifying signals + leans. Takes ~10 min.",
+)
+def roster_sweep(date: str = "") -> str:
+    argv = ["roster_sweep"]
+    if date:
+        argv.append(date)
+    return _run_cli(argv, timeout=900)
+
+
+# 3. best_today
+@mcp.tool(
+    description="Show today's best policy-qualified picks from the decision journal.",
+)
+def best_today(limit: int = 20) -> str:
+    return _run_cli(["best_today", str(limit)])
+
+
+# 4. top_picks
+@mcp.tool(
+    description="Top N policy-qualified picks for today + best 2-leg parlay. Pre-tip final picks.",
+)
+def top_picks(limit: int = 5) -> str:
+    return _run_cli(["top_picks", str(limit)])
+
+
+# 5. line_bridge
+@mcp.tool(
+    description="Bridge collected lines into odds store for CLV tracking. Run after last game.",
+)
+def line_bridge(
+    books: str = "betmgm,draftkings,fanduel",
+    stats: str = "pts,reb,ast,pra",
+) -> str:
+    return _run_cli(["line_bridge", "--books", books, "--stats", stats])
+
+
+# 6. odds_build_closes
+@mcp.tool(
+    description="Build closing lines from odds snapshots. Run end-of-day after line_bridge.",
+)
+def odds_build_closes() -> str:
+    return _run_cli(["odds_build_closes"])
+
+
+# 7. paper_settle
+@mcp.tool(
+    description="Settle paper trades, decision journal signals, and leans for a date. Run next morning.",
+)
+def paper_settle(date: str = "") -> str:
+    if not date:
+        return json.dumps({"error": "date required (YYYY-MM-DD)"})
+    return _run_cli(["paper_settle", date])
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
