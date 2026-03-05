@@ -12,6 +12,8 @@ pip-install-*/
 
 # ── Local caches / temp ───────────────────────────────────────────────────────
 .nba_cache/
+inputs/
+outputs/
 .tmp/
 .DS_Store
 Thumbs.db
