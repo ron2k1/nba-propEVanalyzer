@@ -1104,6 +1104,7 @@ def get_todays_event_props_bulk(
     timestamp_utc = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     all_snapshots = []
     errors        = []
+    _ptm          = get_player_team_map()
 
     for event in events:
         event_id      = event.get("id", "")
@@ -1129,13 +1130,21 @@ def get_todays_event_props_bulk(
                 continue
 
             for snap in result.get("snapshots", []):
+                _pname_norm = re.sub(r"[.\-\u2019']", "", snap["player_name"]).lower().strip()
+                _resolved_team = _ptm.get(_pname_norm, "")
+                _opp = away_abbr if _resolved_team == home_abbr else (
+                    home_abbr if _resolved_team == away_abbr else ""
+                )
+                _is_home = True if _resolved_team == home_abbr else (
+                    False if _resolved_team == away_abbr else None
+                )
                 all_snapshots.append({
                     "timestamp_utc":    timestamp_utc,
                     "game_id":          event_id,
                     "player_name":      snap["player_name"],
-                    "player_team_abbr": "",        # enriched later by monitor if needed
-                    "opponent_abbr":    "",
-                    "is_home":          None,
+                    "player_team_abbr": _resolved_team,
+                    "opponent_abbr":    _opp,
+                    "is_home":          _is_home,
                     "stat":             stat,
                     "line":             snap["line"],
                     "over_odds":        snap["over_odds"],
@@ -1836,6 +1845,44 @@ def get_player_team_map(max_age_sec: int = 3600) -> dict:
         return mapping
     except Exception:
         return _player_team_cache["data"] or {}
+
+
+def validate_player_team(player_name, claimed_team_abbr, event_home, event_away):
+    """Check if player belongs to either team in this event.
+
+    Returns (actual_team_abbr, is_valid).
+    Rules (in order):
+      1. If actual team is known and differs from claimed → reject (trade detected)
+      2. If claimed team not in event → reject
+      3. If actual team known and not in event → reject
+      4. If no claimed team and can't resolve → reject (missing data)
+    """
+    claimed = str(claimed_team_abbr or "").upper()
+    home = str(event_home or "").upper()
+    away = str(event_away or "").upper()
+    event_teams = {home, away} - {""}
+
+    norm = re.sub(r"[.\-\u2019']", "", str(player_name or "")).lower().strip()
+    ptm = get_player_team_map()
+    actual = ptm.get(norm, "")
+
+    # Rule 1: if we know the player's actual team and it differs from claimed, reject
+    if actual and claimed and actual.upper() != claimed.upper():
+        return actual, False
+
+    # Rule 2: claimed team must be in the event
+    if claimed and event_teams and claimed not in event_teams:
+        return actual or claimed, False
+
+    # Rule 3: if actual team known but not in event, reject
+    if actual and event_teams and actual.upper() not in event_teams:
+        return actual, False
+
+    # Rule 4: no claimed team and can't resolve
+    if not claimed and not actual:
+        return "", False
+
+    return actual or claimed, True
 
 
 def get_game_total(home_abbr: str, away_abbr: str, date_str: str = None) -> float | None:

@@ -14,7 +14,7 @@ from pathlib import Path
 from nba_api.stats.endpoints import playergamelog
 from nba_api.stats.static import players as nba_players_static
 
-from .nba_data_collection import HEADERS, API_DELAY, retry_api_call, safe_round, safe_div, BETTING_POLICY
+from .nba_data_collection import HEADERS, API_DELAY, retry_api_call, safe_round, safe_div, BETTING_POLICY, validate_player_team
 from .nba_toon import to_toon_table, toon_print_section
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -39,13 +39,13 @@ def _today_local_str():
 def _game_date_from_utc(commence_time_str):
     """Convert Odds API commenceTime (UTC ISO) to NBA game date using UTC-6 offset.
     NBA games tip off 7-10 PM ET; UTC-6 keeps the correct calendar date.
-    Falls back to today if parsing fails."""
+    Returns None if parsing fails (caller must handle)."""
     try:
         s = str(commence_time_str or "").rstrip("Z").replace("T", " ")
         dt_utc = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
         return (dt_utc - timedelta(hours=6)).date().isoformat()
     except Exception:
-        return _today_local_str()
+        return None
 
 
 def _yesterday_local_str():
@@ -193,6 +193,21 @@ def log_prop_ev_entry(
     if not (prop_result or {}).get("success"):
         return {"success": False, "error": "prop_result is not successful"}
 
+    # --- Team validation gate: reject phantom players ---
+    _home_t = str(player_team_abbr or "").upper() if is_home else str(opponent_abbr or "").upper()
+    _away_t = str(opponent_abbr or "").upper() if is_home else str(player_team_abbr or "").upper()
+    _pname = _PLAYERS_BY_ID.get(int(player_id), str(player_identifier or ""))
+    _actual_team, _team_valid = validate_player_team(
+        _pname, str(player_team_abbr or ""), _home_t, _away_t,
+    )
+    if not _team_valid:
+        return {
+            "success": False,
+            "error": f"phantom_player: {_pname} actual_team={_actual_team} "
+                     f"not in event {_home_t}@{_away_t}",
+        }
+    player_team_abbr = _actual_team or player_team_abbr
+
     projection = (prop_result or {}).get("projection") or {}
     ev = (prop_result or {}).get("ev") or {}
     over = ev.get("over") or {}
@@ -210,10 +225,13 @@ def log_prop_ev_entry(
     minutes_cap_reason = minutes_ctx.get("minutesCapReason")
 
     now_local = datetime.now().replace(microsecond=0).isoformat()
-    # Derive pickDate from the game's commenceTime (UTC-6) so late-night games
-    # (10 PM ET = UTC next day) aren't filed under the wrong calendar date.
+    # Strict: derive pickDate from commenceTime only. If missing, reject.
     _commence = (prop_result or {}).get("commenceTime")
-    _pick_date = _game_date_from_utc(_commence) if _commence else _today_local_str()
+    if not _commence:
+        return {"success": False, "error": "missing_commence_time: cannot determine game date"}
+    _pick_date = _game_date_from_utc(_commence)
+    if not _pick_date:
+        return {"success": False, "error": "bad_commence_time: cannot parse game date"}
     entry = {
         "entryId": str(uuid.uuid4()),
         "createdAtUtc": _now_utc_iso(),
@@ -483,6 +501,23 @@ def settle_entries_for_date(date_str):
             is_home=entry.get("isHome"),
         )
         if not row:
+            # Phantom detection: if player's actual team is known and not in event, void it
+            _pt = str(entry.get("playerTeamAbbr") or "").upper()
+            _oa = str(entry.get("opponentAbbr") or "").upper()
+            _ht = _pt if entry.get("isHome") else _oa
+            _at = _oa if entry.get("isHome") else _pt
+            _act, _valid = validate_player_team(
+                entry.get("playerName", ""), _pt, _ht, _at,
+            )
+            if not _valid and _act:
+                entry["settled"] = True
+                entry["settlementStatus"] = "phantom_no_game"
+                entry["result"] = "void"
+                entry["pnl1u"] = 0.0
+                entry["settledAtUtc"] = _now_utc_iso()
+                entry["phantomActualTeam"] = _act
+                touched += 1
+                continue
             entry["settlementStatus"] = "pending_data"
             entry["lastSettlementAttemptUtc"] = _now_utc_iso()
             unresolved += 1
