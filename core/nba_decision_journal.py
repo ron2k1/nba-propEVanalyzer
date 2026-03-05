@@ -76,6 +76,7 @@ from .nba_bet_tracking import (
 # backward compatibility so existing importers don't break.
 # ---------------------------------------------------------------------------
 from .gates import SIGNAL_SPEC, CURRENT_SIGNAL_VERSION, _qualifies  # re-export
+from .nba_data_collection import BETTING_POLICY
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -530,7 +531,7 @@ class DecisionJournal:
         date_to_str = date_to.isoformat()
 
         cur = self._conn.execute(
-            """SELECT s.stat, s.action_taken,
+            """SELECT s.stat, s.action_taken, s.recommended_edge,
                       o.result, o.pnl_units, o.clv_delta
                FROM signals s
                JOIN outcomes o ON s.signal_id = o.signal_id
@@ -539,8 +540,12 @@ class DecisionJournal:
             (date_from_str, date_to_str),
         )
         rows = cur.fetchall()
-        cols = ["stat", "action_taken", "result", "pnl_units", "clv_delta"]
-        records = [dict(zip(cols, r)) for r in rows]
+        cols = ["stat", "action_taken", "recommended_edge", "result", "pnl_units", "clv_delta"]
+        all_records = [dict(zip(cols, r)) for r in rows]
+        # Filter to BETTING_POLICY stat_whitelist — reb signals are logged for
+        # research but must NOT count toward the GO-LIVE gate.
+        _wl = BETTING_POLICY.get("stat_whitelist")
+        records = [r for r in all_records if not _wl or r.get("stat") in _wl]
 
         sample = len(records)
         wins = sum(1 for r in records if r.get("result") == "win")
@@ -582,6 +587,34 @@ class DecisionJournal:
                 if np_count > 0 and w / np_count < 0.45:
                     disabled_stats.append(s)
 
+        # Research-only stats (signal-eligible but NOT in betting whitelist)
+        research_records = [r for r in all_records if _wl and r.get("stat") not in _wl]
+        research_by_stat: dict = {}
+        for r in research_records:
+            s = str(r.get("stat") or "")
+            research_by_stat.setdefault(s, []).append(r)
+        research_out = {}
+        for s, recs in research_by_stat.items():
+            w = sum(1 for r in recs if r.get("result") == "win")
+            np_c = sum(1 for r in recs if r.get("result") in ("win", "loss"))
+            research_out[s] = {
+                "count": len(recs),
+                "wins": w,
+                "hitRate": safe_round(w / np_c, 4) if np_c > 0 else None,
+                "pnl": safe_round(sum(_as_float(r.get("pnl_units"), 0.0) for r in recs), 2),
+            }
+
+        # Model leans: ALL qualifying signals regardless of BETTING_POLICY
+        # (policy-qualified + research-only). Shows raw model predictive ability.
+        leans_sample = len(all_records)
+        leans_wins = sum(1 for r in all_records if r.get("result") == "win")
+        leans_np = sum(1 for r in all_records if r.get("result") in ("win", "loss"))
+        leans_pnl = sum(_as_float(r.get("pnl_units"), 0.0) for r in all_records)
+
+        # Edge-at-emission analysis — sustainability signal
+        policy_edges = [_as_float(r.get("recommended_edge"), 0.0) for r in records]
+        all_edges = [_as_float(r.get("recommended_edge"), 0.0) for r in all_records]
+
         return {
             "gatePass": gate_pass,
             "reason": "; ".join(reasons) if reasons else "all_checks_passed",
@@ -595,10 +628,33 @@ class DecisionJournal:
                 "positive_clv_pct": positive_clv_pct,
             },
             "disabled_stats": disabled_stats,
+            "research_stats": research_out,
+            "model_leans": {
+                "sample": leans_sample,
+                "wins": leans_wins,
+                "hitRate": safe_round(leans_wins / leans_np, 4) if leans_np > 0 else None,
+                "roi": safe_round(leans_pnl / leans_sample, 4) if leans_sample > 0 else None,
+                "pnl": safe_round(leans_pnl, 2),
+                "avgEdge": safe_round(sum(all_edges) / len(all_edges), 4) if all_edges else None,
+                "note": "All SIGNAL_SPEC-eligible signals including research-only stats",
+            },
+            "edge_at_emission": {
+                "policy": {
+                    "avgEdge": safe_round(sum(policy_edges) / len(policy_edges), 4) if policy_edges else None,
+                    "minEdge": safe_round(min(policy_edges), 4) if policy_edges else None,
+                    "maxEdge": safe_round(max(policy_edges), 4) if policy_edges else None,
+                },
+                "all": {
+                    "avgEdge": safe_round(sum(all_edges) / len(all_edges), 4) if all_edges else None,
+                    "minEdge": safe_round(min(all_edges), 4) if all_edges else None,
+                    "maxEdge": safe_round(max(all_edges), 4) if all_edges else None,
+                },
+            },
             "config": {
                 "min_sample": min_sample,
                 "min_roi": min_roi,
                 "min_positive_clv_pct": min_positive_clv_pct,
+                "stat_whitelist": sorted(BETTING_POLICY.get("stat_whitelist", set())),
             },
         }
 

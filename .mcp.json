@@ -32,6 +32,11 @@
       "env": {
         "OBSIDIAN_VAULT_PATH": "C:\\Users\\thegr\\OneDrive\\Desktop\\nba data ver 2\\vault"
       }
+    },
+    "nba-data": {
+      "command": "cmd",
+      "args": ["/c", ".venv\\Scripts\\python.exe", "scripts\\mcp_data_server.py"],
+      "env": {}
     }
   }
 }

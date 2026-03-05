@@ -87,3 +87,17 @@ Specific failures:
 2. Use `--emit-bets` to get bet-level records, then diff on `(date, player_id, stat, side)` between old and new
 3. The marginal bets that flip in/out are the signal — compute their ROI separately
 4. Aggregate hit rate comparisons are only meaningful when projection shifts are large enough to change outcomes on shared bets (likely >1 point)
+
+## 2026-03-05 — SIGNAL_SPEC vs BETTING_POLICY stat leak in GO-LIVE gate
+
+**Mistake:** `gate_check()` counted ALL journal signals (including reb) toward the GO-LIVE gate sample, even though BETTING_POLICY only whitelists {pts, ast}. Paper trading showed 26 settled / 21W / 5L (80.8%), but the real policy-qualified number was 20 settled / 16W / 4L (80%).
+
+**Root cause:** `_qualifies()` in `gates.py` checks `SIGNAL_SPEC.eligible_stats = {pts, reb, ast}` (for research/CLV tracking). `gate_check()` in `nba_decision_journal.py` queried all settled signals without filtering by `BETTING_POLICY.stat_whitelist`. This is the same two-layer gap that existed in the backtest (fixed 2026-03-04) but had not been fixed in the live journal path.
+
+**Fix:** Added BETTING_POLICY import and stat_whitelist filter to `gate_check()`. reb signals remain in the journal (intentional research tracking) but are excluded from gate metrics. Added `research_stats` and `model_leans` sections to gate output to show both ledgers explicitly.
+
+**Rules going forward:**
+1. Any function that computes GO-LIVE metrics must filter by BETTING_POLICY.stat_whitelist, not just SIGNAL_SPEC.eligible_stats
+2. Always verify sample counts match expectations before interpreting gate results — 6 extra reb signals inflated the sample by 30%
+3. Two-layer architecture (SIGNAL_SPEC for research, BETTING_POLICY for betting) requires explicit filtering at every aggregation point
+4. The backtest, paper trading, and live pipeline must all enforce the same policy — check all three when adding a new filter
