@@ -136,26 +136,57 @@ export default function () {
       if (!this.summaryData) return '';
       const d = this.summaryData;
       const gate = d.gate || {};
+      const metrics = gate.metrics || {};
       const byStat = d.byStat || {};
+      const leans = gate.model_leans || {};
+      const research = gate.research_stats || {};
+      const edgeAt = gate.edge_at_emission || {};
 
       let statRows = '';
       for (const [stat, s] of Object.entries(byStat)) {
-        statRows += `<tr><td>${stat.toUpperCase()}</td><td>${s.signals ?? 0}</td><td>${s.wins ?? 0}</td><td>${s.losses ?? 0}</td><td>${pctAlready(s.hitRate)}</td><td>${fmt(s.roi, 2)}%</td></tr>`;
+        statRows += `<tr><td>${escapeHtml(stat.toUpperCase())}</td><td>${s.signals ?? 0}</td><td>${s.wins ?? 0}</td><td>${s.losses ?? 0}</td><td>${pctAlready(s.hitRate)}</td><td>${fmt(s.roi, 2)}%</td></tr>`;
       }
+
+      // Research stats rows
+      let researchRows = '';
+      for (const [stat, s] of Object.entries(research)) {
+        researchRows += `<tr><td>${escapeHtml(stat.toUpperCase())}</td><td>${s.count ?? 0}</td><td>${s.wins ?? 0}</td><td>${(s.count ?? 0) - (s.wins ?? 0)}</td><td>${pctAlready(s.hitRate)}</td><td>${fmt(s.pnl, 2)}u</td></tr>`;
+      }
+
+      const policyEdge = edgeAt.policy || {};
+      const allEdge = edgeAt.all || {};
+      const wl = (gate.config || {}).stat_whitelist || [];
 
       return `
         <div class="gate-badge ${gate.gatePass ? 'gate-pass' : 'gate-fail'}">
           <span class="gate-label">${gate.gatePass ? 'GATE PASS' : 'GATE FAIL'}</span>
+          <span style="font-size:0.75em;opacity:0.7;margin-left:8px">${escapeHtml(gate.reason || '')}</span>
         </div>
-        <div class="metric-grid" style="margin-top:12px">
-          <article class="metric"><h4>Signals</h4><p>${d.totalSignals ?? 0}</p></article>
-          <article class="metric"><h4>Settled</h4><p>${d.settledCount ?? 0}</p></article>
-          <article class="metric ev-over"><h4>Hit Rate</h4><p>${pctAlready(d.hitRate)}</p></article>
-          <article class="metric ev-over"><h4>ROI</h4><p>${fmt(d.roi, 2)}%</p></article>
-          <article class="metric"><h4>+CLV %</h4><p>${pctAlready(d.positiveClvPct)}</p></article>
-          <article class="metric"><h4>Window</h4><p>${d.windowDays ?? 14}d</p></article>
+        <h4 style="margin-top:14px">Policy-Qualified (${escapeHtml(wl.join(', '))})</h4>
+        <div class="metric-grid" style="margin-top:8px">
+          <article class="metric"><h4>Sample</h4><p>${metrics.sample ?? 0} / 50</p></article>
+          <article class="metric ev-over"><h4>Hit Rate</h4><p>${pctAlready(metrics.hit_rate)}</p></article>
+          <article class="metric ev-over"><h4>ROI</h4><p>${pctAlready(metrics.roi)}</p></article>
+          <article class="metric"><h4>+CLV %</h4><p>${pctAlready(metrics.positive_clv_pct, 1)}</p></article>
+          <article class="metric"><h4>Avg Edge</h4><p>${pctAlready(policyEdge.avgEdge)}</p></article>
+          <article class="metric"><h4>Window</h4><p>${gate.windowDays ?? 14}d</p></article>
         </div>
-        ${statRows ? `<h4 style="margin-top:14px">By Stat</h4><div class="odds-table-wrap"><table class="odds-table"><thead><tr><th>Stat</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Hit Rate</th><th>ROI</th></tr></thead><tbody>${statRows}</tbody></table></div>` : ''}
+        <h4 style="margin-top:14px">Edge at Emission</h4>
+        <div class="metric-grid" style="margin-top:8px">
+          <article class="metric"><h4>Avg</h4><p>${pctAlready(policyEdge.avgEdge)}</p></article>
+          <article class="metric"><h4>Min</h4><p>${pctAlready(policyEdge.minEdge)}</p></article>
+          <article class="metric"><h4>Max</h4><p>${pctAlready(policyEdge.maxEdge)}</p></article>
+        </div>
+        ${statRows ? `<h4 style="margin-top:14px">By Stat (Policy)</h4><div class="odds-table-wrap"><table class="odds-table"><thead><tr><th>Stat</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Hit Rate</th><th>ROI</th></tr></thead><tbody>${statRows}</tbody></table></div>` : ''}
+        <h4 style="margin-top:14px">Model Leans (All Eligible Stats)</h4>
+        <div class="metric-grid" style="margin-top:8px">
+          <article class="metric"><h4>Sample</h4><p>${leans.sample ?? 0}</p></article>
+          <article class="metric ev-over"><h4>Hit Rate</h4><p>${pctAlready(leans.hitRate)}</p></article>
+          <article class="metric ev-over"><h4>ROI</h4><p>${pctAlready(leans.roi)}</p></article>
+          <article class="metric"><h4>PnL</h4><p>${fmt(leans.pnl, 2)}u</p></article>
+          <article class="metric"><h4>Avg Edge</h4><p>${pctAlready(leans.avgEdge)}</p></article>
+        </div>
+        ${researchRows ? `<h4 style="margin-top:14px">Research Stats (Not in Whitelist)</h4><div class="odds-table-wrap"><table class="odds-table"><thead><tr><th>Stat</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Hit Rate</th><th>PnL</th></tr></thead><tbody>${researchRows}</tbody></table></div>` : ''}
       `;
     },
 
