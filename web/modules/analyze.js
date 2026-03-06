@@ -34,6 +34,19 @@ export default function () {
         this.opponentAbbr = d.opponent || '';
         this.isHome = !!d.isHome;
       });
+      // F14: Deep link from Picks table — prefill all form fields
+      window.addEventListener('prefill-pick', (e) => {
+        const d = e.detail;
+        if (d.playerName) this.playerName = d.playerName;
+        if (d.playerId) this.playerId = d.playerId;
+        if (d.stat) this.stat = d.stat;
+        if (d.line != null) this.line = d.line;
+        if (d.overOdds != null) this.overOdds = d.overOdds;
+        if (d.underOdds != null) this.underOdds = d.underOdds;
+        if (d.playerTeamAbbr) this.playerTeamAbbr = d.playerTeamAbbr;
+        if (d.opponentAbbr) this.opponentAbbr = d.opponentAbbr;
+        if (d.isHome != null) this.isHome = d.isHome;
+      });
     },
 
     async resolvePlayer(errorTarget) {
