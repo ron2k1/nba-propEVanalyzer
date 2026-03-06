@@ -1,11 +1,18 @@
 // Results tab — settlement, results_yesterday, CLV, paper_summary
-import { apiGet, escapeHtml, fmt, pct, pctAlready, statusPill } from './api.js';
+import { apiGet, escapeHtml, fmt, pct, pctAlready, statusPill, toast, evColorClass, exportCsv } from './api.js';
 
 export default function () {
   return {
     // Controls
     trackingDate: '',
     trackingLimit: 15,
+
+    // F5: Sort state
+    resultsSortCol: 'recommendedEvPct',
+    resultsSortDir: 'desc',
+
+    // F6: Filter state
+    resultsFilter: '',
 
     // Results
     resultsLoading: false,
@@ -323,6 +330,89 @@ export default function () {
           </div>` : ''}`;
     },
 
-    fmt, pct, pctAlready, escapeHtml, statusPill,
+    // F5: Sort by column
+    resultsSortBy(col) {
+      if (this.resultsSortCol === col) {
+        this.resultsSortDir = this.resultsSortDir === 'asc' ? 'desc' : 'asc';
+      } else {
+        this.resultsSortCol = col;
+        this.resultsSortDir = 'desc';
+      }
+    },
+
+    resultsSortArrow(col) {
+      if (this.resultsSortCol !== col) return '';
+      return this.resultsSortDir === 'asc' ? ' \u25B2' : ' \u25BC';
+    },
+
+    // F5+F6: Sorted and filtered result rows
+    sortedResultRows() {
+      let rows = this.resultsData?.mode === 'results' ? this.resultRows() : this.bestRows();
+      const f = this.resultsFilter.toLowerCase();
+      if (f) {
+        rows = rows.filter(r =>
+          (r.playerName || r.playerId || '').toLowerCase().includes(f) ||
+          (r.stat || '').toLowerCase().includes(f)
+        );
+      }
+      const col = this.resultsSortCol;
+      const dir = this.resultsSortDir === 'asc' ? 1 : -1;
+      return [...rows].sort((a, b) => {
+        const av = a[col], bv = b[col];
+        if (av == null && bv == null) return 0;
+        if (av == null) return 1;
+        if (bv == null) return -1;
+        if (typeof av === 'string') return av.localeCompare(bv) * dir;
+        return (av - bv) * dir;
+      });
+    },
+
+    // F7: Render with conditional cell coloring
+    renderResultsTableHtmlSorted() {
+      if (!this.resultsData) return '';
+      const rows = this.sortedResultRows();
+      if (this.resultsData.mode === 'best') {
+        const trs = rows.map(r =>
+          `<tr><td>${escapeHtml(r.playerName || r.playerId || '?')}</td><td>${String(r.stat || '').toUpperCase()}</td><td>${String(r.recommendedSide || '').toUpperCase()}</td><td>${fmt(r.line, 1)}</td><td>${fmt(r.projection, 1)}</td><td class="${evColorClass(r.recommendedEvPct)}">${fmt(r.recommendedEvPct, 2)}%</td><td>${r.recommendedOdds ?? 'n/a'}</td><td>${statusPill(r.result || 'pending')}</td></tr>`
+        ).join('');
+        return `<table class="odds-table"><thead><tr><th class="sortable-th" data-col="playerName">Player</th><th class="sortable-th" data-col="stat">Stat</th><th>Side</th><th class="sortable-th" data-col="line">Line</th><th>Proj</th><th class="sortable-th" data-col="recommendedEvPct">EV%</th><th>Odds</th><th>Status</th></tr></thead><tbody>${trs || '<tr><td colspan="8">No ranked entries yet.</td></tr>'}</tbody></table>`;
+      }
+      const trs = rows.map(r =>
+        `<tr><td>${escapeHtml(r.playerName || r.playerId || '?')}</td><td>${String(r.stat || '').toUpperCase()}</td><td>${String(r.side || '').toUpperCase()}</td><td>${fmt(r.line, 1)}</td><td>${fmt(r.actualStat, 1)}</td><td class="${evColorClass(r.recommendedEvPct)}">${fmt(r.recommendedEvPct, 2)}%</td><td>${r.odds ?? 'n/a'}</td><td>${statusPill(r.result)}</td><td class="${evColorClass(r.pnl1u)}">${fmt(r.pnl1u, 2)}</td></tr>`
+      ).join('');
+      return `<table class="odds-table"><thead><tr><th class="sortable-th" data-col="playerName">Player</th><th class="sortable-th" data-col="stat">Stat</th><th>Side</th><th class="sortable-th" data-col="line">Line</th><th>Actual</th><th class="sortable-th" data-col="recommendedEvPct">EV%</th><th>Odds</th><th>Result</th><th class="sortable-th" data-col="pnl1u">PnL</th></tr></thead><tbody>${trs || '<tr><td colspan="9">No graded picks.</td></tr>'}</tbody></table>`;
+    },
+
+    // F11: Export results CSV
+    exportResultsCsv() {
+      const isResults = this.resultsData?.mode === 'results';
+      const rows = this.sortedResultRows();
+      const cols = isResults
+        ? [
+          { label: 'Player', key: r => r.playerName || r.playerId || '' },
+          { label: 'Stat', key: r => (r.stat || '').toUpperCase() },
+          { label: 'Side', key: r => (r.side || '').toUpperCase() },
+          { label: 'Line', key: 'line' },
+          { label: 'Actual', key: 'actualStat' },
+          { label: 'EV%', key: 'recommendedEvPct' },
+          { label: 'Odds', key: r => r.odds || '' },
+          { label: 'Result', key: 'result' },
+          { label: 'PnL', key: 'pnl1u' },
+        ]
+        : [
+          { label: 'Player', key: r => r.playerName || r.playerId || '' },
+          { label: 'Stat', key: r => (r.stat || '').toUpperCase() },
+          { label: 'Side', key: r => (r.recommendedSide || '').toUpperCase() },
+          { label: 'Line', key: 'line' },
+          { label: 'Projection', key: 'projection' },
+          { label: 'EV%', key: 'recommendedEvPct' },
+          { label: 'Odds', key: r => r.recommendedOdds || '' },
+          { label: 'Result', key: r => r.result || 'pending' },
+        ];
+      exportCsv(rows, cols, 'results_' + (this.resultsData?.date || 'export') + '.csv');
+      toast('CSV exported', 'ok');
+    },
+
+    fmt, pct, pctAlready, escapeHtml, statusPill, evColorClass,
   };
 }

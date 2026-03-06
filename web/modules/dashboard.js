@@ -1,5 +1,5 @@
 // Dashboard tab — games grid + GO-LIVE gate badge
-import { apiGet, escapeHtml, toUpperTrim } from './api.js';
+import { apiGet, escapeHtml, toUpperTrim, toast } from './api.js';
 
 export default function () {
   return {
@@ -19,10 +19,16 @@ export default function () {
     gateLoading: false,
     gateError: '',
 
+    // F9: Auto-refresh
+    autoRefresh: false,
+    lastRefresh: null,
+    _refreshTimer: null,
+
     async init() {
       this.checkHealth();
       this.loadGames();
       this.loadGate();
+      this.lastRefresh = new Date().toLocaleTimeString();
     },
 
     async checkHealth() {
@@ -84,11 +90,33 @@ export default function () {
       }
     },
 
+    // F4: Click game card -> jump to Analyze with prefill
+    analyzeGame(g, isHome) {
+      const home = this.homeAbbr(g);
+      const away = this.awayAbbr(g);
+      this.prefill(home, away, isHome);
+      Alpine.store('tab').set('analyze');
+    },
+
     prefill(home, away, isHome) {
       // Dispatch to analyze tab's form
       window.dispatchEvent(new CustomEvent('prefill-game', {
         detail: { teamAbbr: toUpperTrim(isHome ? home : away), opponent: toUpperTrim(isHome ? away : home), isHome }
       }));
+    },
+
+    // F9: Toggle auto-refresh (60s interval)
+    toggleAutoRefresh() {
+      this.autoRefresh = !this.autoRefresh;
+      if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
+      if (this.autoRefresh) {
+        this._refreshTimer = setInterval(async () => {
+          await this.loadGames();
+          await this.loadGate();
+          this.lastRefresh = new Date().toLocaleTimeString();
+          toast('Dashboard refreshed', 'ok');
+        }, 60000);
+      }
     },
 
     homeAbbr(g) { return g.homeTeam?.abbreviation || 'HOME'; },
