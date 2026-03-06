@@ -13,7 +13,7 @@
     },
     "claude-flow": {
       "command": "cmd",
-      "args": ["/c", "npx", "claude-flow@v3alpha", "mcp", "start"],
+      "args": ["/c", "claude-flow mcp start 2>NUL"],
       "env": {}
     },
     "ruv-swarm": {

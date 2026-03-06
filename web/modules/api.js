@@ -6,6 +6,11 @@ export async function apiGet(path, { timeoutMs = 300_000 } = {}) {
   try {
     const res = await fetch(path, { cache: "no-store", signal: ctrl.signal });
     return res.json();
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return { success: false, error: `Request timed out after ${Math.round(timeoutMs / 60000)} min. The task may still be running on the server — check pipeline status before retrying.` };
+    }
+    throw err;
   } finally {
     clearTimeout(timer);
   }

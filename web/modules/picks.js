@@ -1,4 +1,4 @@
-// Picks tab — best_today table + top_picks + best parlay
+// Picks tab — best_today table + top_picks + best parlay + LLM rundown
 import { apiGet, escapeHtml, fmt, pct, statusPill } from './api.js';
 
 export default function () {
@@ -14,6 +14,11 @@ export default function () {
     topResult: null,
     topError: '',
     topLimit: 5,
+
+    // LLM Rundown
+    rundownLoading: false,
+    rundownResult: null,
+    rundownError: '',
 
     async init() {
       this.loadBestToday();
@@ -53,6 +58,24 @@ export default function () {
       }
     },
 
+    async loadRundown() {
+      this.rundownLoading = true;
+      this.rundownError = '';
+      this.rundownResult = null;
+      try {
+        const data = await apiGet('/api/lean_rundown?limit=10', { timeoutMs: 120_000 });
+        if (!data || data.success !== true) {
+          this.rundownError = data?.error || 'LLM rundown failed.';
+          return;
+        }
+        this.rundownResult = data;
+      } catch (err) {
+        this.rundownError = `Rundown failed: ${err.message}`;
+      } finally {
+        this.rundownLoading = false;
+      }
+    },
+
     bestRows() {
       if (!this.bestResult) return [];
       const rows = this.bestResult.topOffers || this.bestResult.top || [];
@@ -64,6 +87,12 @@ export default function () {
     },
 
     leanRows() {
+      if (!this.bestResult) return [];
+      // Prefer dedicated modelLeans array from API; fall back to filtering topOffers
+      const leans = this.bestResult.modelLeans;
+      if (Array.isArray(leans) && leans.length > 0) {
+        return leans.filter(r => !r.policyPass);
+      }
       return this.bestRows().filter(r => !r.policyQualified && (r.recommendedEvPct || 0) > 0);
     },
 

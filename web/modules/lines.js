@@ -20,6 +20,17 @@ export default function () {
     opsSteps: [],
     opsError: '',
 
+    async init() {
+      // Check if server has a pipeline task already running
+      try {
+        const status = await apiGet('/api/pipeline_status');
+        if (status?.busy) {
+          this.busy = true;
+          this.collectError = 'A pipeline task is still running on the server. Wait for it to finish, then refresh.';
+        }
+      } catch (_) { /* ignore */ }
+    },
+
     async collectLines() {
       if (this.busy) return;
       this.busy = true;
@@ -49,7 +60,7 @@ export default function () {
       this.sweepError = '';
       this.sweepResult = null;
       try {
-        const data = await apiGet('/api/roster_sweep', { timeoutMs: 600_000 });
+        const data = await apiGet('/api/roster_sweep', { timeoutMs: 1_800_000 });
         if (!data || data.success !== true) {
           this.sweepError = data?.error || 'Roster sweep failed.';
           return;
@@ -79,13 +90,13 @@ export default function () {
 
         // Step 2: Roster Sweep
         this.opsSteps[1].status = 'running';
-        const rs = await apiGet('/api/roster_sweep', { timeoutMs: 600_000 });
+        const rs = await apiGet('/api/roster_sweep', { timeoutMs: 1_800_000 });
         this.opsSteps[1].status = rs?.success ? 'done' : 'error';
         this.opsSteps[1].result = rs;
 
         // Step 3: Build Closes
         this.opsSteps[2].status = 'running';
-        const data = await apiGet('/api/daily_ops?dryRun=false', { timeoutMs: 600_000 });
+        const data = await apiGet('/api/daily_ops?dryRun=false', { timeoutMs: 1_800_000 });
         this.opsSteps[2].status = data?.success ? 'done' : 'error';
         this.opsSteps[2].result = data;
       } catch (err) {
