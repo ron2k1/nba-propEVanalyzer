@@ -20,6 +20,7 @@ from .nba_toon import to_toon_table, toon_print_section
 ROOT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = ROOT_DIR / "data"
 JOURNAL_PATH = DATA_DIR / "prop_journal.jsonl"
+LEAN_BETS_PATH = DATA_DIR / "lean_bets.jsonl"
 
 _PLAYERS_BY_ID = {
     int(p["id"]): str(p["full_name"])
@@ -869,14 +870,94 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
             to_toon_table(toon_rows, ["#", "player", "stat", "side", "line", "evPct", "proj", "odds", "move", "clv", "policy"]),
         )
 
+    # Load model leans for the target date from lean_bets.jsonl
+    model_leans = _load_leans_for_date(target, limit=limit_val)
+
     return {
         "success": True,
         "date": target,
         "totalRanked": len(ranked),
         "positiveEdgeCount": positive_edges,
+        "entriesLogged": len(top_rows),
         "policyQualified": policy_qualified,
         "topOffers": top_rows,
+        "modelLeans": model_leans,
     }
+
+
+def _load_leans_for_date(target_date: str, limit: int = 50, include_outcomes: bool = False) -> list:
+    """Load model leans from decision_journal.sqlite leans table for a specific date."""
+    import sqlite3
+    from .nba_decision_journal import _ct_day_utc_bounds
+    db_path = DATA_DIR / "decision_journal" / "decision_journal.sqlite"
+    if not db_path.exists():
+        return []
+    try:
+        utc_start, utc_end = _ct_day_utc_bounds(target_date)
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        if include_outcomes:
+            cur = conn.execute(
+                """SELECT l.player_id, l.player_name, l.stat, l.line, l.book,
+                          l.over_odds, l.under_odds, l.projection, l.prob_over, l.prob_under,
+                          l.edge_over, l.edge_under, l.recommended_side, l.recommended_edge,
+                          l.confidence, l.skip_reason,
+                          lo.result, lo.pnl_units, lo.actual_stat
+                   FROM leans l
+                   LEFT JOIN lean_outcomes lo ON l.lean_id = lo.lean_id
+                   WHERE l.ts_utc >= ? AND l.ts_utc < ?
+                   ORDER BY l.recommended_edge DESC
+                   LIMIT ?""",
+                (utc_start, utc_end, limit),
+            )
+        else:
+            cur = conn.execute(
+                """SELECT player_id, player_name, stat, line, book,
+                          over_odds, under_odds, projection, prob_over, prob_under,
+                          edge_over, edge_under, recommended_side, recommended_edge,
+                          confidence, skip_reason
+                   FROM leans
+                   WHERE ts_utc >= ? AND ts_utc < ?
+                   ORDER BY recommended_edge DESC
+                   LIMIT ?""",
+                (utc_start, utc_end, limit),
+            )
+        rows = cur.fetchall()
+        conn.close()
+    except Exception:
+        return []
+
+    leans = []
+    for r in rows:
+        edge = r["recommended_edge"] or 0
+        entry = {
+            "playerName": r["player_name"],
+            "playerId": r["player_id"],
+            "stat": r["stat"],
+            "line": r["line"],
+            "projection": r["projection"],
+            "probOver": r["prob_over"],
+            "bin": max(0, min(9, int((r["prob_over"] or 0.5) * 10))),
+            "recommendedSide": r["recommended_side"],
+            "edge": safe_round(edge, 4),
+            "recommendedEvPct": safe_round(edge * 100, 2),
+            "recommendedOdds": r["over_odds"] if (r["recommended_side"] or "").lower() == "over" else r["under_odds"],
+            "book": r["book"],
+            "policyPass": False,
+            "policyRejectReason": r["skip_reason"],
+        }
+        if include_outcomes:
+            entry["result"] = r["result"]
+            entry["pnl"] = r["pnl_units"]
+            entry["actual"] = r["actual_stat"]
+        leans.append(entry)
+    return leans
+
+
+def leans_for_date(date_str=None, limit=50):
+    """Load model leans for a date, including settlement outcomes if available."""
+    target = str(date_str or _today_local_str())
+    return _load_leans_for_date(target, limit=limit, include_outcomes=True)
 
 
 def best_today(limit=15):
@@ -1182,4 +1263,160 @@ def record_closing_values(date_str, updates):
         "updatesRequested": len(updates),
         "updated": touched,
         "missed": missed,
+    }
+
+
+def backtest_lean_clv_report(source="backtest"):
+    """
+    Read enriched lean_bets_clv.jsonl and compute accuracy segmented by CLV.
+
+    source: "backtest" reads lean_bets_clv.jsonl, "live" queries decision_journal.
+    Returns overall, +CLV, -CLV accuracy with by-stat breakdown.
+    """
+    if source == "live":
+        from .nba_decision_journal import DecisionJournal
+        dj = DecisionJournal()
+        try:
+            return dj.lean_accuracy_clv()
+        finally:
+            dj.close()
+
+    clv_path = DATA_DIR / "lean_bets_clv.jsonl"
+    if not clv_path.exists():
+        return {"success": False, "error": f"{clv_path} not found. Run scripts/enrich_leans_clv.py first."}
+
+    leans = []
+    with open(clv_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                leans.append(json.loads(line))
+
+    def _get_result(r):
+        return r.get("result") or r.get("outcome")
+
+    settled = [l for l in leans if _get_result(l) in ("win", "loss", "push")]
+
+    def _stats(recs, label):
+        if not recs:
+            return {"label": label, "sample": 0, "wins": 0, "hitRate": None, "pnl": 0, "roi": None}
+        wins = sum(1 for r in recs if _get_result(r) == "win")
+        non_push = sum(1 for r in recs if _get_result(r) in ("win", "loss"))
+        pnl = sum(_as_float(r.get("pnl") or r.get("pnl_units"), 0.0) for r in recs)
+        clv_vals = [r["clvDelta"] for r in recs if r.get("clvDelta") is not None]
+        return {
+            "label": label,
+            "sample": len(recs),
+            "wins": wins,
+            "hitRate": safe_round(wins / non_push, 4) if non_push > 0 else None,
+            "pnl": safe_round(pnl, 2),
+            "roi": safe_round(pnl / len(recs), 4) if recs else None,
+            "avgClvDelta": safe_round(sum(clv_vals) / len(clv_vals), 4) if clv_vals else None,
+            "clvSample": len(clv_vals),
+        }
+
+    pos_clv = [l for l in settled if l.get("clvDelta") is not None and l["clvDelta"] > 0]
+    neg_clv = [l for l in settled if l.get("clvDelta") is not None and l["clvDelta"] <= 0]
+    no_clv = [l for l in settled if l.get("clvDelta") is None]
+
+    # By stat
+    by_stat: dict = {}
+    for l in settled:
+        s = str(l.get("stat") or "").lower()
+        by_stat.setdefault(s, []).append(l)
+    stat_out = {}
+    for s, recs in by_stat.items():
+        s_pos = [r for r in recs if r.get("clvDelta") is not None and r["clvDelta"] > 0]
+        s_neg = [r for r in recs if r.get("clvDelta") is not None and r["clvDelta"] <= 0]
+        stat_out[s] = {
+            "all": _stats(recs, "all"),
+            "posClv": _stats(s_pos, "+CLV"),
+            "negClv": _stats(s_neg, "-CLV"),
+        }
+
+    has_clv = len(pos_clv) + len(neg_clv)
+    return {
+        "success": True,
+        "source": source,
+        "totalLeans": len(leans),
+        "all": _stats(settled, "All Leans"),
+        "posClv": _stats(pos_clv, "+CLV Confirmed"),
+        "negClv": _stats(neg_clv, "-CLV Contrary"),
+        "noClv": _stats(no_clv, "No CLV Data"),
+        "clvCoverage": safe_round(has_clv / len(settled), 4) if settled else None,
+        "byStat": stat_out,
+    }
+
+
+def enrich_journal_clv():
+    """
+    Backfill CLV on existing prop_journal.jsonl entries that have NULL closingLine.
+    Uses OddsStore to look up closing lines.
+    """
+    from .nba_odds_store import OddsStore, STAT_TO_MARKET
+
+    entries = _load_journal_entries()
+    if not entries:
+        return {"success": False, "error": "No journal entries found."}
+
+    store = OddsStore()
+    enriched = 0
+    skipped = 0
+
+    for entry in entries:
+        if entry.get("closingLine") is not None:
+            continue
+
+        stat_key = str(entry.get("stat") or "").lower()
+        market = STAT_TO_MARKET.get(stat_key)
+        if not market:
+            skipped += 1
+            continue
+
+        pick_date = str(entry.get("pickDate") or "")
+        player_name = entry.get("playerName") or ""
+        team_abbr = str(entry.get("teamAbbr") or entry.get("playerTeamAbbr") or "").upper()
+        opp_abbr = str(entry.get("opponentAbbr") or "").upper()
+        rec_side = str(entry.get("recommendedSide") or "").lower()
+
+        if not pick_date or not player_name:
+            skipped += 1
+            continue
+
+        event_id = store.find_event_for_game(team_abbr, opp_abbr, pick_date)
+        cl = None
+        if event_id:
+            cl = store.get_closing_line(event_id, market, player_name)
+        if not cl:
+            cl = store.get_closing_line_by_player_date(player_name, market, pick_date)
+
+        if not cl:
+            skipped += 1
+            continue
+
+        close_line = cl.get("close_line")
+        entry["closingLine"] = close_line
+        entry["closingOdds"] = cl.get("close_over_odds") if rec_side == "over" else cl.get("close_under_odds")
+        entry["clvLine"] = _clv_line_delta(
+            rec_side,
+            entry.get("lineAtBet", entry.get("line")),
+            close_line,
+        )
+        rec_odds = entry.get("oddsAtBet", entry.get("recommendedOdds"))
+        close_odds = entry.get("closingOdds")
+        entry["clvOddsPct"] = _clv_odds_pct(rec_odds, close_odds)
+        entry["clvComputedAtUtc"] = _now_utc_iso()
+        enriched += 1
+
+    store.close()
+
+    if enriched > 0:
+        _write_journal_entries(entries)
+
+    return {
+        "success": True,
+        "totalEntries": len(entries),
+        "enriched": enriched,
+        "skipped": skipped,
+        "alreadyHadClv": len(entries) - enriched - skipped,
     }

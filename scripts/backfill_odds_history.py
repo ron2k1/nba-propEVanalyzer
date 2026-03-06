@@ -46,7 +46,7 @@ load_dotenv(os.path.join(ROOT, ".env"), override=True)
 from core.nba_odds_store import OddsStore, STAT_TO_MARKET
 from core.nba_data_collection import _odds_api_get
 
-_STAT_DEFAULTS = ["pts", "reb", "ast", "fg3m", "tov"]
+_STAT_DEFAULTS = ["pts", "reb", "ast", "fg3m", "tov", "stl", "blk"]
 _BOOK_DEFAULTS = "betmgm,draftkings,fanduel"
 
 

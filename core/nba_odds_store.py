@@ -20,7 +20,9 @@ line = store.get_closing_line(event_id="abc123", market="player_points",
 """
 
 import os
+import re
 import sqlite3
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 
@@ -54,6 +56,72 @@ _ABBR_TO_NAME_PART = {
     "POR": "blazers",     "SAC": "kings",         "SAS": "spurs",
     "TOR": "raptors",     "UTA": "jazz",          "WAS": "wizards",
 }
+
+# ---------------------------------------------------------------------------
+# Player name normalization for fuzzy matching
+# ---------------------------------------------------------------------------
+
+_SUFFIXES = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
+def _norm_player_name(name):
+    """Normalize player name: strip diacritics, periods, suffixes, collapse initials."""
+    name = unicodedata.normalize("NFKD", str(name or ""))
+    name = "".join(c for c in name if not unicodedata.combining(c))
+    name = re.sub(r"[^a-z0-9 ]", " ", name.lower())
+    name = re.sub(r"\s+", " ", name).strip()
+    # Collapse adjacent single-letter tokens: "c j" -> "cj"
+    toks = name.split()
+    merged = []
+    i = 0
+    while i < len(toks):
+        if len(toks[i]) == 1 and i + 1 < len(toks) and len(toks[i + 1]) == 1:
+            run = toks[i]
+            while i + 1 < len(toks) and len(toks[i + 1]) == 1:
+                i += 1
+                run += toks[i]
+            merged.append(run)
+        else:
+            merged.append(toks[i])
+        i += 1
+    return " ".join(t for t in merged if t not in _SUFFIXES)
+
+
+# Known name variants: NBA Stats name -> Odds API name (normalized)
+_PLAYER_ALIASES = {
+    _norm_player_name(k): _norm_player_name(v)
+    for k, v in {
+        "CJ McCollum": "C.J. McCollum",
+        "RJ Barrett": "R.J. Barrett",
+        "AJ Green": "A.J. Green",
+        "GG Jackson": "G.G. Jackson",
+        "PJ Washington": "P.J. Washington",
+        "TJ McConnell": "T.J. McConnell",
+        "OG Anunoby": "O.G. Anunoby",
+        "KJ Martin": "K.J. Martin",
+        "JT Thor": "J.T. Thor",
+        "EJ Liddell": "E.J. Liddell",
+        "AJ Johnson": "A.J. Johnson",
+        "TJ Warren": "T.J. Warren",
+        "DJ Carton": "D.J. Carton",
+        "Nic Claxton": "Nicolas Claxton",
+        "Moe Wagner": "Moritz Wagner",
+        "Bub Carrington": "Carlton Carrington",
+        "Ron Holland": "Ronald Holland",
+        "Lu Dort": "Luguentz Dort",
+        "Herb Jones": "Herbert Jones",
+        "Cam Thomas": "Cameron Thomas",
+        "Cam Johnson": "Cameron Johnson",
+        "Cam Payne": "Cameron Payne",
+        "Pat Connaughton": "Patrick Connaughton",
+        "Svi Mykhailiuk": "Sviatoslav Mykhailiuk",
+        "Ish Wainright": "Ishmail Wainright",
+        "Mo Bamba": "Mohamed Bamba",
+    }.items()
+}
+# Reverse direction too
+_PLAYER_ALIASES.update({v: k for k, v in list(_PLAYER_ALIASES.items())})
+
 
 _DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -287,7 +355,16 @@ class OddsStore:
 
         # 1. Exact match
         row = _query("player_name=?", player_name)
-        # 2. Last-name partial match
+        # 2. Alias-resolved match
+        if not row and player_name:
+            norm = _norm_player_name(player_name)
+            alias = _PLAYER_ALIASES.get(norm)
+            if alias and alias != norm:
+                # Search all names matching the alias via LIKE on last name
+                alias_last = alias.split()[-1] if alias else ""
+                if alias_last and len(alias_last) > 2:
+                    row = _query("player_name LIKE ?", f"%{alias_last}%")
+        # 3. Last-name partial match
         if not row and player_name:
             last = player_name.strip().split()[-1]
             if len(last) > 2:
@@ -324,6 +401,14 @@ class OddsStore:
             ).fetchone()
 
         row = _run("player_name=?", player_name)
+        # Alias-resolved match
+        if not row and player_name:
+            norm = _norm_player_name(player_name)
+            alias = _PLAYER_ALIASES.get(norm)
+            if alias and alias != norm:
+                alias_last = alias.split()[-1] if alias else ""
+                if alias_last and len(alias_last) > 2:
+                    row = _run("player_name LIKE ?", f"%{alias_last}%")
         if not row and player_name:
             last = player_name.strip().split()[-1]
             if len(last) > 2:

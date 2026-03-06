@@ -166,6 +166,10 @@ CREATE TABLE IF NOT EXISTS lean_outcomes (
     result           TEXT CHECK (result IN ('win','loss','push')),
     pnl_units        REAL,
     actual_stat      REAL,
+    close_line       REAL,
+    close_over_odds  INTEGER,
+    close_under_odds INTEGER,
+    clv_delta        REAL,
     settled_at       TEXT
 );
 
@@ -193,6 +197,18 @@ class DecisionJournal:
     def _init_db(self):
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        # Migrate lean_outcomes: add CLV columns if missing
+        for col, typ in [
+            ("close_line", "REAL"),
+            ("close_over_odds", "INTEGER"),
+            ("close_under_odds", "INTEGER"),
+            ("clv_delta", "REAL"),
+        ]:
+            try:
+                self._conn.execute(f"ALTER TABLE lean_outcomes ADD COLUMN {col} {typ}")
+                self._conn.commit()
+            except Exception:
+                pass  # column already exists
 
     def __enter__(self):
         return self
@@ -328,9 +344,11 @@ class DecisionJournal:
     # Lean settlement
     # ------------------------------------------------------------------
 
-    def settle_leans_for_date(self, date_str) -> dict:
-        """Settle unsettled leans for date_str using player game logs."""
+    def settle_leans_for_date(self, date_str, odds_store=None) -> dict:
+        """Settle unsettled leans for date_str using player game logs.
+        Optionally enrich with CLV from odds_store."""
         import time
+        from .nba_odds_store import STAT_TO_MARKET
         try:
             date_obj = datetime.strptime(str(date_str), "%Y-%m-%d").date()
         except ValueError:
@@ -338,25 +356,26 @@ class DecisionJournal:
 
         utc_start, utc_end = _ct_day_utc_bounds(date_str)
         cur = self._conn.execute(
-            """SELECT l.lean_id, l.player_id, l.player_name, l.stat, l.line,
-                      l.over_odds, l.under_odds, l.recommended_side
+            """SELECT l.lean_id, l.player_id, l.player_name, l.team_abbr, l.opponent_abbr,
+                      l.stat, l.line, l.over_odds, l.under_odds, l.recommended_side
                FROM leans l
                WHERE l.ts_utc >= ? AND l.ts_utc < ?
                AND l.lean_id NOT IN (SELECT lean_id FROM lean_outcomes)""",
             (utc_start, utc_end),
         )
         rows = cur.fetchall()
-        cols = ["lean_id", "player_id", "player_name", "stat", "line",
-                "over_odds", "under_odds", "recommended_side"]
+        cols = ["lean_id", "player_id", "player_name", "team_abbr", "opponent_abbr",
+                "stat", "line", "over_odds", "under_odds", "recommended_side"]
         pending = [dict(zip(cols, r)) for r in rows]
         if not pending:
-            return {"success": True, "date": date_str, "settled": 0, "unresolved": 0, "errors": 0}
+            return {"success": True, "date": date_str, "settled": 0, "unresolved": 0, "errors": 0, "clvEnriched": 0}
 
         season = _season_from_date(date_obj)
         logs_cache = {}
         settled = 0
         unresolved = 0
         errors = 0
+        clv_enriched = 0
 
         for lean in pending:
             player_id = _as_int(lean.get("player_id"), 0)
@@ -393,19 +412,54 @@ class DecisionJournal:
             rec_odds = lean.get("over_odds") if rec_side == "over" else lean.get("under_odds")
             pnl = _pnl_for_outcome(result, rec_odds)
 
+            # CLV enrichment (mirrors signal settlement pattern)
+            clv_delta = None
+            close_line = None
+            close_over_odds = None
+            close_under_odds = None
+            if odds_store is not None:
+                try:
+                    stat_key = str(lean.get("stat") or "").lower()
+                    market = STAT_TO_MARKET.get(stat_key)
+                    if market:
+                        player_name_lean = lean.get("player_name", "")
+                        event_id = odds_store.find_event_for_game(
+                            lean.get("team_abbr", ""), lean.get("opponent_abbr", ""), date_str
+                        )
+                        if event_id:
+                            cl = odds_store.get_closing_line(event_id, market, player_name_lean)
+                        else:
+                            cl = odds_store.get_closing_line_by_player_date(
+                                player_name_lean, market, date_str
+                            )
+                        if cl:
+                            close_line = cl.get("close_line")
+                            close_over_odds = cl.get("close_over_odds")
+                            close_under_odds = cl.get("close_under_odds")
+                            clv_delta = _clv_line_delta(rec_side, line, close_line)
+                            if clv_delta is not None:
+                                clv_enriched += 1
+                except Exception as clv_ex:
+                    _log.warning("CLV enrichment failed for lean %s: %s",
+                                 lean.get("lean_id", "?"), clv_ex)
+
             try:
                 self._conn.execute(
                     """INSERT INTO lean_outcomes
-                       (lean_id, settle_date, result, pnl_units, actual_stat, settled_at)
-                       VALUES (?,?,?,?,?,?)""",
-                    (lean["lean_id"], date_str, result, pnl, actual, _now_utc_iso()),
+                       (lean_id, settle_date, result, pnl_units, actual_stat,
+                        close_line, close_over_odds, close_under_odds, clv_delta, settled_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (lean["lean_id"], date_str, result, pnl, actual,
+                     close_line, close_over_odds, close_under_odds, clv_delta,
+                     _now_utc_iso()),
                 )
                 self._conn.commit()
                 settled += 1
             except Exception:
                 errors += 1
 
-        return {"success": True, "date": date_str, "settled": settled, "unresolved": unresolved, "errors": errors}
+        return {"success": True, "date": date_str, "settled": settled,
+                "unresolved": unresolved, "errors": errors, "clvEnriched": clv_enriched}
 
     # ------------------------------------------------------------------
     # Lean accuracy report
@@ -483,6 +537,150 @@ class DecisionJournal:
             "pnl": safe_round(total_pnl, 2),
             "byStat": stat_out,
             "bySkipReason": reason_out,
+        }
+
+    # ------------------------------------------------------------------
+    # Lean CLV accuracy report
+    # ------------------------------------------------------------------
+
+    def lean_accuracy_clv(self, window_days=14) -> dict:
+        """Report lean accuracy segmented by CLV confirmation."""
+        date_to = datetime.now(timezone.utc).date()
+        date_from = date_to - timedelta(days=window_days)
+
+        cur = self._conn.execute(
+            """SELECT l.stat, l.recommended_edge, l.skip_reason, l.confidence,
+                      l.player_name, l.line, l.recommended_side,
+                      lo.result, lo.pnl_units, lo.actual_stat, lo.clv_delta
+               FROM leans l
+               LEFT JOIN lean_outcomes lo ON l.lean_id = lo.lean_id
+               WHERE DATE(l.ts_utc, '-6 hours') >= ? AND DATE(l.ts_utc, '-6 hours') <= ?""",
+            (date_from.isoformat(), date_to.isoformat()),
+        )
+        rows = cur.fetchall()
+        cols = ["stat", "recommended_edge", "skip_reason", "confidence",
+                "player_name", "line", "recommended_side",
+                "result", "pnl_units", "actual_stat", "clv_delta"]
+        records = [dict(zip(cols, r)) for r in rows]
+
+        def _bucket(recs, label):
+            settled = [r for r in recs if r.get("result") in ("win", "loss", "push")]
+            wins = sum(1 for r in settled if r["result"] == "win")
+            non_push = sum(1 for r in settled if r["result"] in ("win", "loss"))
+            pnl = sum(_as_float(r.get("pnl_units"), 0.0) for r in settled)
+            clv_vals = [r["clv_delta"] for r in settled if r.get("clv_delta") is not None]
+            return {
+                "label": label,
+                "total": len(recs),
+                "settled": len(settled),
+                "wins": wins,
+                "hitRate": safe_round(wins / non_push, 4) if non_push > 0 else None,
+                "pnl": safe_round(pnl, 2),
+                "roi": safe_round(pnl / len(settled), 4) if settled else None,
+                "avgClvDelta": safe_round(sum(clv_vals) / len(clv_vals), 4) if clv_vals else None,
+                "clvSample": len(clv_vals),
+            }
+
+        settled = [r for r in records if r.get("result") in ("win", "loss", "push")]
+        has_clv = [r for r in settled if r.get("clv_delta") is not None]
+        pos_clv = [r for r in records if r.get("clv_delta") is not None and r["clv_delta"] > 0]
+        neg_clv = [r for r in records if r.get("clv_delta") is not None and r["clv_delta"] <= 0]
+
+        # By stat with CLV segmentation
+        by_stat: dict = {}
+        for r in records:
+            s = str(r.get("stat") or "")
+            by_stat.setdefault(s, []).append(r)
+        stat_out = {}
+        for s, recs in by_stat.items():
+            s_pos = [r for r in recs if r.get("clv_delta") is not None and r["clv_delta"] > 0]
+            s_neg = [r for r in recs if r.get("clv_delta") is not None and r["clv_delta"] <= 0]
+            stat_out[s] = {
+                "all": _bucket(recs, "all"),
+                "posClv": _bucket(s_pos, "+CLV"),
+                "negClv": _bucket(s_neg, "-CLV"),
+            }
+
+        return {
+            "windowDays": window_days,
+            "all": _bucket(records, "All Leans"),
+            "posClv": _bucket(pos_clv, "+CLV Confirmed"),
+            "negClv": _bucket(neg_clv, "-CLV Contrary"),
+            "clvCoverage": safe_round(len(has_clv) / len(settled), 4) if settled else None,
+            "byStat": stat_out,
+        }
+
+    # ------------------------------------------------------------------
+    # Lean CLV backfill
+    # ------------------------------------------------------------------
+
+    def backfill_lean_clv(self, odds_store) -> dict:
+        """Retroactively compute CLV for all settled lean_outcomes with clv_delta IS NULL."""
+        from .nba_odds_store import STAT_TO_MARKET
+        cur = self._conn.execute(
+            """SELECT lo.outcome_id, lo.settle_date,
+                      l.player_name, l.team_abbr, l.opponent_abbr,
+                      l.stat, l.line, l.recommended_side
+               FROM lean_outcomes lo
+               JOIN leans l ON l.lean_id = lo.lean_id
+               WHERE lo.clv_delta IS NULL AND lo.result IS NOT NULL""",
+        )
+        rows = cur.fetchall()
+        cols = [
+            "outcome_id", "settle_date", "player_name", "team_abbr", "opponent_abbr",
+            "stat", "line", "recommended_side",
+        ]
+        records = [dict(zip(cols, r)) for r in rows]
+
+        filled = 0
+        skipped = 0
+        for rec in records:
+            try:
+                stat_key = str(rec.get("stat") or "").lower()
+                market = STAT_TO_MARKET.get(stat_key)
+                if not market:
+                    skipped += 1
+                    continue
+                date_str = str(rec.get("settle_date") or "")
+                player_name_rec = rec.get("player_name", "")
+                event_id = odds_store.find_event_for_game(
+                    rec.get("team_abbr", ""), rec.get("opponent_abbr", ""), date_str
+                )
+                if event_id:
+                    cl = odds_store.get_closing_line(event_id, market, player_name_rec)
+                else:
+                    cl = odds_store.get_closing_line_by_player_date(
+                        player_name_rec, market, date_str
+                    )
+                if not cl:
+                    skipped += 1
+                    continue
+                close_line = cl.get("close_line")
+                clv_delta = _clv_line_delta(
+                    str(rec.get("recommended_side") or ""),
+                    _as_float(rec.get("line")),
+                    close_line,
+                )
+                self._conn.execute(
+                    """UPDATE lean_outcomes
+                       SET clv_delta=?, close_line=?, close_over_odds=?, close_under_odds=?
+                       WHERE outcome_id=?""",
+                    (
+                        clv_delta, close_line,
+                        cl.get("close_over_odds"), cl.get("close_under_odds"),
+                        rec["outcome_id"],
+                    ),
+                )
+                filled += 1
+            except Exception:
+                skipped += 1
+
+        self._conn.commit()
+        return {
+            "success": True,
+            "totalOutcomes": len(records),
+            "filled": filled,
+            "skipped": skipped,
         }
 
     # ------------------------------------------------------------------
@@ -1049,7 +1247,8 @@ class DecisionJournal:
                        l.stat, l.line, l.book,
                        l.recommended_side, l.recommended_edge, l.confidence,
                        l.projection, l.prob_over, l.skip_reason,
-                       lo.result, lo.pnl_units, lo.actual_stat
+                       lo.result, lo.pnl_units, lo.actual_stat,
+                       lo.clv_delta, lo.close_line
                 FROM leans l
                 LEFT JOIN lean_outcomes lo ON l.lean_id = lo.lean_id
                 {where}
@@ -1063,6 +1262,7 @@ class DecisionJournal:
             "recommendedSide", "recommendedEdge", "confidence",
             "projection", "probOver", "skipReason",
             "result", "pnlUnits", "actualStat",
+            "clvDelta", "closeLine",
         ]
         leans = [dict(zip(cols, r)) for r in cur.fetchall()]
         return {

@@ -5,7 +5,7 @@ CLI handlers for Decision Journal commands.
 Commands:
   journal_settle  <date:YYYY-MM-DD> [--db <path>] [--odds-db <path>]
   journal_report  <date_from> <date_to> [--db <path>]
-  journal_gate    [--window-days 14] [--min-sample 30] [--db <path>]
+  journal_gate    [--window-days 14] [--min-sample 50] [--db <path>]
   journal_signals [date] [--stat s] [--limit N] [--db <path>]
   paper_summary   [--window-days 14] [--db <path>]
   paper_settle    <date:YYYY-MM-DD> [--db <path>] [--odds-db <path>]
@@ -82,7 +82,7 @@ def handle_journal_command(command, argv):
     # -----------------------------------------------------------------------
     if command == "journal_gate":
         window_days = 14
-        min_sample = 30
+        min_sample = 50
         db_path = None
         idx = 2
         while idx < len(argv):
@@ -214,7 +214,7 @@ def handle_journal_command(command, argv):
         dj = DecisionJournal(db_path=db_path)
         try:
             sqlite_result = dj.settle_signals_for_date(date_str, odds_store=odds_store)
-            lean_result = dj.settle_leans_for_date(date_str)
+            lean_result = dj.settle_leans_for_date(date_str, odds_store=odds_store)
         finally:
             dj.close()
             odds_store.close()
@@ -249,11 +249,16 @@ def handle_journal_command(command, argv):
         odds_store = OddsStore(db_path=odds_db_path or None)
         dj = DecisionJournal(db_path=db_path)
         try:
-            result = dj.backfill_clv(odds_store)
+            signal_result = dj.backfill_clv(odds_store)
+            lean_result = dj.backfill_lean_clv(odds_store)
         finally:
             dj.close()
             odds_store.close()
-        return result
+        return {
+            "success": True,
+            "signals": signal_result,
+            "leans": lean_result,
+        }
 
     # -----------------------------------------------------------------------
     # lean_signals [date] [--stat s] [--limit N] [--db <path>]
