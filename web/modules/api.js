@@ -82,3 +82,44 @@ export function showError(el, message, data) {
   const details = data ? `<pre>${escapeHtml(JSON.stringify(data, null, 2))}</pre>` : "";
   el.innerHTML = `<p class="error">${escapeHtml(message)}</p>${details}`;
 }
+
+// Toast notification — pushes into Alpine.store('toasts')
+export function toast(msg, type = 'info', duration = 3000) {
+  const store = typeof Alpine !== 'undefined' ? Alpine.store('toasts') : null;
+  if (!store) return;
+  const id = Date.now() + Math.random();
+  store.items.push({ id, msg, type });
+  setTimeout(() => {
+    store.items = store.items.filter(t => t.id !== id);
+  }, duration);
+}
+
+// Conditional cell color class based on numeric value
+export function evColorClass(val) {
+  const n = Number(val);
+  if (!Number.isFinite(n)) return '';
+  if (n >= 10) return 'cell-strong-positive';
+  if (n > 0) return 'cell-positive';
+  if (n < 0) return 'cell-negative';
+  return '';
+}
+
+// CSV export utility
+export function exportCsv(rows, columns, filename) {
+  if (!rows || !rows.length) return;
+  const header = columns.map(c => c.label).join(',');
+  const body = rows.map(r =>
+    columns.map(c => {
+      let val = typeof c.key === 'function' ? c.key(r) : r[c.key];
+      val = String(val ?? '').replace(/"/g, '""');
+      return `"${val}"`;
+    }).join(',')
+  ).join('\n');
+  const blob = new Blob([header + '\n' + body], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
