@@ -10,7 +10,6 @@ import analyzeComponent from './modules/analyze.js';
 import liveComponent from './modules/live.js';
 import resultsComponent from './modules/results.js';
 import referenceComponent from './modules/reference.js';
-import knowledgeComponent from './modules/knowledge.js';
 
 // Wait for Alpine global to exist (set by the defer CDN/vendor script)
 function boot() {
@@ -35,7 +34,6 @@ function boot() {
   Alpine.data('live', liveComponent);
   Alpine.data('results', resultsComponent);
   Alpine.data('reference', referenceComponent);
-  Alpine.data('knowledge', knowledgeComponent);
 
   // Start Alpine (auto-start was removed from vendor build)
   Alpine.start();

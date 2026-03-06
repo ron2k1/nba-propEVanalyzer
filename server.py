@@ -425,28 +425,6 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                 except Exception as e:
                     return self._send_json(200, {"success": False, "error": str(e)})
 
-            if path == "/api/lightrag_health":
-                return self._send_json(200, _run_nba_command(["lightrag_health"]))
-
-            if path == "/api/lightrag_ingest":
-                if not _long_running_lock.acquire(blocking=False):
-                    return self._send_json(409, {"success": False, "error": "Ingest already running."})
-                try:
-                    source = (query.get("source") or ["all"])[0].strip() or "all"
-                    force = (query.get("force") or ["false"])[0].strip().lower() == "true"
-                    args = ["lightrag_ingest", "--source", source]
-                    if force:
-                        args.append("--force")
-                    return self._send_json(200, _run_nba_command(args, timeout_sec=120))
-                finally:
-                    _long_running_lock.release()
-
-            if path == "/api/lightrag_query":
-                q = (query.get("q") or [""])[0].strip()
-                if not q:
-                    return self._send_json(400, {"success": False, "error": "q query param is required."})
-                return self._send_json(200, _run_nba_command(["lightrag_query", q]))
-
             return self._serve_static(path)
         except subprocess.TimeoutExpired:
             self._send_json(504, {"success": False, "error": "Request timed out calling nba_mod.py."})
