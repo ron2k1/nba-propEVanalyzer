@@ -25,6 +25,37 @@ function boot() {
     current: 'dashboard',
     set(name) { this.current = name; },
   });
+  Alpine.store('toasts', { items: [] });
+
+  // F2: Keyboard shortcuts — 1-7 switch tabs, Escape blurs input
+  const tabIds = ['dashboard', 'lines', 'picks', 'analyze', 'live', 'results', 'reference'];
+  document.addEventListener('keydown', (e) => {
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') {
+      if (e.key === 'Escape') e.target.blur();
+      return;
+    }
+    const idx = parseInt(e.key) - 1;
+    if (idx >= 0 && idx < tabIds.length) {
+      Alpine.store('tab').set(tabIds[idx]);
+    }
+  });
+
+  // F13: x-counter directive — animate number count-up (600ms ease-out cubic)
+  Alpine.directive('counter', (el, { expression }, { evaluate }) => {
+    const target = Number(evaluate(expression));
+    if (!Number.isFinite(target)) { el.textContent = expression; return; }
+    const duration = 600;
+    const start = performance.now();
+    const isFloat = !Number.isInteger(target);
+    const step = (now) => {
+      const t = Math.min((now - start) / duration, 1);
+      const ease = 1 - Math.pow(1 - t, 3);
+      el.textContent = isFloat ? (target * ease).toFixed(1) : Math.round(target * ease);
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  });
 
   // Register tab components
   Alpine.data('dashboard', dashboardComponent);
