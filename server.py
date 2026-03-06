@@ -52,6 +52,55 @@ import threading
 _long_running_lock = threading.Lock()
 
 
+def _lean_rundown(limit=10):
+    """Call LLM to summarize today's model leans."""
+    try:
+        from core.nba_bet_tracking import best_today
+        from core.nba_llm_engine import _llm_call
+    except Exception as e:
+        return {"success": False, "error": f"Import failed: {e}"}
+
+    result = best_today(limit=max(limit, 20))
+    leans = result.get("modelLeans") or []
+    if not leans:
+        return {"success": False, "error": "No model leans available for today."}
+
+    top = leans[:limit]
+    lean_lines = []
+    for i, l in enumerate(top, 1):
+        lean_lines.append(
+            f"{i}. {l['playerName']} — {(l.get('stat') or '').upper()} "
+            f"{(l.get('recommendedSide') or '').upper()} {l.get('line')} "
+            f"(proj {l.get('projection')}, edge {l.get('edge')}, "
+            f"bin {l.get('bin')}, blocked: {l.get('policyRejectReason', 'n/a')})"
+        )
+    lean_text = "\n".join(lean_lines)
+
+    system_prompt = (
+        "You are an NBA prop betting analyst. You are reviewing model leans — "
+        "signals with positive expected value that were blocked by betting policy "
+        "(wrong probability bin, stat not in whitelist, etc). "
+        "Give a brief, actionable rundown. Be direct and concise."
+    )
+    user_prompt = (
+        f"Today's top {len(top)} model leans:\n\n{lean_text}\n\n"
+        "For each lean, give a 1-sentence take on whether the edge looks real or is likely noise. "
+        "Then summarize: which 2-3 leans look most interesting if policy were relaxed, and why. "
+        "Keep the total response under 300 words."
+    )
+
+    content, provider, err = _llm_call(system_prompt, user_prompt)
+    if err:
+        return {"success": False, "error": err}
+
+    return {
+        "success": True,
+        "provider": provider,
+        "leanCount": len(top),
+        "rundown": content,
+    }
+
+
 def _run_nba_command(args, timeout_sec=None):
     cmd = [sys.executable, str(NBA_SCRIPT), *args]
     completed = subprocess.run(
@@ -262,6 +311,39 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                 args = ["journal_gate", "--window-days", window_days]
                 return self._send_json(200, _run_nba_command(args))
 
+            if path == "/api/leans_for_date":
+                date_str = (query.get("date") or [""])[0].strip()
+                limit = int((query.get("limit") or ["50"])[0].strip() or "50")
+                try:
+                    from core.nba_bet_tracking import leans_for_date
+                    leans = leans_for_date(date_str or None, limit=limit)
+                    wins = sum(1 for l in leans if l.get("result") == "win")
+                    losses = sum(1 for l in leans if l.get("result") == "loss")
+                    pushes = sum(1 for l in leans if l.get("result") == "push")
+                    settled = wins + losses + pushes
+                    pnl = sum(l.get("pnl") or 0 for l in leans)
+                    return self._send_json(200, {
+                        "success": True,
+                        "date": date_str or "today",
+                        "leans": leans,
+                        "count": len(leans),
+                        "settled": settled,
+                        "wins": wins, "losses": losses, "pushes": pushes,
+                        "pnl": round(pnl, 2),
+                        "hitRate": round(100.0 * wins / (wins + losses), 2) if (wins + losses) > 0 else None,
+                    })
+                except Exception as e:
+                    return self._send_json(200, {"success": False, "error": str(e)})
+
+            if path == "/api/lean_rundown":
+                limit = int((query.get("limit") or ["10"])[0].strip() or "10")
+                result = _lean_rundown(limit)
+                return self._send_json(200, result)
+
+            if path == "/api/pipeline_status":
+                locked = _long_running_lock.locked()
+                return self._send_json(200, {"success": True, "busy": locked})
+
             if path == "/api/roster_sweep":
                 if not _long_running_lock.acquire(blocking=False):
                     return self._send_json(409, {"success": False, "error": "Roster sweep already running."})
@@ -301,6 +383,47 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                 limit = (query.get("limit") or ["5"])[0].strip() or "5"
                 args = ["top_picks", limit]
                 return self._send_json(200, _run_nba_command(args))
+
+            if path == "/api/lean_clv_report":
+                window_days = int((query.get("windowDays") or ["14"])[0].strip() or "14")
+                source = (query.get("source") or ["live"])[0].strip() or "live"
+                try:
+                    if source == "backtest":
+                        from core.nba_bet_tracking import backtest_lean_clv_report
+                        result = backtest_lean_clv_report(source="backtest")
+                    else:
+                        from core.nba_decision_journal import DecisionJournal
+                        dj = DecisionJournal()
+                        try:
+                            result = dj.lean_accuracy_clv(window_days=window_days)
+                        finally:
+                            dj.close()
+                    return self._send_json(200, {"success": True, **result})
+                except Exception as e:
+                    return self._send_json(200, {"success": False, "error": str(e)})
+
+            if path == "/api/enrich_journal_clv":
+                try:
+                    from core.nba_bet_tracking import enrich_journal_clv
+                    result = enrich_journal_clv()
+                    return self._send_json(200, result)
+                except Exception as e:
+                    return self._send_json(200, {"success": False, "error": str(e)})
+
+            if path == "/api/backfill_lean_clv":
+                try:
+                    from core.nba_decision_journal import DecisionJournal
+                    from core.nba_odds_store import OddsStore
+                    odds_store = OddsStore()
+                    dj = DecisionJournal()
+                    try:
+                        result = dj.backfill_lean_clv(odds_store)
+                    finally:
+                        dj.close()
+                        odds_store.close()
+                    return self._send_json(200, result)
+                except Exception as e:
+                    return self._send_json(200, {"success": False, "error": str(e)})
 
             if path == "/api/lightrag_health":
                 return self._send_json(200, _run_nba_command(["lightrag_health"]))
