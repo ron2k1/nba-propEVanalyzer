@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>NBA Prop Engine</title>
+  <title>Cφurtside</title>
   <link rel="stylesheet" href="/styles.css">
   <script defer src="/vendor/alpine.min.js"></script>
   <script type="module" src="/app.js"></script>
@@ -11,10 +11,12 @@
 <body>
   <div class="bg-shape bg-shape-a"></div>
   <div class="bg-shape bg-shape-b"></div>
+  <div class="bg-shape bg-shape-c"></div>
+  <div class="bg-grain"></div>
 
   <header class="page-head">
-    <h1>NBA Prop Engine</h1>
-    <p>Player prop EV engine — projections, line collection, paper trading & CLV tracking</p>
+    <h1>Cφurtside</h1>
+    <p>See the edge before the market moves.</p>
   </header>
 
   <!-- Tab Navigation -->
@@ -38,7 +40,8 @@
   <main class="layout">
 
     <!-- ═══ TAB 1: Dashboard ═══ -->
-    <section class="tab-panel" x-data="dashboard" x-show="$store.tab.current === 'dashboard'" x-cloak>
+    <section class="tab-panel" x-data="dashboard" x-show="$store.tab.current === 'dashboard'" x-cloak
+      x-transition:enter="tab-panel-enter" x-transition:enter-start="opacity: 0" x-transition:enter-end="opacity: 1">
 
       <!-- Health Badge -->
       <div class="panel">
@@ -63,9 +66,9 @@
               <span class="gate-label" x-text="gate.gate?.gatePass ? 'GO-LIVE: PASS' : 'GO-LIVE: FAIL'"></span>
             </div>
             <div class="gate-metrics">
-              <span>Signals: <strong x-text="gate.totalSignals ?? '?'"></strong></span>
-              <span>ROI: <strong x-text="(gate.roi ?? 0).toFixed(1) + '%'"></strong></span>
-              <span>+CLV: <strong x-text="(gate.positiveClvPct ?? 0).toFixed(1) + '%'"></strong></span>
+              <span class="has-tooltip" data-tooltip="Total policy-qualified signals settled">Signals: <strong x-counter="gate.totalSignals ?? 0"></strong></span>
+              <span class="has-tooltip" data-tooltip="Return on investment (policy-qualified)">ROI: <strong x-counter="gate.roi ?? 0" x-text="(gate.roi ?? 0).toFixed(1) + '%'"></strong></span>
+              <span class="has-tooltip" data-tooltip="Percentage of picks with positive closing line value">+CLV: <strong x-counter="gate.positiveClvPct ?? 0" x-text="(gate.positiveClvPct ?? 0).toFixed(1) + '%'"></strong></span>
               <template x-if="gate.reason"><span style="font-size:0.82rem" x-text="gate.reason"></span></template>
             </div>
           </div>
@@ -76,7 +79,13 @@
       <div class="panel">
         <div class="panel-head">
           <h2>Today's Slate</h2>
-          <button class="btn btn-secondary" @click="loadGames()">Refresh</button>
+          <div class="card-actions" style="align-items:center">
+            <label class="toggle" style="font-size:0.82rem;color:var(--muted)">
+              <input type="checkbox" :checked="autoRefresh" @change="toggleAutoRefresh()"> Auto-refresh
+            </label>
+            <span x-show="lastRefresh" style="font-size:0.75rem;color:var(--muted-dim)" x-text="'Last: ' + lastRefresh"></span>
+            <button class="btn btn-secondary" @click="loadGames()">Refresh</button>
+          </div>
         </div>
         <p class="section-desc">
           Today's NBA games with team records and tip times. Click <strong>Use Home</strong> or <strong>Use Away</strong> to auto-fill the Analyze tab with that player's matchup context for quick prop evaluation.
@@ -90,12 +99,12 @@
         </template>
         <div class="games-grid">
           <template x-for="g in games" :key="(g.homeTeam?.abbreviation || '') + (g.awayTeam?.abbreviation || '')">
-            <article class="game-card">
+            <article class="game-card game-card-clickable" @click="analyzeGame(g, true)">
               <h3 class="matchup" x-text="awayAbbr(g) + ' @ ' + homeAbbr(g)"></h3>
               <p class="meta" x-text="gameMeta(g)"></p>
               <div class="card-actions">
-                <button class="btn btn-chip" @click="prefill(homeAbbr(g), awayAbbr(g), true)">Use Home</button>
-                <button class="btn btn-chip" @click="prefill(awayAbbr(g), homeAbbr(g), false)">Use Away</button>
+                <button class="btn btn-chip" @click.stop="analyzeGame(g, true)">Use Home</button>
+                <button class="btn btn-chip" @click.stop="analyzeGame(g, false)">Use Away</button>
               </div>
             </article>
           </template>
@@ -107,7 +116,8 @@
     </section>
 
     <!-- ═══ TAB 2: Lines ═══ -->
-    <section class="tab-panel" x-data="lines" x-show="$store.tab.current === 'lines'" x-cloak>
+    <section class="tab-panel" x-data="lines" x-show="$store.tab.current === 'lines'" x-cloak
+      x-transition:enter="tab-panel-enter" x-transition:enter-start="opacity: 0" x-transition:enter-end="opacity: 1">
       <div class="panel">
         <div class="panel-head">
           <h2>Line Collection Pipeline</h2>
@@ -182,7 +192,8 @@
     </section>
 
     <!-- ═══ TAB 3: Picks ═══ -->
-    <section class="tab-panel" x-data="picks" x-show="$store.tab.current === 'picks'" x-cloak>
+    <section class="tab-panel" x-data="picks" x-show="$store.tab.current === 'picks'" x-cloak
+      x-transition:enter="tab-panel-enter" x-transition:enter-start="opacity: 0" x-transition:enter-end="opacity: 1">
       <div class="panel">
         <p class="section-desc">
           <strong>Best EV Today</strong> shows all policy-qualified signals from today's roster sweep, ranked by expected value.
@@ -192,9 +203,12 @@
         <div class="panel-head">
           <h2>Best EV Today</h2>
           <div class="card-actions">
+            <input type="text" class="table-filter" x-model="bestFilter" placeholder="Filter by player or stat...">
             <label style="display:flex;align-items:center;gap:6px;font-size:0.85rem;color:var(--muted)">
               Limit <input type="number" x-model.number="bestLimit" min="1" max="50" style="width:60px">
             </label>
+            <button class="btn btn-chip" @click="copyPicks()" title="Copy picks to clipboard">Copy Picks</button>
+            <button class="btn btn-chip" @click="exportPicksCsv()" title="Export picks as CSV">Export CSV</button>
             <button class="btn btn-secondary" @click="loadBestToday()" :disabled="bestLoading">Refresh</button>
           </div>
         </div>
@@ -216,16 +230,25 @@
             <h4 style="margin-top:14px">Top EV Plays</h4>
             <div class="odds-table-wrap">
               <table class="odds-table">
-                <thead><tr><th>Player</th><th>Stat</th><th>Side</th><th>Line</th><th>Proj</th><th>EV%</th><th>Odds</th><th>Status</th></tr></thead>
+                <thead><tr>
+                  <th class="sortable-th" @click="sortBy('playerName')">Player<span x-text="sortArrow('playerName')"></span></th>
+                  <th class="sortable-th" @click="sortBy('stat')">Stat<span x-text="sortArrow('stat')"></span></th>
+                  <th>Side</th>
+                  <th class="sortable-th" @click="sortBy('line')">Line<span x-text="sortArrow('line')"></span></th>
+                  <th class="sortable-th" @click="sortBy('projection')">Proj<span x-text="sortArrow('projection')"></span></th>
+                  <th class="sortable-th" @click="sortBy('recommendedEvPct')">EV%<span x-text="sortArrow('recommendedEvPct')"></span></th>
+                  <th>Odds</th>
+                  <th>Status</th>
+                </tr></thead>
                 <tbody>
-                  <template x-for="r in bestRows()" :key="(r.playerId||'') + r.stat + r.line">
-                    <tr>
-                      <td x-text="r.playerName || r.playerId || '?'"></td>
+                  <template x-for="r in sortedBestRows()" :key="(r.playerId||'') + r.stat + r.line">
+                    <tr class="row-expandable" @click="toggleRow(r)">
+                      <td><span class="pick-link" @click.stop="analyzePick(r)" x-text="r.playerName || r.playerId || '?'"></span></td>
                       <td x-text="(r.stat || '').toUpperCase()"></td>
                       <td x-text="(r.recommendedSide || '').toUpperCase()"></td>
                       <td x-text="fmt(r.line, 1)"></td>
                       <td x-text="fmt(r.projection, 1)"></td>
-                      <td x-text="fmt(r.recommendedEvPct, 2) + '%'"></td>
+                      <td :class="evColorClass(r.recommendedEvPct)" x-text="fmt(r.recommendedEvPct, 2) + '%'"></td>
                       <td x-text="r.recommendedOdds ?? 'n/a'"></td>
                       <td x-html="statusPill(r.result || 'pending')"></td>
                     </tr>
@@ -233,6 +256,21 @@
                 </tbody>
               </table>
             </div>
+            <!-- F8: Expanded row details (shown below table) -->
+            <template x-for="r in sortedBestRows().filter(r => isExpanded(r))" :key="'detail-' + rowKey(r)">
+              <div class="row-detail" style="margin-top:2px;padding:10px 14px;background:var(--surface-alt);border-left:3px solid var(--brand);border-radius:0 var(--radius-xs) var(--radius-xs) 0">
+                <div class="row-detail-grid">
+                  <div class="detail-item"><span class="detail-label">Prob Over</span><span class="detail-value" x-text="pct(r.probOver)"></span></div>
+                  <div class="detail-item"><span class="detail-label">Prob Bin</span><span class="detail-value" x-text="r.probBin ?? 'n/a'"></span></div>
+                  <div class="detail-item"><span class="detail-label">Book</span><span class="detail-value" x-text="r.bookmaker || r.book || 'n/a'"></span></div>
+                  <div class="detail-item"><span class="detail-label">Confidence</span><span class="detail-value" x-text="pct(r.confidence)"></span></div>
+                  <div class="detail-item"><span class="detail-label">Distribution</span><span class="detail-value" x-text="r.distributionMode || 'normal'"></span></div>
+                  <div class="detail-item"><span class="detail-label">Team</span><span class="detail-value" x-text="r.playerTeamAbbr || r.teamAbbr || 'n/a'"></span></div>
+                  <div class="detail-item"><span class="detail-label">Opponent</span><span class="detail-value" x-text="r.opponentAbbr || 'n/a'"></span></div>
+                  <div class="detail-item"><span class="detail-label">Edge</span><span class="detail-value" x-text="fmt(r.edge, 4)"></span></div>
+                </div>
+              </div>
+            </template>
           </div>
         </template>
       </div>
@@ -337,7 +375,8 @@
     </section>
 
     <!-- ═══ TAB 4: Analyze ═══ -->
-    <section class="tab-panel" x-data="analyze" x-show="$store.tab.current === 'analyze'" x-cloak>
+    <section class="tab-panel" x-data="analyze" x-show="$store.tab.current === 'analyze'" x-cloak
+      x-transition:enter="tab-panel-enter" x-transition:enter-start="opacity: 0" x-transition:enter-end="opacity: 1">
       <div class="panel">
         <div class="panel-head">
           <h2>Prop EV</h2>
@@ -474,7 +513,8 @@
     </section>
 
     <!-- ═══ TAB 5: Live ═══ -->
-    <section class="tab-panel" x-data="live" x-show="$store.tab.current === 'live'" x-cloak>
+    <section class="tab-panel" x-data="live" x-show="$store.tab.current === 'live'" x-cloak
+      x-transition:enter="tab-panel-enter" x-transition:enter-start="opacity: 0" x-transition:enter-end="opacity: 1">
 
       <!-- Live Projection -->
       <div class="panel">
@@ -582,7 +622,8 @@
     </section>
 
     <!-- ═══ TAB 6: Results ═══ -->
-    <section class="tab-panel" x-data="results" x-show="$store.tab.current === 'results'" x-cloak>
+    <section class="tab-panel" x-data="results" x-show="$store.tab.current === 'results'" x-cloak
+      x-transition:enter="tab-panel-enter" x-transition:enter-start="opacity: 0" x-transition:enter-end="opacity: 1">
       <div class="panel">
         <div class="panel-head">
           <h2>Tracking & Settlement</h2>
@@ -605,7 +646,9 @@
             <span x-show="!leansLoading">Load Leans</span>
             <span x-show="leansLoading">Loading...</span>
           </button>
+          <button class="btn btn-chip" @click="exportResultsCsv()" x-show="resultsData" title="Export results as CSV">Export CSV</button>
         </div>
+        <input type="text" class="table-filter" x-model="resultsFilter" placeholder="Filter by player or stat..." x-show="resultsData" style="margin-bottom:10px">
 
         <template x-if="resultsLoading">
           <div class="skeleton skeleton-lg"></div>
@@ -632,9 +675,9 @@
           <div class="result">
             <h4>Closing Line Value</h4>
             <div class="metric-grid">
-              <article class="metric"><h4>CLV Sample</h4><p x-text="summary().clvSampleSize ?? 0"></p></article>
-              <article class="metric ev-over"><h4>Avg CLV Line</h4><p x-text="fmt(summary().avgClvLine, 3)"></p></article>
-              <article class="metric ev-over"><h4>Avg CLV Odds%</h4><p x-text="fmt(summary().avgClvOddsPct, 2) + '%'"></p></article>
+              <article class="metric has-tooltip" data-tooltip="Picks with closing line data available"><h4>CLV Sample</h4><p x-text="summary().clvSampleSize ?? 0"></p></article>
+              <article class="metric ev-over has-tooltip" data-tooltip="Average line movement in our favor"><h4>Avg CLV Line</h4><p x-text="fmt(summary().avgClvLine, 3)"></p></article>
+              <article class="metric ev-over has-tooltip" data-tooltip="Average odds improvement vs close"><h4>Avg CLV Odds%</h4><p x-text="fmt(summary().avgClvOddsPct, 2) + '%'"></p></article>
               <article class="metric"><h4>+CLV Count</h4><p x-text="(summary().positiveClvCount ?? 0) + ' / ' + (summary().clvSampleSize ?? 0)"></p></article>
               <article class="metric"><h4>+CLV Rate</h4><p x-text="pctAlready(summary().positiveClvPct)"></p></article>
             </div>
@@ -660,7 +703,7 @@
         <template x-if="resultsData && !resultsLoading">
           <div class="result">
             <h4 x-text="resultsData.mode === 'best' ? 'Top EV Plays' : 'Graded Picks'"></h4>
-            <div class="odds-table-wrap" x-html="renderResultsTableHtml()"></div>
+            <div class="odds-table-wrap" x-html="renderResultsTableHtmlSorted()"></div>
           </div>
         </template>
 
@@ -746,7 +789,8 @@
     </section>
 
     <!-- ═══ TAB 7: Reference ═══ -->
-    <section class="tab-panel" x-data="reference" x-show="$store.tab.current === 'reference'" x-cloak>
+    <section class="tab-panel" x-data="reference" x-show="$store.tab.current === 'reference'" x-cloak
+      x-transition:enter="tab-panel-enter" x-transition:enter-start="opacity: 0" x-transition:enter-end="opacity: 1">
 
       <!-- Sportsbook Odds -->
       <div class="panel">
@@ -843,5 +887,14 @@
     </section>
 
   </main>
+
+  <!-- F1: Toast Notification Container -->
+  <div class="toast-container" x-data>
+    <template x-for="t in $store.toasts.items" :key="t.id">
+      <div class="toast" :class="'toast-' + t.type" x-text="t.msg"
+        x-transition:enter="toast-in"
+        x-transition:leave="opacity: 0; transform: translateX(40px)"></div>
+    </template>
+  </div>
 </body>
 </html>
