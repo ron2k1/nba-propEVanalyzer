@@ -14,7 +14,7 @@
 
   <header class="page-head">
     <h1>NBA Prop Engine</h1>
-    <p>Live projection + EV backed by <code>nba_mod.py</code></p>
+    <p>Player prop EV engine — projections, line collection, paper trading & CLV tracking</p>
   </header>
 
   <!-- Tab Navigation -->
@@ -47,6 +47,9 @@
           <h2>System Status</h2>
           <span class="badge" :class="healthStatus" x-text="healthText"></span>
         </div>
+        <p class="section-desc">
+          <strong>GO-LIVE Gate</strong> tracks your paper trading performance. It requires 50+ settled signals, positive ROI, 50%+ CLV rate, and no stat with 20+ signals below 45% hit rate. When all conditions pass, the system is ready for real-money deployment.
+        </p>
 
         <!-- Gate Widget -->
         <template x-if="gateLoading">
@@ -76,7 +79,9 @@
           <h2>Today's Slate</h2>
           <button class="btn btn-secondary" @click="loadGames()">Refresh</button>
         </div>
-        <p class="hint">Click a matchup to prefill the Analyze tab forms.</p>
+        <p class="section-desc">
+          Today's NBA games with team records and tip times. Click <strong>Use Home</strong> or <strong>Use Away</strong> to auto-fill the Analyze tab with that player's matchup context for quick prop evaluation.
+        </p>
 
         <template x-if="gamesLoading">
           <div class="skeleton skeleton-lg"></div>
@@ -108,7 +113,11 @@
         <div class="panel-head">
           <h2>Line Collection Pipeline</h2>
         </div>
-        <p class="hint">Collect book lines, run roster sweep, or execute the full daily ops pipeline.</p>
+        <p class="section-desc">
+          <strong>Collect Lines</strong> pulls live odds from sportsbooks into the line store.
+          <strong>Roster Sweep</strong> runs every player through the EV model and logs qualifying signals (~10 min).
+          <strong>Run Full Pipeline</strong> executes both steps plus builds closing lines — the complete daily workflow in one click.
+        </p>
 
         <div class="form-grid" style="margin-bottom:14px">
           <label>Books <input type="text" x-model="collectBooks"></label>
@@ -176,6 +185,11 @@
     <!-- ═══ TAB 3: Picks ═══ -->
     <section class="tab-panel" x-data="picks" x-show="$store.tab.current === 'picks'" x-cloak>
       <div class="panel">
+        <p class="section-desc">
+          <strong>Best EV Today</strong> shows all policy-qualified signals from today's roster sweep, ranked by expected value.
+          These are real candidates — they passed the stat whitelist (pts + ast), edge threshold (8%+), confidence floor (60%+), and bin filter (0 or 9 only).
+          <strong>Model Leans</strong> below are signals that passed the model but were blocked by policy — useful for research but not for betting.
+        </p>
         <div class="panel-head">
           <h2>Best EV Today</h2>
           <div class="card-actions">
@@ -228,8 +242,26 @@
       <div class="panel" style="margin-top:16px" x-show="leanRows().length > 0" x-cloak>
         <div class="panel-head">
           <h2>Model Leans</h2>
-          <span class="lean-disclaimer">Not policy-qualified — for research only</span>
+          <div class="card-actions">
+            <span class="lean-disclaimer">Not policy-qualified — for research only</span>
+            <button class="btn btn-secondary" @click="loadRundown()" :disabled="rundownLoading">
+              <span x-show="!rundownLoading">Get LLM Rundown</span>
+              <span x-show="rundownLoading">Analyzing...</span>
+            </button>
+          </div>
         </div>
+
+        <!-- LLM Rundown -->
+        <template x-if="rundownError">
+          <p class="error" x-text="rundownError"></p>
+        </template>
+        <template x-if="rundownResult && !rundownError">
+          <div class="llm-section" style="margin-top:0;border-top:0;padding-top:0;margin-bottom:14px">
+            <h4>LLM Rundown <span class="llm-provider-tag" x-text="rundownResult.provider || 'LLM'"></span></h4>
+            <pre style="max-height:300px;overflow:auto;white-space:pre-wrap;background:var(--bg-accent);color:var(--ink);line-height:1.7" x-text="rundownResult.rundown"></pre>
+          </div>
+        </template>
+
         <div class="odds-table-wrap">
           <table class="odds-table">
             <thead><tr><th>Player</th><th>Stat</th><th>Side</th><th>Line</th><th>Proj</th><th>EV%</th><th>Odds</th><th>Reason</th></tr></thead>
@@ -253,6 +285,9 @@
 
       <!-- Top Picks -->
       <div class="panel" style="margin-top:16px">
+        <p class="section-desc">
+          <strong>Top Picks</strong> selects the N highest-EV plays and finds the best 2-leg parlay. These are the final pre-tip picks after all gates and filters. Use this as your shortlist.
+        </p>
         <div class="panel-head">
           <h2>Top Picks</h2>
           <div class="card-actions">
@@ -308,7 +343,11 @@
         <div class="panel-head">
           <h2>Prop EV</h2>
         </div>
-        <p class="hint">Use either player name or player ID. Selecting a name auto-fills ID.</p>
+        <p class="section-desc">
+          Evaluate a single player prop. Enter the player, matchup, stat, line, and odds to get the model's projection, probability distribution, and EV verdict.
+          <strong>Auto Sweep</strong> queries all sportsbooks for the best available line on that player/stat combo.
+          The model uses Normal CDF for most stats and Poisson for steals, blocks, 3PM, and turnovers.
+        </p>
 
         <form class="form-grid" @submit.prevent="runPropEv()">
           <label>Player ID <input type="number" x-model.number="playerId"></label>
@@ -441,7 +480,9 @@
       <!-- Live Projection -->
       <div class="panel">
         <div class="panel-head"><h2>Live Projection</h2></div>
-        <p class="hint">Fetches real-time boxscore and adjusts pregame projection based on minutes remaining.</p>
+        <p class="section-desc">
+          Track a player during a live game. Pulls the real-time boxscore and blends current production with remaining-minutes pace to project their final stat line. The pace bar shows how far through their expected minutes they are.
+        </p>
 
         <form class="form-grid" @submit.prevent="runLiveProjection()">
           <label>Player ID <input type="number" x-model.number="livePlayerId"></label>
@@ -514,7 +555,9 @@
             <span x-show="parlayLoading">Running...</span>
           </button>
         </div>
-        <p class="hint">2-3 legs only. Edit JSON directly.</p>
+        <p class="section-desc">
+          Calculate the combined EV of a 2-3 leg parlay. Accounts for correlation between legs on the same game. Edit the JSON legs array below with each leg's player, stat, line, side, and odds. Includes Kelly criterion sizing.
+        </p>
         <textarea class="codebox" x-model="parlayLegs"></textarea>
 
         <template x-if="parlayError">
@@ -545,7 +588,10 @@
         <div class="panel-head">
           <h2>Tracking & Settlement</h2>
         </div>
-        <p class="hint">Review top EV picks, settle previous picks, and inspect win/loss results.</p>
+        <p class="section-desc">
+          <strong>Load Best EV</strong> shows today's top signals. <strong>Settle Date</strong> resolves pending picks against actual box scores (run the morning after games).
+          <strong>Load Results</strong> shows graded W/L/P with CLV (closing line value) — the key metric that proves whether you're beating the market at pick time.
+        </p>
 
         <div class="form-grid" style="margin-bottom:14px">
           <label>Date Override <input type="date" x-model="trackingDate"></label>
@@ -556,6 +602,10 @@
           <button class="btn btn-primary" @click="loadBestToday()" :disabled="resultsLoading">Load Best EV</button>
           <button class="btn btn-secondary" @click="settleDate()" :disabled="resultsLoading">Settle Date</button>
           <button class="btn btn-secondary" @click="loadResults()" :disabled="resultsLoading">Load Results</button>
+          <button class="btn btn-secondary" @click="loadLeansForDate()" :disabled="leansLoading">
+            <span x-show="!leansLoading">Load Leans</span>
+            <span x-show="leansLoading">Loading...</span>
+          </button>
         </div>
 
         <template x-if="resultsLoading">
@@ -614,10 +664,30 @@
             <div class="odds-table-wrap" x-html="renderResultsTableHtml()"></div>
           </div>
         </template>
+
+        <!-- Leans for date -->
+        <template x-if="leansError && !leansLoading">
+          <p class="error" x-text="leansError"></p>
+        </template>
+        <template x-if="leansData && !leansLoading">
+          <div class="result">
+            <h4>Model Leans <span class="lean-disclaimer" x-text="'(' + leansData.count + ' leans, ' + leansData.settled + ' settled)'"></span></h4>
+            <div class="metric-grid" style="margin-bottom:12px">
+              <article class="metric"><h4>Total</h4><p x-text="leansData.count"></p></article>
+              <article class="metric"><h4>W / L / P</h4><p x-text="leansData.wins + ' / ' + leansData.losses + ' / ' + leansData.pushes"></p></article>
+              <article class="metric ev-over"><h4>Hit Rate</h4><p x-text="leansData.hitRate != null ? leansData.hitRate + '%' : 'n/a'"></p></article>
+              <article class="metric"><h4>PnL</h4><p x-text="leansData.pnl + 'u'"></p></article>
+            </div>
+            <div class="odds-table-wrap" x-html="renderLeansTableHtml()"></div>
+          </div>
+        </template>
       </div>
 
       <!-- Paper Summary -->
       <div class="panel" style="margin-top:16px">
+        <p class="section-desc">
+          Rolling window summary of all paper trades. Shows hit rate, ROI, PnL in units, and positive CLV percentage — the four metrics that feed the GO-LIVE gate on the Dashboard. Adjust the window to see recent vs all-time performance.
+        </p>
         <div class="panel-head">
           <h2>Paper Trading Summary</h2>
           <div class="card-actions">
@@ -641,6 +711,39 @@
           <div class="result" x-html="renderSummaryHtml()"></div>
         </template>
       </div>
+
+      <!-- Lean CLV Analysis -->
+      <div class="panel" style="margin-top:16px">
+        <div class="panel-head">
+          <h2>Lean CLV Analysis</h2>
+          <div class="card-actions">
+            <select x-model="leanClvSource" style="padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);font-size:0.85rem">
+              <option value="live">Live (SQLite)</option>
+              <option value="backtest">Backtest (JSONL)</option>
+            </select>
+            <button class="btn btn-primary" @click="loadLeanClvReport()" :disabled="leanClvLoading">
+              <span x-show="!leanClvLoading">Load Report</span>
+              <span x-show="leanClvLoading">Loading...</span>
+            </button>
+            <button class="btn btn-secondary" @click="backfillLeanClv()" :disabled="leanClvLoading" title="Backfill CLV for settled leans missing closing line data">
+              Backfill CLV
+            </button>
+          </div>
+        </div>
+        <p class="section-desc">
+          When the market agrees with our lean (+CLV), how accurate are we? Compares hit rate and ROI for leans where the closing line moved in our favor vs against us.
+        </p>
+
+        <template x-if="leanClvLoading">
+          <div class="skeleton skeleton-lg"></div>
+        </template>
+        <template x-if="leanClvError && !leanClvLoading">
+          <p class="error" x-text="leanClvError"></p>
+        </template>
+        <template x-if="leanClvData && !leanClvLoading">
+          <div class="result" x-html="renderLeanClvHtml()"></div>
+        </template>
+      </div>
     </section>
 
     <!-- ═══ TAB 7: Reference ═══ -->
@@ -649,6 +752,9 @@
       <!-- Sportsbook Odds -->
       <div class="panel">
         <div class="panel-head"><h2>Sportsbook Odds</h2></div>
+        <p class="section-desc">
+          Raw odds feed from The Odds API. <strong>Load Pregame</strong> pulls pre-tip lines; <strong>Load Live</strong> pulls in-game lines. Shows line discrepancies between books — useful for finding soft lines. Requires <code>ODDS_API_KEY</code> in your environment.
+        </p>
         <form class="form-grid" @submit.prevent>
           <label>Regions <input type="text" x-model="oddsRegions"></label>
           <label>Markets <input type="text" x-model="oddsMarkets" @input="checkMarketWarning()"></label>
@@ -691,7 +797,9 @@
       <!-- Starter EV Accuracy -->
       <div class="panel" style="margin-top:16px">
         <div class="panel-head"><h2>Starter EV Accuracy</h2></div>
-        <p class="hint">Pregame historical test on all starters for a date using EV-positive leans.</p>
+        <p class="section-desc">
+          Backtest-style accuracy check for a specific date. Runs every starter through the EV model against that day's odds and compares to actual results. Shows hit rate, PnL, and ROI — useful for validating model performance on historical dates.
+        </p>
         <form class="form-grid" @submit.prevent="runStarterAccuracy()">
           <label>Date <input type="date" x-model="starterDate"></label>
           <label>Bookmakers <input type="text" x-model="starterBookmakers"></label>
