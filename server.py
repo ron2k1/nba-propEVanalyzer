@@ -14,11 +14,13 @@ import mimetypes
 import os
 import subprocess
 import sys
+import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from core.pipeline_progress import read_status, write_status, utc_now_iso
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -46,10 +48,98 @@ DEFAULT_TIMEOUT_SEC = 300
 LONG_TIMEOUT_SEC = 1800
 DEFAULT_ODDS_MARKETS = "h2h,spreads,totals"
 DEFAULT_MAIN_BOOKMAKERS = "betmgm,draftkings,fanduel"
+PIPELINE_STATUS_PATH = _LOG_DIR / "pipeline_status.json"
 
 # Server-side lock for long-running commands — prevents duplicate spawns
 import threading
 _long_running_lock = threading.Lock()
+_task_state_lock = threading.Lock()
+_current_task = {
+    "process": None,
+    "taskId": None,
+    "taskName": None,
+    "cancelRequested": False,
+}
+
+
+def _default_pipeline_status():
+    return {
+        "success": True,
+        "busy": False,
+        "taskId": None,
+        "taskName": None,
+        "currentCommand": None,
+        "stage": "idle",
+        "message": "No pipeline task running.",
+        "updatedAtUtc": utc_now_iso(),
+    }
+
+
+def _read_pipeline_status():
+    status = read_status(str(PIPELINE_STATUS_PATH)) or {}
+    if not status:
+        status = _default_pipeline_status()
+    status["busy"] = bool(_long_running_lock.locked())
+    return status
+
+
+def _write_pipeline_status(payload):
+    write_status(str(PIPELINE_STATUS_PATH), payload)
+
+
+def _set_active_task(process, *, task_id, task_name):
+    with _task_state_lock:
+        _current_task["process"] = process
+        _current_task["taskId"] = task_id
+        _current_task["taskName"] = task_name
+        _current_task["cancelRequested"] = False
+
+
+def _clear_active_task(task_id=None):
+    with _task_state_lock:
+        if task_id and _current_task.get("taskId") != task_id:
+            return
+        _current_task["process"] = None
+        _current_task["taskId"] = None
+        _current_task["taskName"] = None
+        _current_task["cancelRequested"] = False
+
+
+def _cancel_active_task():
+    with _task_state_lock:
+        proc = _current_task.get("process")
+        task_id = _current_task.get("taskId")
+        task_name = _current_task.get("taskName")
+        if not proc or proc.poll() is not None:
+            return {"success": False, "error": "No pipeline task is currently running."}
+        _current_task["cancelRequested"] = True
+
+    current = _read_pipeline_status()
+    current.update({
+        "taskId": task_id,
+        "taskName": task_name,
+        "busy": True,
+        "stage": "cancelling",
+        "message": "Cancellation requested. Waiting for the current task to stop.",
+        "cancelRequested": True,
+        "updatedAtUtc": utc_now_iso(),
+    })
+    _write_pipeline_status(current)
+
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        return {
+            "success": True,
+            "taskId": task_id,
+            "taskName": task_name,
+            "message": "Pipeline cancellation requested.",
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
 
 
 def _lean_rundown(limit=10):
@@ -101,18 +191,9 @@ def _lean_rundown(limit=10):
     }
 
 
-def _run_nba_command(args, timeout_sec=None):
-    cmd = [sys.executable, str(NBA_SCRIPT), *args]
-    completed = subprocess.run(
-        cmd,
-        cwd=str(ROOT),
-        capture_output=True,
-        text=True,
-        timeout=timeout_sec or DEFAULT_TIMEOUT_SEC,
-    )
-
-    stdout = (completed.stdout or "").strip()
-    stderr = (completed.stderr or "").strip()
+def _parse_nba_command_output(stdout, stderr, return_code):
+    stdout = (stdout or "").strip()
+    stderr = (stderr or "").strip()
     payload = None
 
     if stdout:
@@ -130,10 +211,10 @@ def _run_nba_command(args, timeout_sec=None):
     if payload is None:
         payload = {"success": False, "error": "nba_mod.py returned no JSON output."}
 
-    if completed.returncode != 0 and "error" not in payload:
+    if return_code != 0 and "error" not in payload:
         payload = {
             "success": False,
-            "error": stderr or f"nba_mod.py exited with code {completed.returncode}",
+            "error": stderr or f"nba_mod.py exited with code {return_code}",
             "rawOutput": stdout,
         }
 
@@ -141,6 +222,117 @@ def _run_nba_command(args, timeout_sec=None):
         payload.setdefault("stderr", stderr)
 
     return payload
+
+
+def _run_nba_command(args, timeout_sec=None):
+    cmd = [sys.executable, str(NBA_SCRIPT), *args]
+    completed = subprocess.run(
+        cmd,
+        cwd=str(ROOT),
+        capture_output=True,
+        text=True,
+        timeout=timeout_sec or DEFAULT_TIMEOUT_SEC,
+    )
+    return _parse_nba_command_output(completed.stdout, completed.stderr, completed.returncode)
+
+
+def _run_tracked_nba_command(args, *, task_name, timeout_sec=None):
+    task_id = f"{task_name}-{int(time.time() * 1000)}"
+    started_at = utc_now_iso()
+    cmd_args = list(args)
+    if "--progress-file" not in cmd_args:
+        cmd_args.extend(["--progress-file", str(PIPELINE_STATUS_PATH)])
+    cmd = [sys.executable, str(NBA_SCRIPT), *cmd_args]
+
+    _write_pipeline_status({
+        "success": True,
+        "busy": True,
+        "taskId": task_id,
+        "taskName": task_name,
+        "currentCommand": task_name,
+        "stage": "starting",
+        "message": f"Starting {task_name}.",
+        "startedAtUtc": started_at,
+        "updatedAtUtc": started_at,
+    })
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    _set_active_task(proc, task_id=task_id, task_name=task_name)
+
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout_sec or DEFAULT_TIMEOUT_SEC)
+        payload = _parse_nba_command_output(stdout, stderr, proc.returncode)
+    except subprocess.TimeoutExpired:
+        with _task_state_lock:
+            _current_task["cancelRequested"] = True
+        try:
+            proc.terminate()
+            proc.wait(timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        payload = {"success": False, "error": "Request timed out calling nba_mod.py."}
+        current = _read_pipeline_status()
+        current.update({
+            "taskId": task_id,
+            "taskName": task_name,
+            "currentCommand": task_name,
+            "busy": False,
+            "stage": "timeout",
+            "message": "Pipeline task timed out.",
+            "cancelRequested": False,
+            "finishedAtUtc": utc_now_iso(),
+            "updatedAtUtc": utc_now_iso(),
+        })
+        _write_pipeline_status(current)
+        return payload
+    finally:
+        _clear_active_task(task_id)
+
+    current = _read_pipeline_status()
+    cancel_requested = bool(current.get("cancelRequested"))
+    finished_at = utc_now_iso()
+
+    if cancel_requested:
+        payload = {
+            "success": False,
+            "error": "Pipeline task was cancelled.",
+        }
+        current.update({
+            "taskId": task_id,
+            "taskName": task_name,
+            "busy": False,
+            "stage": "cancelled",
+            "message": "Pipeline task was cancelled.",
+            "cancelRequested": True,
+            "finishedAtUtc": finished_at,
+            "updatedAtUtc": finished_at,
+        })
+    else:
+        current.update({
+            "taskId": task_id,
+            "taskName": task_name,
+            "busy": False,
+            "stage": "completed" if payload.get("success") else "failed",
+            "message": "Pipeline task finished." if payload.get("success") else payload.get("error", "Pipeline task failed."),
+            "cancelRequested": False,
+            "finishedAtUtc": finished_at,
+            "updatedAtUtc": finished_at,
+            "lastResult": payload,
+        })
+    _write_pipeline_status(current)
+    return payload
+
+
+_write_pipeline_status(_default_pipeline_status())
 
 
 class NbaRequestHandler(BaseHTTPRequestHandler):
@@ -341,8 +533,10 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                 return self._send_json(200, result)
 
             if path == "/api/pipeline_status":
-                locked = _long_running_lock.locked()
-                return self._send_json(200, {"success": True, "busy": locked})
+                return self._send_json(200, _read_pipeline_status())
+
+            if path == "/api/pipeline_cancel":
+                return self._send_json(200, _cancel_active_task())
 
             if path == "/api/roster_sweep":
                 if not _long_running_lock.acquire(blocking=False):
@@ -352,7 +546,10 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     args = ["roster_sweep"]
                     if date_str:
                         args.append(date_str)
-                    return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
+                    return self._send_json(
+                        200,
+                        _run_tracked_nba_command(args, task_name="roster_sweep", timeout_sec=LONG_TIMEOUT_SEC),
+                    )
                 finally:
                     _long_running_lock.release()
 
@@ -375,7 +572,10 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     args = ["daily_ops"]
                     if dry_run == "true":
                         args.append("--dry-run")
-                    return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
+                    return self._send_json(
+                        200,
+                        _run_tracked_nba_command(args, task_name="daily_ops", timeout_sec=LONG_TIMEOUT_SEC),
+                    )
                 finally:
                     _long_running_lock.release()
 
@@ -407,6 +607,42 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     from core.nba_bet_tracking import enrich_journal_clv
                     result = enrich_journal_clv()
                     return self._send_json(200, result)
+                except Exception as e:
+                    return self._send_json(200, {"success": False, "error": str(e)})
+
+            if path == "/api/line_movement":
+                player = (query.get("player") or [""])[0].strip()
+                stat_q = (query.get("stat") or [""])[0].strip().lower()
+                date_str = (query.get("date") or [""])[0].strip()
+                if not player or not stat_q:
+                    return self._send_json(400, {"success": False, "error": "player and stat query params required."})
+                try:
+                    from core.nba_line_store import LineStore
+                    ls = LineStore()
+                    if not date_str:
+                        from datetime import datetime as _dt, timezone as _tz
+                        date_str = _dt.now(_tz.utc).strftime("%Y-%m-%d")
+                    snaps = ls.get_snapshots(date_str, stat=stat_q, player_name=player)
+                    # Group by book for multi-series chart
+                    by_book = {}
+                    for s in snaps:
+                        bk = s.get("book") or s.get("bookmaker") or "unknown"
+                        if bk not in by_book:
+                            by_book[bk] = []
+                        by_book[bk].append({
+                            "timestamp": s.get("timestamp_utc"),
+                            "line": s.get("line"),
+                            "overOdds": s.get("over_odds"),
+                            "underOdds": s.get("under_odds"),
+                        })
+                    return self._send_json(200, {
+                        "success": True,
+                        "player": player,
+                        "stat": stat_q,
+                        "date": date_str,
+                        "books": by_book,
+                        "totalSnapshots": len(snaps),
+                    })
                 except Exception as e:
                     return self._send_json(200, {"success": False, "error": str(e)})
 

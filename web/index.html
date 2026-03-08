@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Cφurtside</title>
   <link rel="stylesheet" href="/styles.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script>if(typeof Chart==='undefined'){document.write('<script src="/vendor/chart.min.js"><\/script>')}</script>
   <script defer src="/vendor/alpine.min.js"></script>
   <script type="module" src="/app.js"></script>
 </head>
@@ -125,7 +127,7 @@
         <p class="section-desc">
           <strong>Collect Lines</strong> pulls live odds from sportsbooks into the line store.
           <strong>Roster Sweep</strong> runs every player through the EV model and logs qualifying signals (~10 min).
-          <strong>Run Full Pipeline</strong> executes both steps plus builds closing lines — the complete daily workflow in one click.
+          <strong>Run Full Pipeline</strong> runs the canonical daily workflow: collect lines, roster sweep, then refresh Best Today.
         </p>
 
         <div class="form-grid" style="margin-bottom:14px">
@@ -146,7 +148,29 @@
             <span x-show="!busy">Run Full Pipeline</span>
             <span x-show="busy">Working...</span>
           </button>
+          <button class="btn btn-secondary" @click="cancelPipeline()" x-show="busy">
+            Cancel Running Task
+          </button>
         </div>
+
+        <template x-if="pipelineStatus && (busy || pipelineStatus.taskName || pipelineStatus.currentCommand || pipelineStatus.scanned || pipelineStatus.logged)">
+          <div class="result">
+            <h4>Pipeline Status</h4>
+            <div class="metric-grid">
+              <article class="metric"><h4>Task</h4><p x-text="pipelineStatus.taskName || pipelineStatus.currentCommand || 'idle'"></p></article>
+              <article class="metric"><h4>Stage</h4><p x-text="pipelineStatus.stage || 'idle'"></p></article>
+              <article class="metric"><h4>Scanned</h4><p x-text="pipelineStatus.scanned ?? 'n/a'"></p></article>
+              <article class="metric"><h4>Total</h4><p x-text="pipelineStatus.total ?? 'n/a'"></p></article>
+              <article class="metric"><h4>Logged</h4><p x-text="pipelineStatus.logged ?? 'n/a'"></p></article>
+              <article class="metric"><h4>Leans</h4><p x-text="pipelineStatus.leansLogged ?? 'n/a'"></p></article>
+            </div>
+            <p class="hint" x-text="pipelineStatus.message || ''"></p>
+            <p class="hint" x-show="pipelineStatus.currentPlayer">
+              Current: <span x-text="pipelineStatus.currentPlayer"></span>
+              <span x-show="pipelineStatus.currentStat"> / <span x-text="pipelineStatus.currentStat"></span></span>
+            </p>
+          </div>
+        </template>
 
         <!-- Collect Lines Result -->
         <template x-if="collectResult">
@@ -196,8 +220,7 @@
       x-transition:enter="tab-panel-enter" x-transition:enter-start="opacity: 0" x-transition:enter-end="opacity: 1">
       <div class="panel">
         <p class="section-desc">
-          <strong>Best EV Today</strong> shows all policy-qualified signals from today's roster sweep, ranked by expected value.
-          These are real candidates — they passed the stat whitelist (pts + ast), edge threshold (8%+), confidence floor (60%+), and bin filter (0 or 9 only).
+          <strong>Best EV Today</strong> shows all logged signals ranked by expected value. Rows marked <em>OK</em> in the Status column pass the betting policy (stat whitelist + bin filter).
           <strong>Model Leans</strong> below are signals that passed the model but were blocked by policy — useful for research but not for betting.
         </p>
         <div class="panel-head">
@@ -224,7 +247,7 @@
             <div class="metric-grid">
               <article class="metric"><h4>Date</h4><p x-text="bestResult.date || 'n/a'"></p></article>
               <article class="metric"><h4>Logged</h4><p x-text="bestResult.entriesLogged ?? 0"></p></article>
-              <article class="metric"><h4>Ranked</h4><p x-text="bestResult.rankedCount ?? 0"></p></article>
+              <article class="metric"><h4>Ranked</h4><p x-text="bestResult.totalRanked ?? 0"></p></article>
               <article class="metric"><h4>Positive Edge</h4><p x-text="bestResult.positiveEdgeCount ?? 0"></p></article>
             </div>
             <h4 style="margin-top:14px">Top EV Plays</h4>
@@ -262,17 +285,23 @@
                 <div class="row-detail-grid">
                   <div class="detail-item"><span class="detail-label">Prob Over</span><span class="detail-value" x-text="pct(r.probOver)"></span></div>
                   <div class="detail-item"><span class="detail-label">Prob Bin</span><span class="detail-value" x-text="r.probBin ?? 'n/a'"></span></div>
-                  <div class="detail-item"><span class="detail-label">Book</span><span class="detail-value" x-text="r.bookmaker || r.book || 'n/a'"></span></div>
+                  <div class="detail-item"><span class="detail-label">Book</span><span class="detail-value" x-text="(r.recommendedSide === 'over' ? r.bestOverBook : r.bestUnderBook) || r.bestOverBook || r.bestUnderBook || 'n/a'"></span></div>
                   <div class="detail-item"><span class="detail-label">Confidence</span><span class="detail-value" x-text="pct(r.confidence)"></span></div>
                   <div class="detail-item"><span class="detail-label">Distribution</span><span class="detail-value" x-text="r.distributionMode || 'normal'"></span></div>
                   <div class="detail-item"><span class="detail-label">Team</span><span class="detail-value" x-text="r.playerTeamAbbr || r.teamAbbr || 'n/a'"></span></div>
                   <div class="detail-item"><span class="detail-label">Opponent</span><span class="detail-value" x-text="r.opponentAbbr || 'n/a'"></span></div>
-                  <div class="detail-item"><span class="detail-label">Edge</span><span class="detail-value" x-text="fmt(r.edge, 4)"></span></div>
+                  <div class="detail-item"><span class="detail-label">EV%</span><span class="detail-value" x-text="fmt(r.recommendedEvPct, 2)"></span></div>
                 </div>
               </div>
             </template>
           </div>
         </template>
+      </div>
+
+      <!-- Edge/EV Scatter Chart -->
+      <div class="panel" style="margin-top:16px" x-show="bestResult && sortedBestRows().length > 0" x-cloak>
+        <div class="panel-head"><h2>Edge vs EV Scatter</h2></div>
+        <div class="chart-container chart-wide"><canvas id="chartEdgeScatter"></canvas></div>
       </div>
 
       <!-- Model Leans -->
@@ -467,6 +496,37 @@
                   <p x-text="(propResult.referenceBook.book || 'n/a') + ' | No-Vig O ' + pctAlready(propResult.referenceBook.noVigOver * 100)"></p>
                 </article>
               </template>
+              <template x-if="propResult.impliedProjection != null">
+                <article class="metric"><h4>Implied Projection</h4>
+                  <p x-text="fmt(propResult.impliedProjection, 1)"></p>
+                </article>
+              </template>
+              <template x-if="propResult.modelMarketDelta != null">
+                <article class="metric" :class="propResult.modelMarketDelta > 0 ? 'ev-over' : 'ev-under'">
+                  <h4>Model vs Market</h4>
+                  <p x-text="(propResult.modelMarketDelta > 0 ? '+' : '') + fmt(propResult.modelMarketDelta, 1)"></p>
+                </article>
+              </template>
+              <template x-if="propResult.usageAdjustment">
+                <article class="metric"><h4>Usage Adj</h4>
+                  <p x-text="'x' + fmt(propResult.usageAdjustment.effectiveMultiplier, 3)"></p>
+                </article>
+              </template>
+              <template x-if="propResult.intradayClv">
+                <article class="metric" :class="propResult.intradayClv.direction === 'favorable' ? 'ev-over' : propResult.intradayClv.direction === 'against' ? 'ev-under' : ''">
+                  <h4>Line Movement</h4>
+                  <p x-text="(propResult.intradayClv.delta > 0 ? '+' : '') + propResult.intradayClv.delta + ' (' + propResult.intradayClv.direction + ')'"></p>
+                </article>
+              </template>
+            </div>
+
+            <!-- Charts -->
+            <div class="chart-row">
+              <div class="chart-container"><canvas id="chartDistribution"></canvas></div>
+              <div class="chart-container"><canvas id="chartCalibration"></canvas></div>
+            </div>
+            <div class="chart-row">
+              <div class="chart-container chart-wide"><canvas id="chartLineMovement"></canvas></div>
             </div>
 
             <!-- LLM Analysis -->

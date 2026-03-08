@@ -1,5 +1,6 @@
 // Picks tab — best_today table + top_picks + best parlay + LLM rundown
 import { apiGet, escapeHtml, fmt, pct, statusPill, toast, evColorClass, exportCsv } from './api.js';
+import { renderEdgeScatter } from './charts.js';
 
 export default function () {
   return {
@@ -44,6 +45,10 @@ export default function () {
           return;
         }
         this.bestResult = data;
+        this.$nextTick(() => {
+          const rows = this.sortedBestRows();
+          if (rows.length) renderEdgeScatter('chartEdgeScatter', rows);
+        });
       } catch (err) {
         this.bestError = `Failed: ${err.message}`;
       } finally {
@@ -108,7 +113,7 @@ export default function () {
 
     topRows() {
       if (!this.topResult) return [];
-      const picks = this.topResult.picks || this.topResult.top || [];
+      const picks = this.topResult.topPicks || this.topResult.picks || this.topResult.top || [];
       return Array.isArray(picks) ? picks : [];
     },
 

@@ -271,6 +271,10 @@ def compute_ev(
     else:
         prob_over, prob_under, prob_push = 0.5, 0.5, 0.0
 
+    # Store pre-calibration probabilities for UI visualization (Feature 5).
+    prob_over_raw = prob_over
+    prob_under_raw = prob_under
+
     # Apply per-stat temperature-scaling calibration (if calibration file loaded).
     # Skipped in reference mode (sharp-book probs are already well-calibrated).
     # #4: Per-bin temperature takes precedence over global stat temperature.
@@ -348,6 +352,8 @@ def compute_ev(
         "probOver": safe_round(prob_over, 4),
         "probUnder": safe_round(prob_under, 4),
         "probPush": safe_round(prob_push, 4),
+        "probOverRaw": safe_round(prob_over_raw, 4),
+        "probUnderRaw": safe_round(prob_under_raw, 4),
         "noVigOver": safe_round(no_vig_over, 4),
         "noVigUnder": safe_round(no_vig_under, 4),
         "vig": safe_round(vig, 4),

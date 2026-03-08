@@ -128,9 +128,17 @@ def _write_journal_entries(entries):
 
 def _append_journal_entry(entry):
     _ensure_data_dir()
+    existing_entries = _load_journal_entries()
+    new_key = _entry_key(entry)
+    key_exists = any(_entry_key(existing) == new_key for existing in existing_entries)
+    if key_exists:
+        _write_journal_entries(_dedupe_latest(existing_entries + [entry]))
+        return {"success": True, "isDuplicate": True, "journalPath": str(JOURNAL_PATH)}
+
     with JOURNAL_PATH.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, separators=(",", ":"), ensure_ascii=False))
         f.write("\n")
+    return {"success": True, "isDuplicate": False, "journalPath": str(JOURNAL_PATH)}
 
 
 def _entry_key(entry):
@@ -258,6 +266,8 @@ def log_prop_ev_entry(
         "probOver": _as_float(ev.get("probOver")),
         "probUnder": _as_float(ev.get("probUnder")),
         "probPush": _as_float(ev.get("probPush"), 0.0),
+        "distributionMode": str(ev.get("distributionMode", "normal")),
+        "confidence": _as_float(projection.get("confidence")),
         "evOverPct": _as_float(over.get("evPercent")),
         "evUnderPct": _as_float(under.get("evPercent")),
         "overVerdict": str(over.get("verdict", "")),
@@ -289,8 +299,13 @@ def log_prop_ev_entry(
         entry["minutesCapReason"] = str(minutes_cap_reason)
 
     try:
-        _append_journal_entry(entry)
-        return {"success": True, "entryId": entry["entryId"], "journalPath": str(JOURNAL_PATH)}
+        append_result = _append_journal_entry(entry)
+        return {
+            "success": True,
+            "entryId": entry["entryId"],
+            "journalPath": str(JOURNAL_PATH),
+            "isDuplicate": bool(append_result.get("isDuplicate")),
+        }
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -608,11 +623,12 @@ def _load_line_history(date_str):
     return lookup
 
 
-def _get_playing_teams_today():
-    """Return set of uppercase team abbreviations with a game today."""
+def _get_playing_teams_today(target_date=None):
+    """Return set of uppercase team abbreviations with a game on target_date (default today)."""
+    target = str(target_date or _today_local_str())
     try:
         from .nba_data_collection import get_todays_games
-        result = get_todays_games()
+        result = get_todays_games(game_date=target)
         teams = set()
         for g in result.get("games", []):
             h = g.get("homeTeam", {}).get("abbreviation", "")
@@ -621,9 +637,26 @@ def _get_playing_teams_today():
                 teams.add(h.upper())
             if a:
                 teams.add(a.upper())
-        return teams
+        if teams:
+            return teams
     except Exception:
-        return None  # graceful fallback — skip filter
+        pass
+
+    try:
+        line_history = _load_line_history(target)
+        teams = set()
+        for snaps in (line_history or {}).values():
+            for snap in snaps or []:
+                for field in ("home_team_abbr", "away_team_abbr", "player_team_abbr", "opponent_abbr"):
+                    team = str((snap or {}).get(field) or "").upper()
+                    if team:
+                        teams.add(team)
+        if teams:
+            return teams
+    except Exception:
+        pass
+
+    return None  # graceful fallback — skip filter
 
 
 def _sqlite_fallback_entries(target):
@@ -672,6 +705,8 @@ def _sqlite_fallback_entries(target):
                     "recommendedOdds": over_odds if rec_side == "over" else under_odds,
                     "probOver": _as_float(sig.get("prob_over")),
                     "probUnder": _as_float(sig.get("prob_under")),
+                    "bestOverBook": sig.get("book") if rec_side == "over" else None,
+                    "bestUnderBook": sig.get("book") if rec_side == "under" else None,
                     "settled": False,
                     "source": "sqlite_fallback",
                 })
@@ -681,16 +716,16 @@ def _sqlite_fallback_entries(target):
 
 
 def best_plays_for_date(date_str=None, limit=15, unique_props=True):
+    from .nba_model_ml_training import DEFAULT_OUTCOME_ML_MODEL_PATH, score_rows_with_outcome_ml
+
     target = str(date_str or _today_local_str())
     entries = _load_journal_entries()
     filtered = [e for e in entries if str(e.get("pickDate")) == target]
-    # Fallback: if JSONL has no entries for today, try SQLite (primary store)
-    if not filtered:
-        filtered = _sqlite_fallback_entries(target)
-    deduped = _dedupe_latest(filtered)
+    sqlite_entries = _sqlite_fallback_entries(target)
+    deduped = _dedupe_latest(filtered + sqlite_entries)
 
     # Filter out phantom signals: players whose teams aren't playing today
-    playing_teams = _get_playing_teams_today()
+    playing_teams = _get_playing_teams_today(target_date=target)
     if playing_teams is not None:
         valid = []
         for e in deduped:
@@ -755,6 +790,7 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
             "createdAtLocal": e.get("createdAtLocal"),
             "playerId": e.get("playerId"),
             "playerName": e.get("playerName"),
+            "playerTeamAbbr": e.get("playerTeamAbbr"),
             "stat": e.get("stat"),
             "line": e.get("line"),
             "opponentAbbr": e.get("opponentAbbr"),
@@ -763,6 +799,15 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
             "recommendedEvPct": e.get("recommendedEvPct"),
             "projection": e.get("projection"),
             "recommendedOdds": e.get("recommendedOdds"),
+            "overOdds": e.get("overOdds"),
+            "underOdds": e.get("underOdds"),
+            "probOver": e.get("probOver"),
+            "probUnder": e.get("probUnder"),
+            "probBin": max(0, min(9, int(float(e.get("probOver") or 0.5) * 10))),
+            "bestOverBook": e.get("bestOverBook"),
+            "bestUnderBook": e.get("bestUnderBook"),
+            "distributionMode": e.get("distributionMode"),
+            "confidence": e.get("confidence"),
             "settled": e.get("settled"),
             "result": e.get("result"),
             "policyQualified": _policy_check(e) is None,
@@ -792,8 +837,34 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
                             snaps = v
                             break
             if snaps:
-                open_line = _as_float(snaps[0].get("line"))
-                curr_line = _as_float(snaps[-1].get("line"))
+                # Fix 3: Side-aware book selection + book+line filtering
+                rec_side = str(row.get("recommendedSide") or "").lower()
+                if rec_side == "over":
+                    row_book = str(row.get("bestOverBook") or "").lower()
+                elif rec_side == "under":
+                    row_book = str(row.get("bestUnderBook") or "").lower()
+                else:
+                    row_book = str(row.get("bestOverBook") or row.get("bestUnderBook") or "").lower()
+                row_line = _as_float(row.get("line"))
+
+                # Three-level cascade: book+line → book-only → unfiltered
+                use_snaps = snaps
+                if row_book:
+                    book_line_snaps = [
+                        s for s in snaps
+                        if str(s.get("book") or "").lower() == row_book
+                        and (row_line is None or _as_float(s.get("line")) == row_line)
+                    ]
+                    if not book_line_snaps:
+                        book_line_snaps = [
+                            s for s in snaps
+                            if str(s.get("book") or "").lower() == row_book
+                        ]
+                    if book_line_snaps:
+                        use_snaps = book_line_snaps
+
+                open_line = _as_float(use_snaps[0].get("line"))
+                curr_line = _as_float(use_snaps[-1].get("line"))
                 if open_line is not None and curr_line is not None:
                     delta = safe_round(curr_line - open_line, 2)
                     side  = str(row.get("recommendedSide") or "").lower()
@@ -810,7 +881,7 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
                         "currentLine":   curr_line,
                         "lineDelta":     delta,
                         "favorable":     favorable,
-                        "snapshotCount": len(snaps),
+                        "snapshotCount": len(use_snaps),
                     }
 
     # #3/#9: Line movement conflict — raise effective edge threshold to 0.10 when
@@ -842,6 +913,21 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
 
     top_rows.sort(key=_clv_tier)
 
+    outcome_model_meta = {"loaded": False}
+    score_result = score_rows_with_outcome_ml(top_rows, model_path=DEFAULT_OUTCOME_ML_MODEL_PATH)
+    if score_result.get("success"):
+        top_rows = score_result.get("rows") or top_rows
+        outcome_model_meta = {
+            "loaded": bool(score_result.get("loaded")),
+            "modelPath": score_result.get("modelPath"),
+            "modelType": score_result.get("modelType"),
+        }
+    elif score_result.get("error") and "not found" not in str(score_result.get("error")).lower():
+        outcome_model_meta = {
+            "loaded": False,
+            "error": score_result.get("error"),
+        }
+
     positive_edges = sum(1 for e in ranked if (_as_float(e.get("recommendedEvPct"), 0.0) or 0.0) > 0)
     policy_qualified = [r for r in top_rows if r.get("policyQualified")]
 
@@ -872,6 +958,9 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
 
     # Load model leans for the target date from lean_bets.jsonl
     model_leans = _load_leans_for_date(target, limit=limit_val)
+    lean_score_result = score_rows_with_outcome_ml(model_leans, model_path=DEFAULT_OUTCOME_ML_MODEL_PATH)
+    if lean_score_result.get("success"):
+        model_leans = lean_score_result.get("rows") or model_leans
 
     return {
         "success": True,
@@ -879,6 +968,7 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
         "totalRanked": len(ranked),
         "positiveEdgeCount": positive_edges,
         "entriesLogged": len(top_rows),
+        "outcomeModel": outcome_model_meta,
         "policyQualified": policy_qualified,
         "topOffers": top_rows,
         "modelLeans": model_leans,

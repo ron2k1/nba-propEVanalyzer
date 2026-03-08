@@ -45,6 +45,7 @@ def _handle_backtest(argv):
     match_live = False
     no_blend = False
     no_gates = False
+    line_timing = "closing"
     while idx < len(argv):
         token = str(argv[idx]).strip().lower()
         if token == "--model" and idx + 1 < len(argv):
@@ -121,6 +122,10 @@ def _handle_backtest(argv):
             no_gates = True
             idx += 1
             continue
+        if token == "--line-timing" and idx + 1 < len(argv):
+            line_timing = str(argv[idx + 1]).strip().lower()
+            idx += 2
+            continue
         return {
             "error": (
                 "Invalid backtest arguments. "
@@ -142,7 +147,8 @@ def _handle_backtest(argv):
                           emit_bets=emit_bets,
                           emit_all=emit_all,
                           match_live=match_live,
-                          no_blend=no_blend, no_gates=no_gates)
+                          no_blend=no_blend, no_gates=no_gates,
+                          line_timing=line_timing)
 
     # Write bet records to JSONL file if path specified
     if emit_bets_path and result.get("bets"):

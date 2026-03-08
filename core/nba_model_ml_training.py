@@ -6,18 +6,54 @@ import json
 import os
 import pickle
 import shutil
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 
 from .nba_data_collection import safe_round
-from .nba_ev_engine import american_to_implied_prob, compute_ev
+from .nba_ev_engine import american_to_decimal, american_to_implied_prob, compute_ev
 from .nba_prop_engine import compute_prop_ev
 
 DEFAULT_PROJECTION_ML_MODEL_PATH = str(
     (Path(__file__).resolve().parent.parent / "models" / "production_projection_model.pkl")
 )
+DEFAULT_OUTCOME_ML_MODEL_PATH = str(
+    (Path(__file__).resolve().parent.parent / "models" / "production_outcome_model.pkl")
+)
+
+_OUTCOME_STAT_VALUES = (
+    "pts",
+    "reb",
+    "ast",
+    "pra",
+    "pr",
+    "pa",
+    "ra",
+    "fg3m",
+    "stl",
+    "blk",
+    "tov",
+    "other",
+)
+_DEFAULT_OUTCOME_FEATURE_KEYS = [
+    "projection",
+    "line",
+    "lineDiff",
+    "absLineDiff",
+    "probOver",
+    "probUnder",
+    "probChosenSide",
+    "probOtherSide",
+    "confidence",
+    "edgeUnit",
+    "absEdgeUnit",
+    "chosenOdds",
+    "chosenImpliedProb",
+    "bin",
+    "sideIsOver",
+    "usedRealLine",
+] + [f"statIs_{stat_key}" for stat_key in _OUTCOME_STAT_VALUES]
 
 
 def _to_float(value, default=None):
@@ -42,6 +78,167 @@ def _parse_date_any(value):
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except Exception:
         return None
+
+
+def _first_present(row, *keys):
+    for key in keys:
+        if key in (row or {}) and (row or {}).get(key) is not None:
+            return row.get(key)
+    return None
+
+
+def _to_bool01(value, default=0.0):
+    if value is None:
+        return float(default)
+    if isinstance(value, bool):
+        return 1.0 if value else 0.0
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "win", "over"}:
+        return 1.0
+    if text in {"0", "false", "no", "n", "loss", "under"}:
+        return 0.0
+    fv = _to_float(value)
+    if fv is None:
+        return float(default)
+    return 1.0 if fv > 0 else 0.0
+
+
+def _normalize_stat_key(value):
+    stat = str(value or "").strip().lower()
+    if not stat:
+        return "other"
+    return stat if stat in _OUTCOME_STAT_VALUES[:-1] else "other"
+
+
+def default_outcome_feature_keys():
+    return list(_DEFAULT_OUTCOME_FEATURE_KEYS)
+
+
+def _coerce_prob_pair(row, side=None):
+    prob_over = _to_float(_first_present(row, "probOver", "prob_over"))
+    prob_under = _to_float(_first_present(row, "probUnder", "prob_under"))
+    confidence = _to_float(_first_present(row, "confidence"))
+
+    if prob_over is None and prob_under is not None:
+        prob_over = 1.0 - prob_under
+    if prob_under is None and prob_over is not None:
+        prob_under = 1.0 - prob_over
+
+    if prob_over is None and confidence is not None:
+        side_key = str(side or "").strip().lower()
+        if side_key == "over":
+            prob_over = confidence
+            prob_under = 1.0 - confidence
+        elif side_key == "under":
+            prob_under = confidence
+            prob_over = 1.0 - confidence
+
+    if prob_over is None or prob_under is None:
+        return None, None
+
+    prob_over = min(max(float(prob_over), 0.0), 1.0)
+    prob_under = min(max(float(prob_under), 0.0), 1.0)
+    total = prob_over + prob_under
+    if total <= 0:
+        return None, None
+    return prob_over / total, prob_under / total
+
+
+def _row_edge_unit(row, side_is_over):
+    direct_edge = _to_float(_first_present(row, "edge", "recommended_edge"))
+    if direct_edge is not None:
+        return float(direct_edge)
+
+    rec_ev_pct = _to_float(_first_present(row, "recommendedEvPct", "recommended_ev_pct"))
+    if rec_ev_pct is not None:
+        return float(rec_ev_pct) / 100.0
+
+    side_key = "over" if bool(side_is_over) else "under"
+    side_edge = _to_float(_first_present(row, f"edge_{side_key}", f"edge{side_key.title()}"))
+    if side_edge is not None:
+        return float(side_edge)
+
+    side_ev_pct = _to_float(_first_present(row, f"ev{side_key.title()}Pct", f"ev_{side_key}_pct"))
+    if side_ev_pct is not None:
+        return float(side_ev_pct) / 100.0
+
+    return 0.0
+
+
+def build_outcome_feature_row(row):
+    stat_key = _normalize_stat_key(_first_present(row, "stat", "stat_key"))
+    side_raw = _first_present(row, "recommendedSide", "recommended_side", "side")
+    side = str(side_raw or "").strip().lower()
+
+    projection = _to_float(_first_present(row, "projection", "proj"))
+    line = _to_float(_first_present(row, "line", "lineAtBet", "line_at_bet"))
+    if projection is None or line is None:
+        return None
+
+    prob_over, prob_under = _coerce_prob_pair(row, side=side)
+    if prob_over is None or prob_under is None:
+        return None
+
+    if side not in {"over", "under"}:
+        side = "over" if prob_over >= prob_under else "under"
+    side_is_over = 1.0 if side == "over" else 0.0
+
+    chosen_prob = prob_over if side_is_over >= 0.5 else prob_under
+    other_prob = prob_under if side_is_over >= 0.5 else prob_over
+    confidence = _to_float(_first_present(row, "confidence"), max(chosen_prob, other_prob))
+    edge_unit = _row_edge_unit(row, side_is_over >= 0.5)
+
+    chosen_odds = _to_float(_first_present(row, "odds", "recommendedOdds", "recommended_odds"))
+    if chosen_odds is None:
+        over_odds = _to_float(_first_present(row, "overOdds", "over_odds"))
+        under_odds = _to_float(_first_present(row, "underOdds", "under_odds"))
+        chosen_odds = over_odds if side_is_over >= 0.5 else under_odds
+    implied_chosen = american_to_implied_prob(chosen_odds) if chosen_odds is not None else 0.0
+
+    bin_idx = _to_float(_first_present(row, "bin"))
+    if bin_idx is None:
+        bin_idx = max(0, min(9, int(float(prob_over) * 10)))
+
+    line_diff = float(projection) - float(line)
+    feature_row = {
+        "projection": float(projection),
+        "line": float(line),
+        "lineDiff": float(line_diff),
+        "absLineDiff": abs(float(line_diff)),
+        "probOver": float(prob_over),
+        "probUnder": float(prob_under),
+        "probChosenSide": float(chosen_prob),
+        "probOtherSide": float(other_prob),
+        "confidence": float(confidence if confidence is not None else max(chosen_prob, other_prob)),
+        "edgeUnit": float(edge_unit),
+        "absEdgeUnit": abs(float(edge_unit)),
+        "chosenOdds": float(chosen_odds if chosen_odds is not None else 0.0),
+        "chosenImpliedProb": float(implied_chosen if implied_chosen is not None else 0.0),
+        "bin": float(bin_idx),
+        "sideIsOver": float(side_is_over),
+        "usedRealLine": _to_bool01(_first_present(row, "usedRealLine", "used_real_line"), default=1.0),
+    }
+    for candidate in _OUTCOME_STAT_VALUES:
+        feature_row[f"statIs_{candidate}"] = 1.0 if stat_key == candidate else 0.0
+    return feature_row
+
+
+def _outcome_label_from_row(row):
+    outcome = str(_first_present(row, "outcome", "result", "settlementStatus", "settlement_status") or "").strip().lower()
+    if outcome in {"win", "won"}:
+        return 1
+    if outcome in {"loss", "lose", "lost"}:
+        return 0
+    if outcome in {"push", "void", "pending", "ungraded", "phantom_no_game", "cancelled"}:
+        return None
+
+    pnl = _to_float(_first_present(row, "pnl", "pnl1u", "pnl_units"))
+    if pnl is not None:
+        if pnl > 1e-9:
+            return 1
+        if pnl < -1e-9:
+            return 0
+    return None
 
 
 def _time_split_rows(rows, date_key="pickDate", holdout_frac=0.2, min_holdout=50):
@@ -106,6 +303,46 @@ def _regression_metrics(y_true, y_pred):
         "rmse": safe_round(rmse, 6),
         "r2": safe_round(r2, 6) if r2 is not None else None,
     }
+
+
+def _classification_metrics(y_true, prob_win):
+    y_true = np.asarray(y_true, dtype=int)
+    prob_win = np.asarray(prob_win, dtype=float)
+    if y_true.size == 0:
+        return {
+            "count": 0,
+            "positiveRate": None,
+            "accuracy": None,
+            "precision": None,
+            "recall": None,
+            "brier": None,
+            "logLoss": None,
+            "rocAuc": None,
+        }
+
+    prob_win = np.clip(prob_win, 1e-6, 1.0 - 1e-6)
+    pred = (prob_win >= 0.5).astype(int)
+    metrics = {
+        "count": int(y_true.size),
+        "positiveRate": safe_round(float(np.mean(y_true)), 6),
+        "accuracy": safe_round(float(np.mean(pred == y_true)), 6),
+        "brier": safe_round(float(np.mean((prob_win - y_true) ** 2)), 6),
+        "logLoss": safe_round(float(-np.mean(y_true * np.log(prob_win) + (1 - y_true) * np.log(1.0 - prob_win))), 6),
+    }
+
+    tp = float(np.sum((pred == 1) & (y_true == 1)))
+    fp = float(np.sum((pred == 1) & (y_true == 0)))
+    fn = float(np.sum((pred == 0) & (y_true == 1)))
+    metrics["precision"] = safe_round(tp / (tp + fp), 6) if (tp + fp) > 0 else None
+    metrics["recall"] = safe_round(tp / (tp + fn), 6) if (tp + fn) > 0 else None
+
+    try:
+        from sklearn.metrics import roc_auc_score
+
+        metrics["rocAuc"] = safe_round(float(roc_auc_score(y_true, prob_win)), 6)
+    except Exception:
+        metrics["rocAuc"] = None
+    return metrics
 
 
 def infer_projection_feature_keys(rows, target_key="actual", min_non_null=10):
@@ -254,6 +491,241 @@ def _fit_projection_estimator(X_train, y_train, model_type="gradient_boosting", 
 
     est.fit(X_train, y_train)
     return est, None
+
+
+def _prepare_xy_outcome(rows, feature_keys):
+    X = []
+    y = []
+    kept = []
+    for raw_row in rows:
+        label = _outcome_label_from_row(raw_row)
+        if label is None:
+            continue
+        feature_row = build_outcome_feature_row(raw_row)
+        if not feature_row:
+            continue
+        vec = []
+        bad = False
+        for key in feature_keys:
+            val = _to_float(feature_row.get(key))
+            if val is None:
+                bad = True
+                break
+            vec.append(val)
+        if bad:
+            continue
+        X.append(vec)
+        y.append(int(label))
+        kept.append(raw_row)
+    return np.array(X, dtype=float), np.array(y, dtype=int), kept
+
+
+def _fit_outcome_classifier(X_train, y_train, model_type="gradient_boosting", random_state=42):
+    mt = str(model_type or "gradient_boosting").lower().strip()
+
+    if mt in {"tabpfn"}:
+        try:
+            from tabpfn import TabPFNClassifier
+        except ImportError:
+            return None, (
+                "tabpfn is required for model_type='tabpfn'. "
+                "Install with: .\\.venv\\Scripts\\python.exe -m pip install tabpfn"
+            )
+        est = TabPFNClassifier(random_state=random_state)
+        est.fit(X_train, y_train)
+        return est, None
+
+    if mt in {"xgboost", "xgb"}:
+        try:
+            import xgboost as xgb
+        except ImportError:
+            return None, (
+                "xgboost is required for model_type='xgboost'. "
+                "Install with: .\\.venv\\Scripts\\python.exe -m pip install xgboost"
+            )
+        est = xgb.XGBClassifier(
+            n_estimators=300,
+            max_depth=6,
+            learning_rate=0.05,
+            subsample=0.85,
+            colsample_bytree=0.85,
+            random_state=random_state,
+            n_jobs=-1,
+            eval_metric="logloss",
+        )
+        est.fit(X_train, y_train)
+        return est, None
+
+    if mt in {"lightgbm", "lgb"}:
+        try:
+            import lightgbm as lgb
+        except ImportError:
+            return None, (
+                "lightgbm is required for model_type='lightgbm'. "
+                "Install with: .\\.venv\\Scripts\\python.exe -m pip install lightgbm"
+            )
+        est = lgb.LGBMClassifier(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=6,
+            random_state=random_state,
+            n_jobs=-1,
+            verbose=-1,
+        )
+        est.fit(X_train, y_train)
+        return est, None
+
+    try:
+        from sklearn.ensemble import (
+            GradientBoostingClassifier,
+            HistGradientBoostingClassifier,
+            RandomForestClassifier,
+        )
+        from sklearn.linear_model import LogisticRegression
+    except Exception:
+        return None, (
+            "scikit-learn is required for train_outcome_ml. "
+            "Install with: .\\.venv\\Scripts\\python.exe -m pip install scikit-learn"
+        )
+
+    if mt in {"gbc", "gradient_boosting", "gb"}:
+        est = GradientBoostingClassifier(
+            n_estimators=150,
+            learning_rate=0.05,
+            max_depth=3,
+            random_state=random_state,
+        )
+    elif mt in {"hist_gbc", "hgbc", "hist_gradient_boosting"}:
+        est = HistGradientBoostingClassifier(
+            max_iter=250,
+            learning_rate=0.05,
+            max_leaf_nodes=31,
+            min_samples_leaf=40,
+            random_state=random_state,
+        )
+    elif mt in {"rf", "random_forest"}:
+        est = RandomForestClassifier(
+            n_estimators=400,
+            min_samples_leaf=2,
+            random_state=random_state,
+            n_jobs=-1,
+        )
+    elif mt in {"logistic", "logreg"}:
+        est = LogisticRegression(
+            max_iter=1000,
+            random_state=random_state,
+        )
+    else:
+        return None, (
+            f"Unsupported model_type '{model_type}'. Use gradient_boosting|hist_gbc|xgboost|"
+            "lightgbm|random_forest|logistic|tabpfn."
+        )
+
+    est.fit(X_train, y_train)
+    return est, None
+
+
+def train_outcome_ml_from_file(
+    data_path,
+    feature_keys=None,
+    holdout_frac=0.2,
+    min_holdout=250,
+    model_type="gradient_boosting",
+    date_key="date",
+    output_model_path=None,
+):
+    rows_result = load_training_rows(data_path)
+    if not rows_result.get("success"):
+        return rows_result
+    rows = rows_result["rows"]
+    if len(rows) < 500:
+        return {"success": False, "error": f"Need at least 500 rows, found {len(rows)}."}
+
+    if not feature_keys:
+        feature_keys = default_outcome_feature_keys()
+    if not feature_keys:
+        return {"success": False, "error": "Could not infer usable outcome feature keys."}
+
+    train_rows, hold_rows = _time_split_rows(
+        rows,
+        date_key=date_key,
+        holdout_frac=holdout_frac,
+        min_holdout=min_holdout,
+    )
+    X_train, y_train, kept_train = _prepare_xy_outcome(train_rows, feature_keys)
+    X_hold, y_hold, kept_hold = _prepare_xy_outcome(hold_rows, feature_keys)
+    if len(y_train) < 200 or len(y_hold) < 50:
+        return {
+            "success": False,
+            "error": "Insufficient valid rows after feature/label filtering.",
+            "trainValid": int(len(y_train)),
+            "holdoutValid": int(len(y_hold)),
+        }
+    if len(set(y_train.tolist())) < 2 or len(set(y_hold.tolist())) < 2:
+        return {
+            "success": False,
+            "error": "Need both win and loss classes in train and holdout splits.",
+            "trainClassCounts": {
+                "wins": int(np.sum(y_train == 1)),
+                "losses": int(np.sum(y_train == 0)),
+            },
+            "holdoutClassCounts": {
+                "wins": int(np.sum(y_hold == 1)),
+                "losses": int(np.sum(y_hold == 0)),
+            },
+        }
+
+    est, err = _fit_outcome_classifier(X_train, y_train, model_type=model_type)
+    if err:
+        return {"success": False, "error": err}
+
+    train_prob = est.predict_proba(X_train)[:, 1]
+    hold_prob = est.predict_proba(X_hold)[:, 1]
+    train_metrics = _classification_metrics(y_train, train_prob)
+    hold_metrics = _classification_metrics(y_hold, hold_prob)
+
+    payload = {
+        "task": "outcome_classifier",
+        "modelType": str(model_type),
+        "featureKeys": list(feature_keys),
+        "dateKey": str(date_key),
+        "trainedAtUtc": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+        "featureBuilder": "build_outcome_feature_row_v1",
+        "metrics": {
+            "train": train_metrics,
+            "holdout": hold_metrics,
+            "nRowsTotal": int(len(rows)),
+            "nRowsTrainRaw": int(len(train_rows)),
+            "nRowsHoldoutRaw": int(len(hold_rows)),
+            "nRowsTrainUsed": int(len(kept_train)),
+            "nRowsHoldoutUsed": int(len(kept_hold)),
+            "trainClassCounts": {
+                "wins": int(np.sum(y_train == 1)),
+                "losses": int(np.sum(y_train == 0)),
+            },
+            "holdoutClassCounts": {
+                "wins": int(np.sum(y_hold == 1)),
+                "losses": int(np.sum(y_hold == 0)),
+            },
+        },
+        "estimator": est,
+    }
+
+    if output_model_path is None:
+        out = Path(data_path).resolve().with_suffix("")
+        output_model_path = str(out) + "_outcome_ml.pkl"
+    out_path = Path(output_model_path).expanduser().resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "wb") as f:
+        pickle.dump(payload, f)
+
+    return {
+        "success": True,
+        "outputModelPath": str(out_path),
+        "modelType": payload["modelType"],
+        "featureKeys": payload["featureKeys"],
+        "metrics": payload["metrics"],
+    }
 
 
 def train_projection_ml_from_file(
@@ -465,6 +937,10 @@ def load_projection_ml_bundle(model_path):
         return {"success": False, "error": str(e)}
 
 
+def load_outcome_ml_bundle(model_path=DEFAULT_OUTCOME_ML_MODEL_PATH):
+    return load_projection_ml_bundle(model_path)
+
+
 def predict_projection_ml(bundle, feature_row):
     est = (bundle or {}).get("estimator")
     keys = (bundle or {}).get("featureKeys") or []
@@ -479,6 +955,82 @@ def predict_projection_ml(bundle, feature_row):
     arr = np.array([vec], dtype=float)
     pred = est.predict(arr)
     return float(pred[0]) if len(pred) else None
+
+
+def predict_outcome_ml(bundle, raw_row):
+    est = (bundle or {}).get("estimator")
+    keys = (bundle or {}).get("featureKeys") or []
+    if est is None or not keys:
+        return None
+    feature_row = build_outcome_feature_row(raw_row)
+    if not feature_row:
+        return None
+    vec = []
+    for key in keys:
+        val = _to_float(feature_row.get(key))
+        if val is None:
+            return None
+        vec.append(val)
+    arr = np.array([vec], dtype=float)
+    if not hasattr(est, "predict_proba"):
+        return None
+    probas = est.predict_proba(arr)
+    if len(probas) == 0:
+        return None
+    classes = list(getattr(est, "classes_", [0, 1]))
+    row_proba = list(probas[0])
+    if 1 in classes:
+        return float(row_proba[classes.index(1)])
+    if classes and classes[0] == 1 and row_proba:
+        return float(row_proba[0])
+    return None
+
+
+def score_rows_with_outcome_ml(rows, model_path=DEFAULT_OUTCOME_ML_MODEL_PATH):
+    row_list = [dict(r) for r in (rows or [])]
+    if not row_list:
+        return {"success": True, "loaded": False, "rows": []}
+
+    loaded = load_outcome_ml_bundle(model_path)
+    if not loaded.get("success"):
+        return {
+            "success": False,
+            "loaded": False,
+            "error": loaded.get("error"),
+            "rows": row_list,
+        }
+
+    bundle = loaded["bundle"]
+    for row in row_list:
+        win_prob = predict_outcome_ml(bundle, row)
+        if win_prob is None:
+            continue
+        loss_prob = max(0.0, 1.0 - float(win_prob))
+        chosen_odds = _to_float(_first_present(row, "odds", "recommendedOdds", "recommended_odds"))
+        if chosen_odds is None:
+            side = str(_first_present(row, "recommendedSide", "recommended_side", "side") or "").strip().lower()
+            over_odds = _to_float(_first_present(row, "overOdds", "over_odds"))
+            under_odds = _to_float(_first_present(row, "underOdds", "under_odds"))
+            chosen_odds = over_odds if side == "over" else under_odds if side == "under" else None
+        model_ev_pct = None
+        if chosen_odds is not None:
+            decimal_odds = american_to_decimal(chosen_odds)
+            if decimal_odds is not None:
+                model_ev_pct = safe_round((float(win_prob) * float(decimal_odds) - 1.0) * 100.0, 4)
+
+        row["outcomeModelWinProb"] = safe_round(float(win_prob), 6)
+        row["outcomeModelLossProb"] = safe_round(loss_prob, 6)
+        row["outcomeModelEvPct"] = model_ev_pct
+        row["outcomeModelType"] = bundle.get("modelType")
+        row["outcomeModelPath"] = bundle.get("modelPath")
+
+    return {
+        "success": True,
+        "loaded": True,
+        "modelPath": bundle.get("modelPath"),
+        "modelType": bundle.get("modelType"),
+        "rows": row_list,
+    }
 
 
 def predict_projection_ml_per_stat(bundle, feature_row, stat):

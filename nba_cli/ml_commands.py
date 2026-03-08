@@ -5,6 +5,7 @@ import os
 
 from core.nba_model_training import (
     promote_projection_ml_model,
+    train_outcome_ml_from_file,
     train_projection_ml_from_file,
     train_projection_ml_per_stat_from_file,
     train_quantile_projection_from_file,
@@ -38,6 +39,37 @@ def handle_ml_command(command, argv):
         return train_projection_ml_from_file(
             data_path=data_path,
             target_key=target_key,
+            feature_keys=feature_keys,
+            holdout_frac=holdout_frac,
+            min_holdout=min_holdout,
+            model_type=model_type,
+            date_key=date_key,
+            output_model_path=output_model_path,
+        )
+
+    if command == "train_outcome_ml":
+        if len(argv) < 3:
+            return {
+                "error": (
+                    "Usage: train_outcome_ml <data_path> [feature_keys_csv|auto] "
+                    "[holdout_frac] [min_holdout] [model_type] [date_key] [output_model_path]\n"
+                    "model_type: gradient_boosting|hist_gbc|xgboost|lightgbm|random_forest|logistic|tabpfn"
+                )
+            }
+        data_path = argv[2]
+        feature_arg = argv[3] if len(argv) > 3 else "auto"
+        holdout_frac = float(argv[4]) if len(argv) > 4 else 0.2
+        min_holdout = int(argv[5]) if len(argv) > 5 else 250
+        model_type = argv[6] if len(argv) > 6 else "gradient_boosting"
+        date_key = argv[7] if len(argv) > 7 else "date"
+        output_model_path = argv[8] if len(argv) > 8 else None
+
+        feature_keys = None if feature_arg.lower() == "auto" else [
+            k.strip() for k in feature_arg.split(",") if k.strip()
+        ]
+
+        return train_outcome_ml_from_file(
+            data_path=data_path,
             feature_keys=feature_keys,
             holdout_frac=holdout_frac,
             min_holdout=min_holdout,
@@ -167,6 +199,7 @@ def handle_ml_command(command, argv):
 
 
 _COMMANDS = {
+    "train_outcome_ml":              lambda argv: handle_ml_command("train_outcome_ml", argv),
     "train_projection_ml":           lambda argv: handle_ml_command("train_projection_ml", argv),
     "train_projection_ml_per_stat":  lambda argv: handle_ml_command("train_projection_ml_per_stat", argv),
     "train_quantile_projection":     lambda argv: handle_ml_command("train_quantile_projection", argv),

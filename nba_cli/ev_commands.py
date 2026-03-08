@@ -9,7 +9,6 @@ from nba_api.stats.static import players as nba_players_static
 from core.nba_bet_tracking import log_prop_ev_entry
 from core.nba_decision_journal import DecisionJournal, _qualifies
 from core.nba_data_collection import safe_round
-from core.nba_data_prep import compute_usage_adjustment
 from core.nba_prep_projection import _SHRINK_K
 from core.nba_injury_news import fetch_nba_injury_news
 from core.nba_llm_engine import llm_full_analysis
@@ -25,62 +24,11 @@ from core.nba_model_training import (
 from .shared import resolve_player_or_result
 
 
-def _build_reference_probs(result):
-    ref_book = result.get("referenceBook") or {}
-    ref_over = ref_book.get("noVigOver")
-    ref_under = ref_book.get("noVigUnder")
-    if ref_over is None or ref_under is None:
-        return None
-    try:
-        o = float(ref_over)
-        u = float(ref_under)
-        total = o + u
-        if total > 0:
-            return {"over": o / total, "under": u / total, "push": 0.0}
-    except (TypeError, ValueError):
-        return None
-    return None
-
-
-def _apply_usage_adjustment(result, player_id, stat, line, over_odds, under_odds, player_team_abbr):
-    if not result.get("success") or not player_team_abbr:
-        return result
-
-    usage_data = compute_usage_adjustment(player_id, player_team_abbr)
-    if usage_data.get("success") and usage_data.get("absentTeammates"):
-        proj = dict(result.get("projection") or {})
-        stat_mult = (usage_data.get("statMultipliers") or {}).get(stat, 1.0)
-        base_proj = proj.get("projection")
-        if base_proj is not None:
-            proj["projectionPreUsage"] = base_proj
-            proj["projection"] = safe_round(base_proj * stat_mult, 1)
-            proj["usageMultiplier"] = stat_mult
-            stdev_val = proj.get("projStdev") or proj.get("stdev") or 0
-            ev_over_odds = int(result.get("bestOverOdds") or over_odds)
-            ev_under_odds = int(result.get("bestUnderOdds") or under_odds)
-            reference_probs = _build_reference_probs(result)
-            ev_data = compute_ev(
-                proj["projection"],
-                line,
-                ev_over_odds,
-                ev_under_odds,
-                stdev_val,
-                stat=stat,
-                reference_probs=reference_probs,
-            )
-            result["projection"] = proj
-            result["ev"] = ev_data
-            result["usageAdjustment"] = usage_data
-    else:
-        result["usageAdjustment"] = None
-    return result
-
-
 def _compute_intraday_clv(player_name, stat, book, recommended_side):
     """
     Compare the opening vs current LineStore snapshot for this player/stat/book.
-    Returns the intraday CLV line float (positive = line moved in our favour),
-    or None if fewer than 2 distinct timestamps exist or LineStore has no data.
+    Returns a rich dict with delta, direction, magnitude, confidence, openLine,
+    currentLine — or None if fewer than 2 distinct timestamps exist.
     """
     try:
         from core.nba_line_store import LineStore
@@ -97,10 +45,27 @@ def _compute_intraday_clv(player_name, stat, book, recommended_side):
         c_line = current.get("line")
         if o_line is None or c_line is None:
             return None
+        o_val = float(o_line)
+        c_val = float(c_line)
+        raw_delta = c_val - o_val
         # Positive = line moved in our favour (lower for over, higher for under)
         if recommended_side == "over":
-            return round(float(c_line) - float(o_line), 2)
-        return round(float(o_line) - float(c_line), 2)
+            delta = round(raw_delta, 2)
+        else:
+            delta = round(-raw_delta, 2)
+        direction = "favorable" if delta > 0 else ("against" if delta < 0 else "neutral")
+        magnitude = abs(delta)
+        # Confidence: more snapshots + larger movement = higher confidence
+        confidence = round(min(1.0, len(distinct_ts) / 6.0) * min(1.0, magnitude / 1.5), 2)
+        return {
+            "delta": delta,
+            "direction": direction,
+            "magnitude": magnitude,
+            "confidence": confidence,
+            "openLine": o_val,
+            "currentLine": c_val,
+            "snapshots": len(distinct_ts),
+        }
     except Exception:
         return None
 
@@ -218,16 +183,6 @@ def _handle_prop_ev(argv):
         minutes_multiplier=_mins_mult,
     )
 
-    result = _apply_usage_adjustment(
-        result=result,
-        player_id=player_id,
-        stat=stat,
-        line=line,
-        over_odds=over_odds,
-        under_odds=under_odds,
-        player_team_abbr=player_team_abbr,
-    )
-
     if result.get("success"):
         try:
             p = nba_players_static.find_player_by_id(player_id)
@@ -295,10 +250,13 @@ def _handle_prop_ev(argv):
 
             intraday_clv = _compute_intraday_clv(player_name, stat, book, rec)
             if intraday_clv is not None:
-                result["intradayClvLine"] = intraday_clv
+                result["intradayClv"] = intraday_clv
+                # Backward compat: keep scalar for journal context
+                result["intradayClvLine"] = intraday_clv.get("delta") if isinstance(intraday_clv, dict) else intraday_clv
 
             stat_proj = (result.get("projections") or {}).get(stat) or result.get("projection") or {}
-            ctx = _build_signal_context("prop_ev", result, stat, stat_proj, intraday_clv)
+            _clv_scalar = intraday_clv.get("delta") if isinstance(intraday_clv, dict) else intraday_clv
+            ctx = _build_signal_context("prop_ev", result, stat, stat_proj, _clv_scalar)
             _log_dj_signal(
                 result=result,
                 player_id=player_id, player_name=player_name,

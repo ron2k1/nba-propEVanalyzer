@@ -1,10 +1,197 @@
 #!/usr/bin/env python3
 """Scan commands: roster_sweep — scans LineStore snapshots and journals qualifying signals."""
 
+from contextlib import contextmanager
 import logging
-from datetime import date
+from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+from core.pipeline_progress import merge_status, read_status
 
 _log = logging.getLogger("nba_engine.scan")
+_LOCAL_TZ = ZoneInfo("America/New_York")
+
+
+def _parse_roster_sweep_args(argv):
+    date_str = date.today().isoformat()
+    progress_file = None
+    refresh_market_offers = False
+    fetch_live_context = False
+    use_local_projection_data = True
+
+    idx = 2
+    while idx < len(argv):
+        token = str(argv[idx]).strip()
+        if token in {"--verbose", "-v"}:
+            idx += 1
+            continue
+        if token == "--progress-file" and idx + 1 < len(argv):
+            progress_file = str(argv[idx + 1]).strip()
+            idx += 2
+            continue
+        if token == "--refresh-market-offers":
+            refresh_market_offers = True
+            idx += 1
+            continue
+        if token == "--fetch-live-context":
+            fetch_live_context = True
+            idx += 1
+            continue
+        if token == "--live-projection-data":
+            use_local_projection_data = False
+            idx += 1
+            continue
+        if token == "--date" and idx + 1 < len(argv):
+            date_str = str(argv[idx + 1]).strip() or date_str
+            idx += 2
+            continue
+        if not token.startswith("--"):
+            date_str = token or date_str
+        idx += 1
+
+    return {
+        "date_str": date_str,
+        "progress_file": progress_file,
+        "refresh_market_offers": refresh_market_offers,
+        "fetch_live_context": fetch_live_context,
+        "use_local_projection_data": use_local_projection_data,
+        "verbose": "--verbose" in argv or "-v" in argv,
+    }
+
+
+def _update_roster_sweep_progress(
+    progress_file,
+    *,
+    date_str,
+    stage,
+    message,
+    total=None,
+    scanned=None,
+    logged=None,
+    leans_logged=None,
+    current_player=None,
+    current_stat=None,
+    skip_reasons=None,
+    completed=False,
+    snapshot_only=True,
+):
+    existing = read_status(progress_file)
+    task_name = existing.get("taskName") or "roster_sweep"
+    merge_status(
+        progress_file,
+        taskName=task_name,
+        currentCommand="roster_sweep",
+        busy=not completed,
+        stage=stage,
+        date=date_str,
+        message=message,
+        snapshotOnly=bool(snapshot_only),
+        total=total,
+        scanned=scanned,
+        logged=logged,
+        leansLogged=leans_logged,
+        currentPlayer=current_player,
+        currentStat=current_stat,
+        skipReasons=skip_reasons,
+    )
+
+
+def _snapshot_team_map_from_snaps(snaps):
+    import re as _re
+
+    mapping = {}
+    for snap in snaps or []:
+        pname = str(snap.get("player_name", "") or "").strip()
+        team_abbr = str(snap.get("player_team_abbr", "") or "").upper().strip()
+        if not pname or not team_abbr:
+            continue
+        norm_name = _re.sub(r"[.\-'']", "", pname).lower().strip()
+        if norm_name:
+            mapping[norm_name] = team_abbr
+    return mapping
+
+
+def _commence_local_date(commence_time):
+    if not commence_time:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(commence_time).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            return None
+        return dt.astimezone(_LOCAL_TZ).date().isoformat()
+    except Exception:
+        return None
+
+
+def _filter_snapshots_to_local_game_day(snaps, date_str):
+    filtered = []
+    for snap in snaps or []:
+        local_day = _commence_local_date(snap.get("commence_time"))
+        if local_day and local_day != date_str:
+            continue
+        filtered.append(snap)
+    return filtered
+
+
+@contextmanager
+def _projection_data_context(use_local_projection_data):
+    if not use_local_projection_data:
+        yield {"mode": "live_api"}
+        return
+
+    try:
+        from core.nba_local_stats import LocalNBAStats
+        from core import nba_data_collection as _dc
+        from core import nba_prep_projection as _pp
+
+        provider = LocalNBAStats()
+
+        _orig_gamelog = _dc.get_player_game_log
+        _orig_splits = _dc.get_player_splits
+        _orig_defense = _dc.get_team_defensive_ratings
+        _orig_pos = _dc.get_player_position
+        _orig_pvt = _dc.get_position_vs_team
+
+        _orig_pp_gamelog = _pp.get_player_game_log
+        _orig_pp_splits = _pp.get_player_splits
+        _orig_pp_defense = _pp.get_team_defensive_ratings
+        _orig_pp_pos = _pp.get_player_position
+        _orig_pp_pvt = _pp.get_position_vs_team
+        _orig_pp_api_delay = _pp.API_DELAY
+
+        _dc.get_player_game_log = provider.get_player_game_log
+        _dc.get_player_splits = provider.get_player_splits
+        _dc.get_team_defensive_ratings = provider.get_team_defensive_ratings
+        _dc.get_player_position = provider.get_player_position
+        _dc.get_position_vs_team = provider.get_position_vs_team
+
+        _pp.get_player_game_log = provider.get_player_game_log
+        _pp.get_player_splits = provider.get_player_splits
+        _pp.get_team_defensive_ratings = provider.get_team_defensive_ratings
+        _pp.get_player_position = provider.get_player_position
+        _pp.get_position_vs_team = provider.get_position_vs_team
+        _pp.API_DELAY = 0.0
+
+        try:
+            yield {
+                "mode": "local_index",
+                "provider": provider,
+            }
+        finally:
+            _dc.get_player_game_log = _orig_gamelog
+            _dc.get_player_splits = _orig_splits
+            _dc.get_team_defensive_ratings = _orig_defense
+            _dc.get_player_position = _orig_pos
+            _dc.get_position_vs_team = _orig_pvt
+
+            _pp.get_player_game_log = _orig_pp_gamelog
+            _pp.get_player_splits = _orig_pp_splits
+            _pp.get_team_defensive_ratings = _orig_pp_defense
+            _pp.get_player_position = _orig_pp_pos
+            _pp.get_position_vs_team = _orig_pp_pvt
+            _pp.API_DELAY = _orig_pp_api_delay
+    except Exception:
+        yield {"mode": "live_api"}
 
 
 def _handle_roster_sweep(argv):
@@ -20,22 +207,47 @@ def _handle_roster_sweep(argv):
     from core.nba_decision_journal import DecisionJournal, _qualifies
     from core.gates import SIGNAL_SPEC, CURRENT_SIGNAL_VERSION
     from core.nba_model_training import american_to_implied_prob, compute_prop_ev
-    from core.nba_data_collection import safe_round, get_yesterdays_team_abbrs, get_todays_game_totals, get_player_team_map, get_team_defensive_ratings, get_position_vs_team
+    from core.nba_data_collection import safe_round, get_yesterdays_team_abbrs, get_todays_game_totals, get_player_team_map
     from core.nba_bet_tracking import log_prop_ev_entry
     from nba_api.stats.static import players as nba_players_static
 
-    # Use local date by default — snapshots are filed by local game day,
-    # not UTC.  Games at 10 PM ET on Mar 2 have UTC timestamps of Mar 3
-    # but belong to the Mar 2 game day.
-    date_str = argv[2] if len(argv) > 2 else date.today().isoformat()
+    parsed = _parse_roster_sweep_args(argv)
+    date_str = parsed["date_str"]
+    progress_file = parsed["progress_file"]
+    refresh_market_offers = parsed["refresh_market_offers"]
+    fetch_live_context = parsed["fetch_live_context"]
+    use_local_projection_data = parsed["use_local_projection_data"]
+    snapshot_only = not refresh_market_offers
 
-    # Build game context once before the loop (one scoreboard call + one Odds API call).
-    yesterday_teams = get_yesterdays_team_abbrs(date_str)   # free — NBA scoreboard
-    game_totals     = get_todays_game_totals(date_str)       # 1 Odds API credit for all games
+    # Default path is snapshot-first and local-data-first; live context is opt-in.
+    _update_roster_sweep_progress(
+        progress_file,
+        date_str=date_str,
+        stage="loading_context",
+        message="Loading stored snapshots and evaluation context.",
+        snapshot_only=snapshot_only,
+    )
+    yesterday_teams = set()
+    game_totals = {}
+    if fetch_live_context:
+        yesterday_teams = get_yesterdays_team_abbrs(date_str)
+        game_totals = get_todays_game_totals(date_str)
 
     ls = LineStore()
-    snaps = ls.get_snapshots(date_str)
+    snaps = _filter_snapshots_to_local_game_day(ls.get_snapshots(date_str), date_str)
     if not snaps:
+        _update_roster_sweep_progress(
+            progress_file,
+            date_str=date_str,
+            stage="completed",
+            message="No snapshots found for date.",
+            total=0,
+            scanned=0,
+            logged=0,
+            leans_logged=0,
+            completed=True,
+            snapshot_only=snapshot_only,
+        )
         return {
             "success": True,
             "date": date_str,
@@ -44,26 +256,6 @@ def _handle_roster_sweep(argv):
             "skipped": 0,
             "message": "No snapshots found for date",
         }
-
-    # Filter out stale events: late-night games from yesterday bleed into
-    # today's UTC-dated JSONL file.  Only keep snapshots whose event matchup
-    # appears in today's actual NBA schedule.
-    from core.nba_data_collection import get_todays_games
-    _today_games = get_todays_games()
-    _today_matchups = set()
-    for _g in _today_games.get("games", []):
-        _h = _g.get("homeTeam", {}).get("abbreviation", "").upper()
-        _a = _g.get("awayTeam", {}).get("abbreviation", "").upper()
-        if _h and _a:
-            _today_matchups.add(frozenset({_h, _a}))
-    if _today_matchups:
-        snaps = [
-            s for s in snaps
-            if frozenset({
-                s.get("home_team_abbr", "").upper(),
-                s.get("away_team_abbr", "").upper(),
-            }) in _today_matchups
-        ]
 
     # Deduplicate: keep latest snapshot per (player, stat, book)
     latest = {}
@@ -90,28 +282,23 @@ def _handle_roster_sweep(argv):
             if BOOK_PRIO.get(book, 99) < BOOK_PRIO.get(existing.get("book", ""), 99):
                 best_per_player_stat[key2] = snap
 
-    # Build player_name → team_abbr mapping from LeagueDashPlayerStats (one API call).
-    # Reflects mid-season trades immediately.
     import re as _re
 
     def _norm_name(n):
-        """Normalize player name for matching: strip periods, hyphens, lowercase."""
+        """Normalize player name for matching."""
         return _re.sub(r"[.\-'']", "", str(n)).lower().strip()
 
-    _player_team_map = get_player_team_map()  # cached, single API call
-
-    # Pre-warm defense + PVT caches: one fetch per unique opponent instead of per-player.
-    _def_data = get_team_defensive_ratings()
-    if _def_data.get("success"):
-        _team_lookup = {t["abbreviation"]: t.get("teamId") for t in _def_data.get("teams", [])}
-        _opp_abbrs = {(s.get("opponent_abbr") or "").upper() for s in best_per_player_stat.values()} - {""}
-        for _oa in _opp_abbrs:
-            _tid = _team_lookup.get(_oa)
-            if _tid:
-                get_position_vs_team(_tid)
+    _player_team_map = _snapshot_team_map_from_snaps(best_per_player_stat.values())
+    if fetch_live_context:
+        try:
+            live_player_team_map = get_player_team_map()
+            for norm_name, team_abbr in (live_player_team_map or {}).items():
+                _player_team_map.setdefault(norm_name, team_abbr)
+        except Exception:
+            pass
 
     # Accept --verbose flag for debug-level trace logging
-    _verbose = "--verbose" in argv or "-v" in argv
+    _verbose = parsed["verbose"]
     if _verbose:
         logging.getLogger("nba_engine").setLevel(logging.DEBUG)
 
@@ -120,11 +307,41 @@ def _handle_roster_sweep(argv):
     lean_count = 0
     skipped_list = []
     top_results = []
+    total_candidates = len(best_per_player_stat)
+
+    _update_roster_sweep_progress(
+        progress_file,
+        date_str=date_str,
+        stage="evaluating",
+        message=f"Evaluating {total_candidates} player/stat snapshots.",
+        total=total_candidates,
+        scanned=0,
+        logged=0,
+        leans_logged=0,
+        snapshot_only=snapshot_only,
+    )
 
     dj = DecisionJournal()
+    projection_data_scope = _projection_data_context(use_local_projection_data)
+    projection_state = projection_data_scope.__enter__()
+    projection_data_source = projection_state.get("mode", "live_api")
 
     for (pname, stat), snap in best_per_player_stat.items():
         scanned += 1
+        if scanned == 1 or scanned % 10 == 0 or scanned == total_candidates:
+            _update_roster_sweep_progress(
+                progress_file,
+                date_str=date_str,
+                stage="evaluating",
+                message=f"Evaluating {scanned}/{total_candidates}: {pname} {stat}.",
+                total=total_candidates,
+                scanned=scanned,
+                logged=logged,
+                leans_logged=lean_count,
+                current_player=pname,
+                current_stat=stat,
+                snapshot_only=snapshot_only,
+            )
         try:
             # Resolve player ID via exact then partial match
             matches = nba_players_static.find_players_by_full_name(pname)
@@ -185,6 +402,8 @@ def _handle_roster_sweep(argv):
                 under_odds=int(under_odds or -110),
                 is_b2b=False,
                 player_team_abbr=team_abbr or None,
+                refresh_market_offers=refresh_market_offers,
+                as_of_date=date_str,
                 opponent_is_b2b=opp_is_b2b,
                 game_total=gtotal,
             )
@@ -246,7 +465,12 @@ def _handle_roster_sweep(argv):
                         recommended_side=_lean_side, recommended_edge=_max_edge,
                         confidence=_lean_conf,
                         skip_reason=skip_reason,
-                        context={"source": "roster_sweep", "book": book},
+                        context={
+                            "source": "roster_sweep",
+                            "book": book,
+                            "projectionDataSource": projection_data_source,
+                            "fetchLiveContext": fetch_live_context,
+                        },
                     )
                     lean_count += 1
                 continue
@@ -262,6 +486,8 @@ def _handle_roster_sweep(argv):
                 "book": book,
                 "snapshotTs": snap.get("timestamp_utc"),
                 "oppIsB2B": opp_is_b2b,
+                "projectionDataSource": projection_data_source,
+                "fetchLiveContext": fetch_live_context,
             }
             if gtotal is not None:
                 ctx["gameTotal"] = gtotal
@@ -291,6 +517,26 @@ def _handle_roster_sweep(argv):
             )
             if djr.get("isDuplicate"):
                 skipped_list.append({"player": pname, "stat": stat, "reason": "duplicate"})
+                try:
+                    bridge_result = dict(result)
+                    if not bridge_result.get("commenceTime"):
+                        bridge_result["commenceTime"] = snap.get("commence_time")
+                    log_prop_ev_entry(
+                        bridge_result,
+                        player_id=player_id,
+                        player_identifier=player_name,
+                        player_team_abbr=team_abbr or "",
+                        opponent_abbr=opp_abbr,
+                        is_home=bool(is_home) if is_home is not None else True,
+                        stat=stat,
+                        line=float(line),
+                        over_odds=int(over_odds or -110),
+                        under_odds=int(under_odds or -110),
+                        is_b2b=False,
+                        source="roster_sweep",
+                    )
+                except Exception as _bridge_ex:
+                    _log.warning("JSONL bridge write failed for %s/%s duplicate: %s", pname, stat, _bridge_ex)
             elif djr.get("success"):
                 logged += 1
                 top_results.append({
@@ -304,8 +550,11 @@ def _handle_roster_sweep(argv):
                 })
                 # Bridge: also write to prop_journal.jsonl so best_today can see it
                 try:
+                    bridge_result = dict(result)
+                    if not bridge_result.get("commenceTime"):
+                        bridge_result["commenceTime"] = snap.get("commence_time")
                     log_prop_ev_entry(
-                        result,
+                        bridge_result,
                         player_id=player_id,
                         player_identifier=player_name,
                         player_team_abbr=team_abbr or "",
@@ -330,6 +579,7 @@ def _handle_roster_sweep(argv):
             _log.warning("roster_sweep error for %s/%s: %s", pname, stat, ex)
             skipped_list.append({"player": pname, "stat": stat, "reason": str(ex)})
 
+    projection_data_scope.__exit__(None, None, None)
     dj.close()
 
     top5 = sorted(top_results, key=lambda x: -x["edge"])[:5]
@@ -340,6 +590,20 @@ def _handle_roster_sweep(argv):
         r = s.get("reason", "unknown")
         skip_reasons[r] = skip_reasons.get(r, 0) + 1
 
+    _update_roster_sweep_progress(
+        progress_file,
+        date_str=date_str,
+        stage="completed",
+        message=f"Roster sweep finished. Logged {logged} signals and {lean_count} leans.",
+        total=total_candidates,
+        scanned=scanned,
+        logged=logged,
+        leans_logged=lean_count,
+        skip_reasons=skip_reasons,
+        completed=True,
+        snapshot_only=snapshot_only,
+    )
+
     return {
         "success": True,
         "date": date_str,
@@ -348,6 +612,9 @@ def _handle_roster_sweep(argv):
         "leansLogged": lean_count,
         "skipped": len(skipped_list),
         "skipReasons": skip_reasons,
+        "snapshotOnly": snapshot_only,
+        "fetchLiveContext": fetch_live_context,
+        "projectionDataSource": projection_data_source,
         "top5": top5,
     }
 
@@ -381,7 +648,7 @@ def _handle_top_picks(argv):
     for e in entries:
         if str(e.get("pickDate")) != target:
             continue
-        key = (e.get("playerId"), str(e.get("stat", "")).lower())
+        key = (e.get("playerId"), str(e.get("stat", "")).lower(), e.get("line"))
         journal_by_key[key] = e  # latest wins (entries are time-sorted)
 
     top = qualified[:limit]
@@ -391,7 +658,7 @@ def _handle_top_picks(argv):
         ev_pct = r.get("recommendedEvPct") or 0.0
         pid = r.get("playerId")
         stat = str(r.get("stat", "")).lower()
-        je = journal_by_key.get((pid, stat)) or {}
+        je = journal_by_key.get((pid, stat, r.get("line"))) or {}
         top_picks.append({
             "rank": i,
             "playerName": r.get("playerName"),
@@ -419,7 +686,7 @@ def _handle_top_picks(argv):
             for pick in (a, b):
                 pid = pick.get("playerId")
                 stat = str(pick.get("stat", "")).lower()
-                je = journal_by_key.get((pid, stat)) or {}
+                je = journal_by_key.get((pid, stat, pick.get("line"))) or {}
                 side = str(pick.get("recommendedSide", "over")).lower()
                 legs.append({
                     "probOver": je.get("probOver", 0.5),

@@ -1185,13 +1185,14 @@ def _abbr_from_team_name(team_name: str) -> str:
     return ""
 
 
-def get_todays_games():
+def get_todays_games(game_date=None):
     """
-    Fetch today's NBA games. Falls back to tomorrow then yesterday.
+    Fetch NBA games for *game_date* (YYYY-MM-DD).  Defaults to today.
+    Falls back to tomorrow then yesterday.
     isStale=True when returning yesterday's data so caller can warn the user.
     """
     try:
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = game_date or datetime.now().strftime("%Y-%m-%d")
 
         def fetch_games(date_str):
             return scoreboardv3.ScoreboardV3(
@@ -1203,14 +1204,14 @@ def get_todays_games():
         date_used  = today
         is_stale   = False
 
-        if not raw_games:
+        if not raw_games and game_date is None:
             tomorrow  = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
             time.sleep(API_DELAY)
             data      = retry_api_call(lambda: fetch_games(tomorrow))
             raw_games = data.get("scoreboard", {}).get("games", [])
             date_used = tomorrow
 
-        if not raw_games:
+        if not raw_games and game_date is None:
             yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
             time.sleep(API_DELAY)
             data      = retry_api_call(lambda: fetch_games(yesterday))

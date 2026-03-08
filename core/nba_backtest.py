@@ -2,8 +2,10 @@
 """Historical backtesting utilities for projection and EV calibration."""
 
 import json
+import hashlib
 import math
 import os
+import subprocess
 import time
 from datetime import datetime, timedelta
 
@@ -123,6 +125,186 @@ def _iter_dates(date_from, date_to):
     while cur <= date_to:
         yield cur
         cur += timedelta(days=1)
+
+
+def _repo_root():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _utc_now_iso():
+    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _normalize_for_hash(value):
+    if isinstance(value, dict):
+        return {k: _normalize_for_hash(v) for k, v in sorted(value.items())}
+    if isinstance(value, (list, tuple)):
+        return [_normalize_for_hash(v) for v in value]
+    if isinstance(value, set):
+        return sorted(_normalize_for_hash(v) for v in value)
+    return value
+
+
+def _stable_json_hash(value):
+    normalized = _normalize_for_hash(value)
+    payload = json.dumps(normalized, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _hash_file(path):
+    try:
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return None
+
+
+def _git_head():
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            cwd=_repo_root(),
+            timeout=2,
+            check=False,
+        )
+        head = (proc.stdout or "").strip()
+        return head or None
+    except Exception:
+        return None
+
+
+def _artifact_betting_policy(walk_forward):
+    if walk_forward:
+        return {"mode": "walk_forward", "source": "models/policy_history.json"}
+    return {
+        "statWhitelist": sorted(BETTING_POLICY.get("stat_whitelist", set())),
+        "blockedProbBins": sorted(BETTING_POLICY.get("blocked_prob_bins", set())),
+    }
+
+
+def _normalized_backtest_args(
+    *,
+    start,
+    end,
+    model_key,
+    source_key,
+    save_results,
+    fast,
+    bref_dir,
+    local_index,
+    odds_key,
+    odds_db,
+    odds_only,
+    compute_clv,
+    walk_forward,
+    emit_bets,
+    emit_all,
+    match_live,
+    no_blend,
+    no_gates,
+    line_timing,
+):
+    args = ["nba_mod.py", "backtest", start.isoformat(), end.isoformat(), "--model", model_key]
+    if save_results:
+        args.append("--save")
+    if fast:
+        args.append("--fast")
+    if source_key == "local":
+        args.append("--local")
+    elif source_key != "nba":
+        args.extend(["--data-source", source_key])
+    if bref_dir:
+        args.extend(["--bref-dir", str(bref_dir)])
+    if local_index:
+        args.extend(["--local-index", str(local_index)])
+    if odds_key:
+        args.extend(["--odds-source", str(odds_key)])
+    if odds_db:
+        args.extend(["--odds-db", str(odds_db)])
+    if odds_only:
+        args.append("--real-only")
+    if compute_clv:
+        args.append("--clv")
+    if walk_forward:
+        args.append("--walk-forward")
+    if emit_bets:
+        args.append("--emit-bets")
+    if emit_all:
+        args.append("--emit-all")
+    if match_live:
+        args.append("--match-live")
+    if no_blend:
+        args.append("--no-blend")
+    if no_gates:
+        args.append("--no-gates")
+    if line_timing != "closing":
+        args.extend(["--line-timing", str(line_timing)])
+    return args
+
+
+def _build_artifact_metadata(
+    *,
+    start,
+    end,
+    model_key,
+    source_key,
+    save_results,
+    fast,
+    bref_dir,
+    local_index,
+    odds_key,
+    odds_db,
+    odds_only,
+    compute_clv,
+    walk_forward,
+    emit_bets,
+    emit_all,
+    match_live,
+    no_blend,
+    no_gates,
+    line_timing,
+    betting_policy,
+    checkpoint=False,
+    checkpoint_date_to=None,
+):
+    repo_root = _repo_root()
+    cal_path = os.path.join(repo_root, "models", "prob_calibration.json")
+    policy_history_path = os.path.join(repo_root, "models", "policy_history.json")
+    normalized_args = _normalized_backtest_args(
+        start=start,
+        end=end,
+        model_key=model_key,
+        source_key=source_key,
+        save_results=save_results,
+        fast=fast,
+        bref_dir=bref_dir,
+        local_index=local_index,
+        odds_key=odds_key,
+        odds_db=odds_db,
+        odds_only=odds_only,
+        compute_clv=compute_clv,
+        walk_forward=walk_forward,
+        emit_bets=emit_bets,
+        emit_all=emit_all,
+        match_live=match_live,
+        no_blend=no_blend,
+        no_gates=no_gates,
+        line_timing=line_timing,
+    )
+    return {
+        "generatedAtUtc": _utc_now_iso(),
+        "gitHead": _git_head(),
+        "normalizedCliArgs": normalized_args,
+        "policyHash": _stable_json_hash(betting_policy),
+        "policyHistoryHash": _hash_file(policy_history_path),
+        "calibrationHash": _hash_file(cal_path),
+        "modelVersionHash": _stable_json_hash(MODEL_VERSION_SUMMARY),
+        "projectionConfigHash": _stable_json_hash(PROJECTION_CONFIG),
+        "checkpoint": bool(checkpoint),
+        "checkpointDateTo": checkpoint_date_to,
+    }
 
 
 def _fetch_games_for_date(date_obj, data_source="nba", bref_store=None, local_provider=None):
@@ -485,6 +667,7 @@ def run_backtest(
     match_live=False,
     no_blend=False,
     no_gates=False,
+    line_timing="closing",
 ):
     """
     Backtest projection + EV quality for one day or a date range.
@@ -529,6 +712,10 @@ def run_backtest(
     source_key = str(data_source or "nba").lower().strip()
     if source_key not in {"nba", "bref", "local"}:
         return {"success": False, "error": "data_source must be one of: nba, bref, local"}
+
+    _line_timing = str(line_timing or "closing").lower().strip()
+    if _line_timing not in {"closing", "opening"}:
+        return {"success": False, "error": "line_timing must be 'closing' or 'opening'"}
 
     if (no_blend or no_gates) and not match_live:
         return {"success": False, "error": "--no-blend and --no-gates require --match-live"}
@@ -813,26 +1000,44 @@ def run_backtest(
                             _used_real_line = False
                             _market = None
                             if match_live:
-                                # match_live: require real closing line with real odds.
+                                # match_live: require real line with real odds.
                                 # No synthetic fallback, no -110 defaults.
                                 _market = _odds_stat_to_market.get(stat)
                                 if _market and odds_store and odds_event_id and _player_full_name:
-                                    _cl = odds_store.get_closing_line(
-                                        odds_event_id, _market, _player_full_name
-                                    )
-                                    if (
-                                        _cl
-                                        and _cl.get("close_line") is not None
-                                        and _cl.get("close_over_odds") is not None
-                                        and _cl.get("close_under_odds") is not None
-                                    ):
-                                        line = _cl["close_line"]
-                                        over_odds = _cl["close_over_odds"]
-                                        under_odds = _cl["close_under_odds"]
-                                        acc["realLineSamples"] += 1
-                                        _used_real_line = True
+                                    if _line_timing == "opening":
+                                        _ol = odds_store.get_opening_line(
+                                            odds_event_id, _market, _player_full_name
+                                        )
+                                        if (
+                                            _ol
+                                            and _ol.get("open_line") is not None
+                                            and _ol.get("open_over_odds") is not None
+                                            and _ol.get("open_under_odds") is not None
+                                        ):
+                                            line = _ol["open_line"]
+                                            over_odds = _ol["open_over_odds"]
+                                            under_odds = _ol["open_under_odds"]
+                                            acc["realLineSamples"] += 1
+                                            _used_real_line = True
+                                        else:
+                                            continue  # skip stat — no opening line
                                     else:
-                                        continue  # skip stat — no real line
+                                        _cl = odds_store.get_closing_line(
+                                            odds_event_id, _market, _player_full_name
+                                        )
+                                        if (
+                                            _cl
+                                            and _cl.get("close_line") is not None
+                                            and _cl.get("close_over_odds") is not None
+                                            and _cl.get("close_under_odds") is not None
+                                        ):
+                                            line = _cl["close_line"]
+                                            over_odds = _cl["close_over_odds"]
+                                            under_odds = _cl["close_under_odds"]
+                                            acc["realLineSamples"] += 1
+                                            _used_real_line = True
+                                        else:
+                                            continue  # skip stat — no real line
                                 else:
                                     continue  # skip stat — no market mapping or no odds store
                             elif (
@@ -1161,6 +1366,7 @@ def run_backtest(
                 _ckpt_reports = {
                     m: _finalize_accumulator(_ckpt_copies[m]) for m in models
                 }
+                _ckpt_policy = _artifact_betting_policy(walk_forward)
                 _ckpt = {
                     "success": True,
                     "checkpoint": True,
@@ -1170,14 +1376,41 @@ def run_backtest(
                     "modelsEvaluated": models,
                     "stats": TRACKED_STATS,
                     "minEdgeThreshold": PROJECTION_CONFIG.get("min_edge_threshold", 0.05),
+                    "bettingPolicy": _ckpt_policy,
                     "modelVersion": MODEL_VERSION_SUMMARY,
                     "reports": _ckpt_reports,
                 }
+                _ckpt["artifactMetadata"] = _build_artifact_metadata(
+                    start=start,
+                    end=end,
+                    model_key=model_key,
+                    source_key=source_key,
+                    save_results=save_results,
+                    fast=fast,
+                    bref_dir=bref_dir,
+                    local_index=local_index,
+                    odds_key=odds_key,
+                    odds_db=odds_db,
+                    odds_only=odds_only,
+                    compute_clv=compute_clv,
+                    walk_forward=walk_forward,
+                    emit_bets=emit_bets,
+                    emit_all=emit_all,
+                    match_live=match_live,
+                    no_blend=no_blend,
+                    no_gates=no_gates,
+                    line_timing=_line_timing,
+                    betting_policy=_ckpt_policy,
+                    checkpoint=True,
+                    checkpoint_date_to=day.isoformat(),
+                )
                 _ckpt_fname = (
                     f"ckpt_{start.isoformat()}_to_{end.isoformat()}_"
                     f"{model_key}_{source_key}_{day.isoformat()}.json"
                 )
-                with open(_os.path.join(_results_dir, _ckpt_fname), "w", encoding="utf-8") as _fh:
+                _ckpt_path = _os.path.join(_results_dir, _ckpt_fname)
+                _ckpt["savedTo"] = _ckpt_path
+                with open(_ckpt_path, "w", encoding="utf-8") as _fh:
                     _json.dump(_ckpt, _fh, indent=2)
                 print(f"  -> checkpoint saved: {_ckpt_fname}", file=_sys.stderr, flush=True)
 
@@ -1191,6 +1424,7 @@ def run_backtest(
                 accumulators[m].pop("_bet_records", None)
 
         model_reports = {m: _finalize_accumulator(accumulators[m]) for m in models}
+        _betting_policy = _artifact_betting_policy(walk_forward)
         response = {
             "success": True,
             "dateFrom": start.isoformat(),
@@ -1200,17 +1434,32 @@ def run_backtest(
             "modelsEvaluated": models,
             "stats": TRACKED_STATS,
             "minEdgeThreshold": PROJECTION_CONFIG.get("min_edge_threshold", 0.05),
-            "bettingPolicy": (
-                {"mode": "walk_forward", "source": "models/policy_history.json"}
-                if walk_forward
-                else {
-                    "statWhitelist": sorted(BETTING_POLICY.get("stat_whitelist", set())),
-                    "blockedProbBins": sorted(BETTING_POLICY.get("blocked_prob_bins", set())),
-                }
-            ),
+            "bettingPolicy": _betting_policy,
             "modelVersion": MODEL_VERSION_SUMMARY,
             "reports": model_reports,
         }
+        response["artifactMetadata"] = _build_artifact_metadata(
+            start=start,
+            end=end,
+            model_key=model_key,
+            source_key=source_key,
+            save_results=save_results,
+            fast=fast,
+            bref_dir=bref_dir,
+            local_index=local_index,
+            odds_key=odds_key,
+            odds_db=odds_db,
+            odds_only=odds_only,
+            compute_clv=compute_clv,
+            walk_forward=walk_forward,
+            emit_bets=emit_bets,
+            emit_all=emit_all,
+            match_live=match_live,
+            no_blend=no_blend,
+            no_gates=no_gates,
+            line_timing=_line_timing,
+            betting_policy=_betting_policy,
+        )
         if source_key == "bref" and bref_summary:
             response["brefCoverage"] = bref_summary
         if source_key == "local" and local_provider:
@@ -1230,6 +1479,8 @@ def run_backtest(
             response["oddsSource"] = odds_key
         if odds_only:
             response["oddsOnly"] = True
+        if _line_timing != "closing":
+            response["lineTiming"] = _line_timing
 
         # Attach bet-level records when emit_bets or emit_all is enabled
         if (emit_bets or emit_all) and _bet_records_by_model:
@@ -1239,9 +1490,7 @@ def run_backtest(
                 response["bets"] = _bet_records_by_model
 
         if save_results:
-            results_dir = _os.path.join(
-                _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))), "data", "backtest_results"
-            )
+            results_dir = _os.path.join(_repo_root(), "data", "backtest_results")
             _os.makedirs(results_dir, exist_ok=True)
             model_tag = model_key.replace(",", "-")
             ml_tag = "_matchlive" if match_live else ""
@@ -1249,11 +1498,12 @@ def run_backtest(
             nogates_tag = "_nogates" if no_gates else ""
             realonly_tag = "_realonly" if (odds_only and not match_live) else ""
             wf_tag = "_wf" if walk_forward else ""
-            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}{ml_tag}{noblend_tag}{nogates_tag}{wf_tag}.json"
+            lt_tag = f"_{_line_timing}" if _line_timing != "closing" else ""
+            fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}{ml_tag}{noblend_tag}{nogates_tag}{wf_tag}{lt_tag}.json"
             fpath = _os.path.join(results_dir, fname)
+            response["savedTo"] = fpath
             with open(fpath, "w", encoding="utf-8") as fh:
                 _json.dump(response, fh, indent=2)
-            response["savedTo"] = fpath
 
         if "full" in model_reports and "simple" in model_reports:
             comparison = {

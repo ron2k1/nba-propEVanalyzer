@@ -1,5 +1,6 @@
 // Analyze tab — Prop EV form, auto sweep, LLM analysis
 import { apiGet, apiPost, escapeHtml, fmt, pct, pctAlready, toUpperTrim, showError, DEFAULT_BOOKMAKERS } from './api.js';
+import { renderDistribution, renderCalibration, renderLineMovement } from './charts.js';
 
 export default function () {
   return {
@@ -117,6 +118,17 @@ export default function () {
           return;
         }
         this.propResult = data;
+        // Render charts after DOM updates
+        this.$nextTick(() => {
+          if (data.ev) {
+            renderDistribution('chartDistribution', data.ev);
+            renderCalibration('chartCalibration', data.ev);
+          }
+          const pName = data.projection?.playerName || this.playerName;
+          if (pName && this.stat) {
+            renderLineMovement('chartLineMovement', pName, this.stat);
+          }
+        });
       } catch (err) {
         this.propError = `Failed: ${err.message}`;
       } finally {

@@ -21,6 +21,7 @@ from .nba_data_collection import (
     safe_round,
 )
 from .nba_minutes_model import compute_minutes_multiplier
+from .nba_prep_usage import compute_usage_adjustment
 
 # ---------------------------------------------------------------------------
 # Named projection constants (used in multiple places below)
@@ -305,6 +306,7 @@ def compute_projection(
     minutes_multiplier=None,
     opponent_is_b2b=False,
     game_total=None,
+    player_team_abbr=None,
 ):
     try:
         if season is None:
@@ -457,6 +459,24 @@ def compute_projection(
                     break
         _road_trip_fatigue = _road_trip_len >= 3
 
+        # Feature 1: Usage rate integration — only in live mode to prevent backtest lookahead.
+        _usage_mults = {}
+        _usage_ctx = None
+        if player_team_abbr and as_of_date is None:
+            try:
+                _usg = compute_usage_adjustment(player_id, player_team_abbr, season)
+                if _usg.get("success") and _usg.get("absentTeammates"):
+                    _usage_mults = _usg.get("statMultipliers") or {}
+                    _usage_ctx = _usg
+            except Exception:
+                pass
+
+        # Feature 2: Opponent-adaptive stdev — pace-based variance multiplier.
+        # Fast-paced opponents (DEN) widen stat distributions; grinding defenses (CLE) narrow them.
+        _POISSON_PACE_WEIGHT = 0.25
+        _NORMAL_PACE_WEIGHT = 0.50
+        _opp_pace_factor = (opp_def.get("paceFactor", 1.0) or 1.0) if opp_def else 1.0
+
         core_stats = ["pts", "reb", "ast", "stl", "blk", "tov", "fg3m"]
         projections = {}
 
@@ -586,6 +606,12 @@ def compute_projection(
                 stat_mult = _cclamp(stat_mult * 0.98, lo, hi, _cap_hits)
 
             model_projection = max(0.0, projected_minutes * per_min_rate * stat_mult)
+
+            # Feature 1: Apply usage rate multiplier to model projection.
+            _stat_usage_mult = _usage_mults.get(stat, 1.0) if _usage_mults else 1.0
+            if _stat_usage_mult != 1.0:
+                model_projection *= _stat_usage_mult
+
             blend_line = _extract_blend_line(blend_with_line, stat)
             if blend_line is not None:
                 final_projection = max(
@@ -617,6 +643,11 @@ def compute_projection(
             # actual 40%) by narrowing the CDF and pushing probabilities toward
             # calibrated confidence levels.
             _proj_stdev = stdev_val * _get_stdev_shrink(stat)
+
+            # Feature 2: Pace-based variance scaling.
+            _pace_w = _POISSON_PACE_WEIGHT if stat in ("stl", "blk", "fg3m", "tov") else _NORMAL_PACE_WEIGHT
+            _pace_var_mult = max(0.88, min(1.12, 1.0 + _pace_w * (_opp_pace_factor - 1.0)))
+            _proj_stdev *= _pace_var_mult
 
             # --- #2: Line-blend stdev reduction ---
             # Blending (1 - _LINE_BLEND_MODEL_WEIGHT) of the book line anchors that
@@ -664,6 +695,8 @@ def compute_projection(
                 "streakMult": safe_round(_streak_mult, 3) if stat in ("pts", "ast") and _streak_mult != 1.0 else None,
                 "highMinsFatigueAdj": True if _high_mins_fatigue and stat in ("pts", "ast", "reb") else None,
                 "roadTripFatigueAdj": True if _road_trip_fatigue and stat in ("pts", "reb", "ast") else None,
+                "usageMult": safe_round(_stat_usage_mult, 3) if _stat_usage_mult != 1.0 else None,
+                "paceVarianceMult": safe_round(_pace_var_mult, 3) if _pace_var_mult != 1.0 else None,
                 "capHitCount": _cap_hits[0],
                 "min": rolling.get(f"{stat}_min", 0),
                 "max": rolling.get(f"{stat}_max", 0),
@@ -737,6 +770,7 @@ def compute_projection(
             "modelVariant": variant,
             "asOfDate": str(as_of_date) if as_of_date is not None else None,
             "minutesProjection": minutes_ctx,
+            "usageAdjustment": _usage_ctx,
         }
     except Exception as e:
         return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
@@ -752,6 +786,7 @@ def compute_projection_simple(
     as_of_date=None,
     opponent_is_b2b=False,
     game_total=None,
+    player_team_abbr=None,
 ):
     return compute_projection(
         player_id=player_id,
@@ -764,4 +799,5 @@ def compute_projection_simple(
         as_of_date=as_of_date,
         opponent_is_b2b=opponent_is_b2b,
         game_total=game_total,
+        player_team_abbr=player_team_abbr,
     )

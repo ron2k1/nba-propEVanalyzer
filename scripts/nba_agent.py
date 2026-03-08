@@ -31,14 +31,16 @@ MOD = os.path.join(ROOT, "nba_mod.py")
 
 _OLLAMA_BASE = "http://localhost:11434"
 _OLLAMA_MODEL = "gpt-oss:20b"
-_TIMEOUT = 120
+_OLLAMA_TIMEOUT = 120
+_STEP_TIMEOUT_DEFAULT = 120
+_STEP_TIMEOUT_LONG = 600
 
 
 # ── Workflow definitions ──────────────────────────────────────────────────────
 
 WORKFLOWS = {
     "daily_scan": {
-        "description": "Collect lines → best_today → roster_sweep → log signals",
+        "description": "Collect lines → roster_sweep → best_today → log signals",
         "steps": [
             {
                 "name": "collect_lines",
@@ -46,12 +48,13 @@ WORKFLOWS = {
                 "optional": True,
             },
             {
-                "name": "best_today",
-                "args": ["best_today", "20"],
-            },
-            {
                 "name": "roster_sweep",
                 "args": ["roster_sweep"],
+                "timeout_sec": _STEP_TIMEOUT_LONG,
+            },
+            {
+                "name": "best_today",
+                "args": ["best_today", "20"],
             },
         ],
     },
@@ -100,7 +103,7 @@ WORKFLOWS = {
 
 # ── Command runner ────────────────────────────────────────────────────────────
 
-def _run_step(args, dry_run=False):
+def _run_step(args, dry_run=False, timeout_sec=_STEP_TIMEOUT_DEFAULT):
     """Run a single nba_mod.py command, return (result_dict, raw_stdout, error)."""
     cmd = [PYTHON, MOD] + args
     if dry_run:
@@ -111,7 +114,7 @@ def _run_step(args, dry_run=False):
             cmd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout_sec,
             cwd=ROOT,
         )
         stdout = proc.stdout.strip()
@@ -127,7 +130,7 @@ def _run_step(args, dry_run=False):
             return {"raw": stdout}, stdout, None
 
     except subprocess.TimeoutExpired:
-        return None, "", "timeout after 120s"
+        return None, "", f"timeout after {timeout_sec}s"
     except Exception as exc:
         return None, "", str(exc)
 
@@ -235,7 +238,7 @@ def _summarize(workflow_name, step_results, dry_run=False):
                 "stream": False,
                 "options": {"temperature": 0.1},
             },
-            timeout=_TIMEOUT,
+            timeout=_OLLAMA_TIMEOUT,
         )
         if resp.status_code != 200:
             return f"Ollama error {resp.status_code}", "ollama_error"
@@ -260,15 +263,17 @@ def run_workflow(workflow_name, ctx, dry_run=False, verbose=False):
         name = step_def["name"]
         args = _interpolate(step_def["args"], ctx)
         optional = step_def.get("optional", False)
+        timeout_sec = int(step_def.get("timeout_sec", _STEP_TIMEOUT_DEFAULT))
 
         if verbose:
             print(f"  → {name}: {' '.join(args)}", file=sys.stderr)
 
-        result, raw, err = _run_step(args, dry_run=dry_run)
+        result, raw, err = _run_step(args, dry_run=dry_run, timeout_sec=timeout_sec)
 
         step_entry = {
             "step": name,
             "args": args,
+            "timeoutSec": timeout_sec,
             "ok": err is None and result is not None,
             "result": result,
             "error": err,

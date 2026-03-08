@@ -21,6 +21,7 @@ _log = logging.getLogger("nba_engine.journal")
 
 _ROOT = dirname(dirname(abspath(__file__)))
 _DEFAULT_DB_PATH = join(_ROOT, "data", "decision_journal", "decision_journal.sqlite")
+_VALIDATION_EXCLUDED_BOOKS = frozenset({"user_supplied"})
 
 
 def _ct_day_utc_bounds(date_str):
@@ -77,6 +78,14 @@ from .nba_bet_tracking import (
 # ---------------------------------------------------------------------------
 from .gates import SIGNAL_SPEC, CURRENT_SIGNAL_VERSION, _qualifies  # re-export
 from .nba_data_collection import BETTING_POLICY
+
+
+def _book_key(book):
+    return str(book or "").strip().lower()
+
+
+def _exclude_from_validation(book):
+    return _book_key(book) in _VALIDATION_EXCLUDED_BOOKS
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -826,8 +835,8 @@ class DecisionJournal:
         utc_start, _    = _ct_day_utc_bounds(date_from)
         _,        utc_end = _ct_day_utc_bounds(date_to)
         cur = self._conn.execute(
-            """SELECT s.signal_id, s.stat, s.confidence, s.recommended_edge, s.used_real_line,
-                      s.action_taken,
+            """SELECT s.signal_id, s.ts_utc, s.book, s.stat, s.confidence,
+                      s.recommended_edge, s.used_real_line, s.action_taken,
                       o.result, o.pnl_units, o.clv_delta
                FROM signals s
                LEFT JOIN outcomes o ON s.signal_id = o.signal_id
@@ -836,10 +845,14 @@ class DecisionJournal:
         )
         rows = cur.fetchall()
         cols = [
-            "signal_id", "stat", "confidence", "recommended_edge", "used_real_line",
-            "action_taken", "result", "pnl_units", "clv_delta",
+            "signal_id", "ts_utc", "book", "stat", "confidence", "recommended_edge",
+            "used_real_line", "action_taken", "result", "pnl_units", "clv_delta",
         ]
-        records = [dict(zip(cols, r)) for r in rows]
+        raw_records = [dict(zip(cols, r)) for r in rows]
+        excluded_manual_count = sum(
+            1 for r in raw_records if _exclude_from_validation(r.get("book"))
+        )
+        records = [r for r in raw_records if not _exclude_from_validation(r.get("book"))]
 
         qualifying_count = len(records)
         taken_count = sum(1 for r in records if r.get("action_taken"))
@@ -931,14 +944,17 @@ class DecisionJournal:
             d += timedelta(days=1)
 
         # Signal ts_utc is stored in UTC; shift by -6h to recover the
-        # Central Time game day (matches _ct_day_utc_bounds convention).
-        ct_signal_dates_cur = self._conn.execute(
-            """SELECT DISTINCT DATE(ts_utc, '-6 hours') AS ct_date
-               FROM signals
-               WHERE ts_utc >= ? AND ts_utc < ?""",
-            (utc_start, utc_end),
-        )
-        dates_with_signals = {row[0] for row in ct_signal_dates_cur.fetchall()}
+        # Central Time game day (matches existing report convention).
+        dates_with_signals = set()
+        for r in records:
+            ts_utc = str(r.get("ts_utc") or "").strip()
+            if not ts_utc:
+                continue
+            try:
+                dt = datetime.strptime(ts_utc, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+                continue
+            dates_with_signals.add((dt - timedelta(hours=6)).date().isoformat())
         gaps = sorted(all_dates - dates_with_signals)
 
         coverage = {
@@ -968,6 +984,10 @@ class DecisionJournal:
             "by_edge_bucket": by_edge,
             "by_line_type": by_line_type,
             "coverage": coverage,
+            "exclusions": {
+                "books": sorted(_VALIDATION_EXCLUDED_BOOKS),
+                "signalsExcluded": excluded_manual_count,
+            },
         }
 
     # ------------------------------------------------------------------
@@ -988,7 +1008,7 @@ class DecisionJournal:
         date_to_str = date_to.isoformat()
 
         cur = self._conn.execute(
-            """SELECT s.stat, s.action_taken, s.recommended_edge,
+            """SELECT s.book, s.stat, s.action_taken, s.recommended_edge,
                       o.result, o.pnl_units, o.clv_delta
                FROM signals s
                JOIN outcomes o ON s.signal_id = o.signal_id
@@ -997,8 +1017,15 @@ class DecisionJournal:
             (date_from_str, date_to_str),
         )
         rows = cur.fetchall()
-        cols = ["stat", "action_taken", "recommended_edge", "result", "pnl_units", "clv_delta"]
-        all_records = [dict(zip(cols, r)) for r in rows]
+        cols = [
+            "book", "stat", "action_taken", "recommended_edge",
+            "result", "pnl_units", "clv_delta",
+        ]
+        raw_records = [dict(zip(cols, r)) for r in rows]
+        excluded_manual_count = sum(
+            1 for r in raw_records if _exclude_from_validation(r.get("book"))
+        )
+        all_records = [r for r in raw_records if not _exclude_from_validation(r.get("book"))]
         # Filter to BETTING_POLICY stat_whitelist — reb signals are logged for
         # research but must NOT count toward the GO-LIVE gate.
         _wl = BETTING_POLICY.get("stat_whitelist")
@@ -1113,6 +1140,8 @@ class DecisionJournal:
                 "min_roi": min_roi,
                 "min_positive_clv_pct": min_positive_clv_pct,
                 "stat_whitelist": sorted(BETTING_POLICY.get("stat_whitelist", set())),
+                "excluded_books": sorted(_VALIDATION_EXCLUDED_BOOKS),
+                "signals_excluded": excluded_manual_count,
             },
         }
 

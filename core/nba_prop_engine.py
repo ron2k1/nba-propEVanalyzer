@@ -3,9 +3,13 @@
 
 from nba_api.stats.static import players as nba_players_static
 
+from statistics import NormalDist
+
 from .nba_data_collection import get_nba_player_prop_offers, safe_round
 from .nba_data_prep import compute_projection
 from .nba_ev_engine import american_to_decimal, american_to_implied_prob, compute_ev
+
+_POISSON_STATS = {"stl", "blk", "fg3m", "tov"}
 
 _ALL_PLAYERS_BY_ID = {
     int(p["id"]): str(p.get("full_name", ""))
@@ -103,6 +107,8 @@ def compute_prop_ev(
     model_variant="full",
     reference_book=None,
     auto_pinnacle=True,
+    refresh_market_offers=True,
+    as_of_date=None,
     no_blend=True,  # blend disabled 2026-03-03: -18.2pp blend effect confirmed by factorial (raw Brier wins 5/7 stats)
     opponent_is_b2b=False,
     game_total=None,
@@ -134,9 +140,11 @@ def compute_prop_ev(
         season=season,
         blend_with_line=None if no_blend else {stat_key: line_val},
         model_variant=model_variant,
+        as_of_date=as_of_date,
         opponent_is_b2b=opponent_is_b2b,
         game_total=game_total,
         minutes_multiplier=minutes_multiplier,
+        player_team_abbr=player_team_abbr,
     )
     if not proj_data.get("success"):
         return proj_data
@@ -154,11 +162,12 @@ def compute_prop_ev(
     best_over_book = None
     best_under_book = None
     line_shopping = None
+    commence_time = None
     player_name = _ALL_PLAYERS_BY_ID.get(int(player_id), "")
     reference_probs = None
     reference_book_meta = None
 
-    if player_team_abbr and player_name:
+    if refresh_market_offers and player_team_abbr and player_name:
         offers_data = get_nba_player_prop_offers(
             player_name=player_name,
             player_team_abbr=player_team_abbr,
@@ -172,6 +181,7 @@ def compute_prop_ev(
         )
         if offers_data.get("success"):
             offers = offers_data.get("offers", []) or []
+            commence_time = offers_data.get("commenceTime")
 
             # #7: Auto-Pinnacle reference — extract Pinnacle offers within ±0.5 of
             # target line and use their no-vig probability instead of the Normal CDF.
@@ -232,47 +242,91 @@ def compute_prop_ev(
                 "error": offers_data.get("error"),
                 "details": offers_data.get("details"),
             }
+    elif not refresh_market_offers:
+        line_shopping = {
+            "skipped": True,
+            "reason": "market_refresh_disabled",
+        }
 
-        if reference_book and str(reference_book).strip():
-            ref_book_str = str(reference_book).strip()
-            ref_offers_data = get_nba_player_prop_offers(
-                player_name=player_name,
-                player_team_abbr=player_team_abbr,
-                opponent_abbr=opponent_abbr,
-                is_home=is_home,
-                stat=stat_key,
-                regions=regions,
-                bookmakers=ref_book_str,
-                sport=sport,
-                odds_format="american",
-            )
-            if ref_offers_data.get("success"):
-                ref_offers = ref_offers_data.get("offers", []) or []
-                ref_over, ref_under = _best_side_prices_for_line(ref_offers, line_val, tolerance=0.051)
-                if ref_over and ref_under:
-                    p_over_raw = american_to_implied_prob(ref_over["odds"])
-                    p_under_raw = american_to_implied_prob(ref_under["odds"])
-                    total = (p_over_raw or 0.0) + (p_under_raw or 0.0)
-                    if total > 0:
-                        reference_probs = {
-                            "over": p_over_raw / total,
-                            "under": p_under_raw / total,
-                            "push": 0.0,
-                        }
-                        reference_book_meta = {
-                            "book": ref_book_str,
-                            "line": line_val,
-                            "overOdds": ref_over["odds"],
-                            "underOdds": ref_under["odds"],
-                            "noVigOver": safe_round(p_over_raw / total, 4),
-                            "noVigUnder": safe_round(p_under_raw / total, 4),
-                        }
+    # Fallback: derive commenceTime from NBA schedule when offers weren't fetched
+    if refresh_market_offers and not commence_time and opponent_abbr:
+        try:
+            from .nba_data_collection import get_todays_games
+            _sched = get_todays_games()
+            _opp_upper = str(opponent_abbr).upper()
+            _matches = [
+                g for g in _sched.get("games", [])
+                if _opp_upper in (
+                    g.get("homeTeam", {}).get("abbreviation", "").upper(),
+                    g.get("awayTeam", {}).get("abbreviation", "").upper(),
+                )
+            ]
+            if len(_matches) == 1:  # unambiguous
+                commence_time = _matches[0].get("gameTimeUTC")
+        except Exception:
+            pass
+
+    if refresh_market_offers and reference_book and str(reference_book).strip():
+        ref_book_str = str(reference_book).strip()
+        ref_offers_data = get_nba_player_prop_offers(
+            player_name=player_name,
+            player_team_abbr=player_team_abbr,
+            opponent_abbr=opponent_abbr,
+            is_home=is_home,
+            stat=stat_key,
+            regions=regions,
+            bookmakers=ref_book_str,
+            sport=sport,
+            odds_format="american",
+        )
+        if ref_offers_data.get("success"):
+            ref_offers = ref_offers_data.get("offers", []) or []
+            ref_over, ref_under = _best_side_prices_for_line(ref_offers, line_val, tolerance=0.051)
+            if ref_over and ref_under:
+                p_over_raw = american_to_implied_prob(ref_over["odds"])
+                p_under_raw = american_to_implied_prob(ref_under["odds"])
+                total = (p_over_raw or 0.0) + (p_under_raw or 0.0)
+                if total > 0:
+                    reference_probs = {
+                        "over": p_over_raw / total,
+                        "under": p_under_raw / total,
+                        "push": 0.0,
+                    }
+                    reference_book_meta = {
+                        "book": ref_book_str,
+                        "line": line_val,
+                        "overOdds": ref_over["odds"],
+                        "underOdds": ref_under["odds"],
+                        "noVigOver": safe_round(p_over_raw / total, 4),
+                        "noVigUnder": safe_round(p_under_raw / total, 4),
+                    }
 
     projection_val = proj["projection"]
     stdev_val = proj.get("projStdev") or proj.get("stdev") or 0
+
+    # Feature 3: Market-implied projection delta (Normal stats only).
+    # Convert Pinnacle no-vig probability back to an implied projection
+    # via inverse CDF to see how far the model diverges from the market.
+    implied_projection = None
+    model_market_delta = None
+    if (reference_book_meta and stat_key not in _POISSON_STATS
+            and stdev_val > 0):
+        _nv_over = reference_book_meta.get("noVigOver")
+        _pin_line = reference_book_meta.get("line", line_val)
+        if _nv_over is not None:
+            try:
+                _p = max(0.01, min(0.99, float(_nv_over)))
+                implied_projection = safe_round(
+                    float(_pin_line) - float(stdev_val) * NormalDist().inv_cdf(1.0 - _p), 1
+                )
+                model_market_delta = safe_round(float(projection_val) - implied_projection, 1)
+            except Exception:
+                pass
+
     ev_data = compute_ev(
         projection_val, line_val, best_over_odds, best_under_odds, stdev_val,
         stat=stat_key, reference_probs=reference_probs,
+        as_of_date=as_of_date,
     )
 
     return {
@@ -297,6 +351,10 @@ def compute_prop_ev(
         "bestUnderBook": best_under_book,
         "lineShopping": line_shopping,
         "referenceBook": reference_book_meta,
+        "usageAdjustment": proj_data.get("usageAdjustment"),
+        "impliedProjection": implied_projection,
+        "modelMarketDelta": model_market_delta,
+        "commenceTime": commence_time,
     }
 
 
@@ -330,7 +388,8 @@ def compute_auto_line_sweep(
                 odds_format="american",
             )
 
-        proj_data = compute_projection(player_id, opponent_abbr, is_home, is_b2b, season)
+        proj_data = compute_projection(player_id, opponent_abbr, is_home, is_b2b, season,
+                                       player_team_abbr=player_team_abbr)
         if not proj_data.get("success"):
             return proj_data
 
