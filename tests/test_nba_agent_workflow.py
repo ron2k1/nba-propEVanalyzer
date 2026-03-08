@@ -24,6 +24,28 @@ def test_daily_scan_workflow_order_and_timeout():
     assert steps[1]["timeout_sec"] == module._STEP_TIMEOUT_LONG
 
 
+def test_line_collect_workflow_contains_only_collect_lines():
+    module = _load_nba_agent_module()
+    steps = module.WORKFLOWS["line_collect"]["steps"]
+
+    assert [step["name"] for step in steps] == ["collect_lines"]
+
+
+def test_full_pipeline_workflow_sequence():
+    module = _load_nba_agent_module()
+    steps = module.WORKFLOWS["full_pipeline"]["steps"]
+
+    assert [step["name"] for step in steps] == [
+        "collect_lines",
+        "roster_sweep",
+        "best_today",
+        "paper_settle",
+        "paper_summary",
+        "journal_gate",
+    ]
+    assert steps[1]["timeout_sec"] == module._STEP_TIMEOUT_LONG
+
+
 def test_daily_scan_dry_run_reports_step_timeouts():
     module = _load_nba_agent_module()
     ctx = {

@@ -15,9 +15,7 @@ from .nba_data_collection import safe_round
 from .nba_ev_engine import american_to_decimal, american_to_implied_prob, compute_ev
 from .nba_prop_engine import compute_prop_ev
 
-DEFAULT_PROJECTION_ML_MODEL_PATH = str(
-    (Path(__file__).resolve().parent.parent / "models" / "production_projection_model.pkl")
-)
+DEFAULT_PROJECTION_ML_MODEL_PATH = None
 DEFAULT_OUTCOME_ML_MODEL_PATH = str(
     (Path(__file__).resolve().parent.parent / "models" / "production_outcome_model.pkl")
 )
@@ -53,6 +51,8 @@ _DEFAULT_OUTCOME_FEATURE_KEYS = [
     "bin",
     "sideIsOver",
     "usedRealLine",
+    "nGames",
+    "shrinkWeight",
 ] + [f"statIs_{stat_key}" for stat_key in _OUTCOME_STAT_VALUES]
 
 
@@ -108,6 +108,22 @@ def _normalize_stat_key(value):
     if not stat:
         return "other"
     return stat if stat in _OUTCOME_STAT_VALUES[:-1] else "other"
+
+
+def _normalize_stat_filters(filter_stats):
+    if not filter_stats:
+        return None
+    if isinstance(filter_stats, str):
+        raw_values = [token.strip() for token in filter_stats.split(",")]
+    else:
+        raw_values = [str(token or "").strip() for token in filter_stats]
+    allowed = {
+        _normalize_stat_key(value)
+        for value in raw_values
+        if value
+    }
+    allowed.discard("other")
+    return allowed or None
 
 
 def default_outcome_feature_keys():
@@ -187,6 +203,8 @@ def build_outcome_feature_row(row):
     other_prob = prob_under if side_is_over >= 0.5 else prob_over
     confidence = _to_float(_first_present(row, "confidence"), max(chosen_prob, other_prob))
     edge_unit = _row_edge_unit(row, side_is_over >= 0.5)
+    n_games = _to_float(_first_present(row, "nGames", "n_games", "gamesPlayed", "games_played"), 0.0)
+    shrink_weight = _to_float(_first_present(row, "shrinkWeight", "shrink_weight"), 0.0)
 
     chosen_odds = _to_float(_first_present(row, "odds", "recommendedOdds", "recommended_odds"))
     if chosen_odds is None:
@@ -217,6 +235,8 @@ def build_outcome_feature_row(row):
         "bin": float(bin_idx),
         "sideIsOver": float(side_is_over),
         "usedRealLine": _to_bool01(_first_present(row, "usedRealLine", "used_real_line"), default=1.0),
+        "nGames": float(n_games if n_games is not None else 0.0),
+        "shrinkWeight": float(shrink_weight if shrink_weight is not None else 0.0),
     }
     for candidate in _OUTCOME_STAT_VALUES:
         feature_row[f"statIs_{candidate}"] = 1.0 if stat_key == candidate else 0.0
@@ -520,8 +540,17 @@ def _prepare_xy_outcome(rows, feature_keys):
     return np.array(X, dtype=float), np.array(y, dtype=int), kept
 
 
-def _fit_outcome_classifier(X_train, y_train, model_type="gradient_boosting", random_state=42):
+def _fit_outcome_classifier(
+    X_train,
+    y_train,
+    model_type="gradient_boosting",
+    random_state=42,
+    class_weight_balance=False,
+):
     mt = str(model_type or "gradient_boosting").lower().strip()
+    pos_count = max(int(np.sum(y_train == 1)), 1)
+    neg_count = max(int(np.sum(y_train == 0)), 1)
+    scale_pos_weight = float(neg_count) / float(pos_count)
 
     if mt in {"tabpfn"}:
         try:
@@ -549,6 +578,7 @@ def _fit_outcome_classifier(X_train, y_train, model_type="gradient_boosting", ra
             learning_rate=0.05,
             subsample=0.85,
             colsample_bytree=0.85,
+            scale_pos_weight=scale_pos_weight if class_weight_balance else 1.0,
             random_state=random_state,
             n_jobs=-1,
             eval_metric="logloss",
@@ -571,6 +601,7 @@ def _fit_outcome_classifier(X_train, y_train, model_type="gradient_boosting", ra
             random_state=random_state,
             n_jobs=-1,
             verbose=-1,
+            class_weight="balanced" if class_weight_balance else None,
         )
         est.fit(X_train, y_train)
         return est, None
@@ -609,11 +640,13 @@ def _fit_outcome_classifier(X_train, y_train, model_type="gradient_boosting", ra
             min_samples_leaf=2,
             random_state=random_state,
             n_jobs=-1,
+            class_weight="balanced" if class_weight_balance else None,
         )
     elif mt in {"logistic", "logreg"}:
         est = LogisticRegression(
             max_iter=1000,
             random_state=random_state,
+            class_weight="balanced" if class_weight_balance else None,
         )
     else:
         return None, (
@@ -633,11 +666,21 @@ def train_outcome_ml_from_file(
     model_type="gradient_boosting",
     date_key="date",
     output_model_path=None,
+    filter_stats=None,
+    class_weight_balance=False,
 ):
     rows_result = load_training_rows(data_path)
     if not rows_result.get("success"):
         return rows_result
     rows = rows_result["rows"]
+    allowed_stats = _normalize_stat_filters(filter_stats)
+    if filter_stats and not allowed_stats:
+        return {"success": False, "error": "filter_stats did not include any supported stat keys."}
+    if allowed_stats:
+        rows = [
+            row for row in rows
+            if _normalize_stat_key(_first_present(row, "stat", "stat_key")) in allowed_stats
+        ]
     if len(rows) < 500:
         return {"success": False, "error": f"Need at least 500 rows, found {len(rows)}."}
 
@@ -675,7 +718,12 @@ def train_outcome_ml_from_file(
             },
         }
 
-    est, err = _fit_outcome_classifier(X_train, y_train, model_type=model_type)
+    est, err = _fit_outcome_classifier(
+        X_train,
+        y_train,
+        model_type=model_type,
+        class_weight_balance=class_weight_balance,
+    )
     if err:
         return {"success": False, "error": err}
 
@@ -691,6 +739,8 @@ def train_outcome_ml_from_file(
         "dateKey": str(date_key),
         "trainedAtUtc": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "featureBuilder": "build_outcome_feature_row_v1",
+        "filterStats": sorted(allowed_stats) if allowed_stats else None,
+        "classWeightBalance": bool(class_weight_balance),
         "metrics": {
             "train": train_metrics,
             "holdout": hold_metrics,
@@ -724,6 +774,8 @@ def train_outcome_ml_from_file(
         "outputModelPath": str(out_path),
         "modelType": payload["modelType"],
         "featureKeys": payload["featureKeys"],
+        "filterStats": payload.get("filterStats"),
+        "classWeightBalance": payload.get("classWeightBalance"),
         "metrics": payload["metrics"],
     }
 
@@ -777,7 +829,7 @@ def train_projection_ml_from_file(
         "featureKeys": list(feature_keys),
         "targetKey": str(target_key),
         "dateKey": str(date_key),
-        "trainedAtUtc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "trainedAtUtc": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "metrics": {
             "train": train_metrics,
             "holdout": hold_metrics,
@@ -907,7 +959,7 @@ def train_projection_ml_per_stat_from_file(
         "modelType": str(model_type),
         "targetKey": target_key,
         "dateKey": date_key,
-        "trainedAtUtc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "trainedAtUtc": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "estimatorsByStat": estimators_by_stat,
         "metricsByStat": metrics_by_stat,
     }
@@ -925,6 +977,11 @@ def train_projection_ml_per_stat_from_file(
 
 
 def load_projection_ml_bundle(model_path):
+    if not model_path:
+        return {
+            "success": False,
+            "error": "No projection model path configured. Train a model and pass --model_path explicitly.",
+        }
     p = Path(model_path).expanduser().resolve()
     if not p.exists():
         return {"success": False, "error": f"Model file not found: {p}"}
@@ -1001,7 +1058,11 @@ def score_rows_with_outcome_ml(rows, model_path=DEFAULT_OUTCOME_ML_MODEL_PATH):
         }
 
     bundle = loaded["bundle"]
+    allowed_stats = _normalize_stat_filters((bundle or {}).get("filterStats"))
     for row in row_list:
+        row_stat = _normalize_stat_key(_first_present(row, "stat", "stat_key"))
+        if allowed_stats and row_stat not in allowed_stats:
+            continue
         win_prob = predict_outcome_ml(bundle, row)
         if win_prob is None:
             continue
@@ -1029,6 +1090,8 @@ def score_rows_with_outcome_ml(rows, model_path=DEFAULT_OUTCOME_ML_MODEL_PATH):
         "loaded": True,
         "modelPath": bundle.get("modelPath"),
         "modelType": bundle.get("modelType"),
+        "filterStats": bundle.get("filterStats"),
+        "classWeightBalance": bundle.get("classWeightBalance"),
         "rows": row_list,
     }
 
@@ -1156,6 +1219,13 @@ def promote_projection_ml_model(
     cand_loaded = load_projection_ml_bundle(candidate_model_path)
     if not cand_loaded.get("success"):
         return cand_loaded
+    if not production_model_path:
+        return {
+            "success": False,
+            "error": (
+                "production_model_path is required because no default production projection model is configured."
+            ),
+        }
 
     candidate = cand_loaded["bundle"]
     cand_hold = ((candidate.get("metrics") or {}).get("holdout") or {})
@@ -1274,7 +1344,7 @@ def train_quantile_projection_from_file(
         "estimators": estimators,
         "featureKeys": list(feature_keys),
         "targetKey": target_key,
-        "trainedAtUtc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "trainedAtUtc": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
     }
     with open(out_path, "wb") as f:
         pickle.dump(payload, f)
@@ -1385,7 +1455,7 @@ def train_ridge_calibrator(rows, feature_keys, target_key="actual", ridge_alpha=
     model = {
         "type": "ridge_calibrator",
         "version": 1,
-        "trainedAtUtc": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "trainedAtUtc": datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "featureKeys": list(feature_keys),
         "targetKey": str(target_key),
         "ridgeAlpha": alpha,

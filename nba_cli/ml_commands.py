@@ -52,17 +52,35 @@ def handle_ml_command(command, argv):
             return {
                 "error": (
                     "Usage: train_outcome_ml <data_path> [feature_keys_csv|auto] "
-                    "[holdout_frac] [min_holdout] [model_type] [date_key] [output_model_path]\n"
+                    "[holdout_frac] [min_holdout] [model_type] [date_key] [output_model_path] "
+                    "[--filter-stats pts,ast] [--class-weight-balance]\n"
                     "model_type: gradient_boosting|hist_gbc|xgboost|lightgbm|random_forest|logistic|tabpfn"
                 )
             }
         data_path = argv[2]
-        feature_arg = argv[3] if len(argv) > 3 else "auto"
-        holdout_frac = float(argv[4]) if len(argv) > 4 else 0.2
-        min_holdout = int(argv[5]) if len(argv) > 5 else 250
-        model_type = argv[6] if len(argv) > 6 else "gradient_boosting"
-        date_key = argv[7] if len(argv) > 7 else "date"
-        output_model_path = argv[8] if len(argv) > 8 else None
+        positional = []
+        filter_stats = None
+        class_weight_balance = False
+        idx = 3
+        while idx < len(argv):
+            token = argv[idx]
+            if token == "--filter-stats" and idx + 1 < len(argv):
+                filter_stats = [s.strip() for s in argv[idx + 1].split(",") if s.strip()]
+                idx += 2
+                continue
+            if token == "--class-weight-balance":
+                class_weight_balance = True
+                idx += 1
+                continue
+            positional.append(token)
+            idx += 1
+
+        feature_arg = positional[0] if len(positional) > 0 else "auto"
+        holdout_frac = float(positional[1]) if len(positional) > 1 else 0.2
+        min_holdout = int(positional[2]) if len(positional) > 2 else 250
+        model_type = positional[3] if len(positional) > 3 else "gradient_boosting"
+        date_key = positional[4] if len(positional) > 4 else "date"
+        output_model_path = positional[5] if len(positional) > 5 else None
 
         feature_keys = None if feature_arg.lower() == "auto" else [
             k.strip() for k in feature_arg.split(",") if k.strip()
@@ -76,6 +94,8 @@ def handle_ml_command(command, argv):
             model_type=model_type,
             date_key=date_key,
             output_model_path=output_model_path,
+            filter_stats=filter_stats,
+            class_weight_balance=class_weight_balance,
         )
 
     if command == "train_projection_ml_per_stat":

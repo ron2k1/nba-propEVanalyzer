@@ -22,13 +22,14 @@ tests/          test_betting_policy, test_compute_ev, test_gates
 
 ## 2. Recent Changes
 
+- **2026-03-07:** freeze lifted - experimentation allowed again on branches with verification + documentation
 - **2026-03-05:** reb signal leak fixed — `gate_check()` now filters by BETTING_POLICY before GO-LIVE metrics
 - **2026-03-04:** match-live `stat_whitelist` fix in `nba_backtest.py` (162 phantom reb bets removed)
 - **2026-03-03:** blend disabled (`no_blend=True`), bins tightened to 0+9 only (bins 1+8 blocked)
 - **2026-03-01:** `min_edge=0.08`, `min_confidence=0.60`, **FREEZE started** — no model/calibration/policy changes
 - **2026-02-28:** reb removed from stat_whitelist (-5.34% ROI)
 
-## 3. Current State (FROZEN until ~2026-03-15)
+## 3. Current State (Freeze Lifted)
 
 **BETTING_POLICY** (`core/nba_data_collection.py`):
 - `stat_whitelist`: `{pts, ast}` — only these count for GO-LIVE gate
@@ -43,6 +44,8 @@ tests/          test_betting_policy, test_compute_ev, test_gates
 **Two-layer architecture:** `gate_check()` returns: (1) **metrics** — policy-qualified (pts+ast), drives GO-LIVE; (2) **model_leans** — all eligible signals; (3) **research_stats** — eligible but not in whitelist (reb); (4) **edge_at_emission** — pick-time edge stats.
 
 **Calibration temps** (refitted 2026-03-01): `pts=1.81 reb=3.79 ast=2.24 fg3m=1.49 pra=1.77 stl=1.39 blk=1.30 tov=1.25`
+
+**Change policy:** projection, calibration, and gating experiments are allowed again, but only on branches with explicit verification. Forward paper-trading summaries remain the source of truth for live deployment decisions.
 
 ## 4. Workflow Principles
 

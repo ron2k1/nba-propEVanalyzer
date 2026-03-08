@@ -76,6 +76,36 @@ def test_append_journal_entry_appends_distinct_keys(monkeypatch):
     journal_path.unlink(missing_ok=True)
 
 
+def test_dedup_journal_collapses_cleanup_key_duplicates(monkeypatch):
+    journal_path = _scratch_journal_path()
+    journal_path.unlink(missing_ok=True)
+    monkeypatch.setattr(bt, "DATA_DIR", journal_path.parent)
+    monkeypatch.setattr(bt, "JOURNAL_PATH", journal_path)
+
+    first = {
+        **_make_entry(entry_id="first", created_at="2026-03-05T18:00:00Z", line=10.5),
+        "playerName": "Marcus Sasser",
+        "overOdds": -110,
+        "underOdds": -110,
+    }
+    second = {
+        **_make_entry(entry_id="second", created_at="2026-03-05T18:05:00Z", line=10.5),
+        "playerName": "Marcus Sasser",
+        "overOdds": -115,
+        "underOdds": -105,
+    }
+
+    bt._write_journal_entries([first, second])
+    result = bt.dedup_journal()
+    entries = bt._load_journal_entries()
+
+    assert result["success"] is True
+    assert result["removedCount"] == 1
+    assert len(entries) == 1
+    assert entries[0]["entryId"] == "second"
+    journal_path.unlink(missing_ok=True)
+
+
 def test_get_playing_teams_today_falls_back_to_line_history(monkeypatch):
     monkeypatch.setattr(dc, "get_todays_games", lambda game_date=None: {"games": []})
     monkeypatch.setattr(

@@ -39,6 +39,15 @@ _STEP_TIMEOUT_LONG = 600
 # ── Workflow definitions ──────────────────────────────────────────────────────
 
 WORKFLOWS = {
+    "line_collect": {
+        "description": "Collect fresh sportsbook lines only",
+        "steps": [
+            {
+                "name": "collect_lines",
+                "args": ["collect_lines", "--books", "betmgm,draftkings,fanduel", "--stats", "pts,ast"],
+            },
+        ],
+    },
     "daily_scan": {
         "description": "Collect lines → roster_sweep → best_today → log signals",
         "steps": [
@@ -55,6 +64,36 @@ WORKFLOWS = {
             {
                 "name": "best_today",
                 "args": ["best_today", "20"],
+            },
+        ],
+    },
+    "full_pipeline": {
+        "description": "Collect lines -> roster_sweep -> best_today -> settle yesterday -> summary -> gate",
+        "steps": [
+            {
+                "name": "collect_lines",
+                "args": ["collect_lines", "--books", "betmgm,draftkings,fanduel", "--stats", "pts,ast"],
+            },
+            {
+                "name": "roster_sweep",
+                "args": ["roster_sweep"],
+                "timeout_sec": _STEP_TIMEOUT_LONG,
+            },
+            {
+                "name": "best_today",
+                "args": ["best_today", "20"],
+            },
+            {
+                "name": "paper_settle",
+                "args": ["paper_settle", "{yesterday}"],
+            },
+            {
+                "name": "paper_summary",
+                "args": ["paper_summary", "--window-days", "14"],
+            },
+            {
+                "name": "journal_gate",
+                "args": ["journal_gate", "--window-days", "14"],
             },
         ],
     },

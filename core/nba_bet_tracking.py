@@ -94,10 +94,15 @@ def _parse_game_date(raw):
 
 
 def _load_journal_entries():
-    if not JOURNAL_PATH.exists():
+    return _load_entries_from_path(JOURNAL_PATH)
+
+
+def _load_entries_from_path(path):
+    path = Path(path)
+    if not path.exists():
         return []
     entries = []
-    with JOURNAL_PATH.open("r", encoding="utf-8") as f:
+    with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -110,14 +115,20 @@ def _load_journal_entries():
 
 
 def _write_journal_entries(entries):
+    _write_entries_to_path(JOURNAL_PATH, entries)
+
+
+def _write_entries_to_path(path, entries):
     _ensure_data_dir()
-    fd, tmp_path = tempfile.mkstemp(prefix="prop_journal_", suffix=".tmp", dir=str(DATA_DIR))
+    target_path = Path(path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix="prop_journal_", suffix=".tmp", dir=str(target_path.parent))
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             for item in entries:
                 f.write(json.dumps(item, separators=(",", ":"), ensure_ascii=False))
                 f.write("\n")
-        os.replace(tmp_path, JOURNAL_PATH)
+        os.replace(tmp_path, target_path)
     finally:
         try:
             if os.path.exists(tmp_path):
@@ -164,6 +175,48 @@ def _dedupe_latest(entries):
         if prev is None or ts >= str(prev.get("createdAtUtc", "")):
             latest[key] = entry
     return list(latest.values())
+
+
+def _cleanup_entry_key(entry):
+    player_id = _as_int(entry.get("playerId"))
+    if player_id:
+        player_key = f"id:{player_id}"
+    else:
+        player_key = str(
+            entry.get("playerName")
+            or entry.get("playerIdentifierInput")
+            or ""
+        ).strip().lower()
+    return (
+        str(entry.get("pickDate", "")),
+        player_key,
+        str(entry.get("stat", "")).lower(),
+        safe_round(_as_float(entry.get("line", entry.get("lineAtBet")), 0.0), 3),
+    )
+
+
+def dedup_journal(journal_path=None, write=True):
+    target_path = Path(journal_path) if journal_path is not None else JOURNAL_PATH
+    entries = _load_entries_from_path(target_path)
+    latest = {}
+    for entry in entries:
+        key = _cleanup_entry_key(entry)
+        created_at = str(entry.get("createdAtUtc", ""))
+        previous = latest.get(key)
+        if previous is None or created_at >= str(previous.get("createdAtUtc", "")):
+            latest[key] = entry
+    deduped = sorted(latest.values(), key=lambda item: str(item.get("createdAtUtc", "")))
+    removed = len(entries) - len(deduped)
+    if write and entries:
+        _write_entries_to_path(target_path, deduped)
+    return {
+        "success": True,
+        "journalPath": str(target_path),
+        "beforeCount": len(entries),
+        "afterCount": len(deduped),
+        "removedCount": removed,
+        "writeApplied": bool(write),
+    }
 
 
 def _resolve_recommended_side(ev_data):
@@ -921,6 +974,8 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
             "loaded": bool(score_result.get("loaded")),
             "modelPath": score_result.get("modelPath"),
             "modelType": score_result.get("modelType"),
+            "filterStats": score_result.get("filterStats"),
+            "classWeightBalance": score_result.get("classWeightBalance"),
         }
     elif score_result.get("error") and "not found" not in str(score_result.get("error")).lower():
         outcome_model_meta = {

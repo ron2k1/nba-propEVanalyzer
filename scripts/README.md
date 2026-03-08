@@ -31,6 +31,7 @@
 | `validate_stdev_shrink.py` | Stdev shrinkage validation |
 | `calibration_blend_check.py` | Blend vs raw calibration comparison |
 | `compare_backtests.py` | Backtest comparison and diffing |
+| `compare_models.py` | Saved-model comparison and markdown report generation |
 | `compare_factorial.py` | Factorial experiment comparison (blend effects) |
 | `analyze_real_lines.py` | Real-line performance analysis |
 | `bin0_killswitch.py` | Bin 0 emergency shutdown |
@@ -42,6 +43,9 @@
 | Script | Purpose |
 |--------|---------|
 | `nba_agent.py` | Autonomous fixed-workflow agent runner |
+| `scheduled_pipeline.py` | Scheduler-safe wrapper for collect-only or full pipeline runs |
+| `scheduled_settle.py` | Scheduler-safe wrapper for paper settlement + summary |
+| `register_scheduled_tasks.ps1` | Register Windows Task Scheduler jobs for pipeline automation |
 | `autocheck_daemon.py` | Continuous monitoring daemon |
 | `betmgm_scan.py` | BetMGM prop scanning |
 | `dk_sweep_batch.py` | DraftKings batch prop sweep |
