@@ -10,6 +10,7 @@ The system must pass ALL of the following before live betting begins:
 - [ ] `positive_clv_pct >= 50.0`
 - [ ] No single stat with ≥20 signals AND hit rate < 45%
 - [ ] Earliest date: 2026-03-14
+- [ ] Validation metrics exclude manual `book=user_supplied` entries
 
 ## Calibration Requirements
 
@@ -22,9 +23,12 @@ The system must pass ALL of the following before live betting begins:
 
 ## Signal Quality Requirements
 
-- Stat must be in whitelist: `{pts, reb, ast, pra}`
-- Edge ≥ 0.05 (reb: ≥ 0.08)
-- Confidence ≥ 0.55 (not in 40–60% blocked bins)
+- Policy whitelist for GO signals: `{pts, ast}`
+- Research-only signal tracking may still log `reb` if a real Odds API line exists
+- Eligible signal stats (`SIGNAL_SPEC`): `{pts, reb, ast}`
+- Edge ≥ 0.08 (`ast`: ≥ 0.09, `reb`: ≥ 0.08)
+- Confidence ≥ 0.60
+- Active probability bins: `0` and `9` only (`blocked_prob_bins = {1,2,3,4,5,6,7,8}`)
 - reb signals: real Odds API line required (no synthetic fallback)
 - CLV gate (Week 2-3): `clvLine > 0` AND `clvOddsPct > 0`
 
@@ -49,8 +53,9 @@ The system must pass ALL of the following before live betting begins:
 | Real-line hit rate | > 52.4% |
 | Real-line ROI/bet | > 0% |
 | CLV-positive % | ≥ 50% |
-| pts/ast/pra ROI each | > 0% |
-| reb ROI | monitor; remove if negative at Day 7 |
-| 60-70% bin hit rate | > 54% |
+| pts/ast ROI each | > 0% |
+| reb ROI | research-only; monitor separately |
+| Bin 0 hit rate | monitor |
+| Bin 9 hit rate | monitor (small sample until stabilized) |
 | Minutes 35+ bias | < ±3.0 min (after Step 4) |
 | Brier avg | < 0.235 |

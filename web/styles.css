@@ -1528,3 +1528,35 @@ details[open] summary {
   color: var(--brand);
   text-decoration: underline;
 }
+
+/* ── Chart Containers ─────────────────────────────────── */
+.chart-row {
+  display: flex;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.chart-container {
+  flex: 1;
+  min-width: 0;
+  height: 280px;
+  background: var(--bg-accent);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  position: relative;
+}
+
+.chart-container.chart-wide {
+  flex: 1 1 100%;
+  height: 240px;
+}
+
+@media (max-width: 768px) {
+  .chart-row {
+    flex-direction: column;
+  }
+  .chart-container {
+    height: 220px;
+  }
+}
