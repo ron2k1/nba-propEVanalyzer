@@ -106,6 +106,77 @@ def test_train_outcome_ml_from_file_and_predict():
     out_path.unlink(missing_ok=True)
 
 
+def test_train_outcome_ml_with_isotonic_calibration():
+    data_path = _scratch_path("_test_outcome_cal.jsonl")
+    out_path = _scratch_path("_test_outcome_cal_model.pkl")
+    data_path.unlink(missing_ok=True)
+    out_path.unlink(missing_ok=True)
+    rows = []
+    for idx in range(700):
+        line = 10.0 + float(idx % 4)
+        projection = line + (2.5 if idx % 2 == 0 else -2.5)
+        side = "over" if idx % 4 < 2 else "under"
+        prob_over = 0.82 if projection > line else 0.18
+        win = (side == "over" and projection > line) or (side == "under" and projection < line)
+        stat = "ast" if idx % 3 == 0 else "pts"
+        rows.append(
+            {
+                "date": f"2026-01-{(idx % 28) + 1:02d}",
+                "stat": stat,
+                "side": side,
+                "projection": projection,
+                "line": line,
+                "prob_over": prob_over,
+                "edge": abs(projection - line) / 10.0,
+                "odds": -110,
+                "bin": max(0, min(9, int(prob_over * 10))),
+                "used_real_line": 1,
+                "n_games": 15,
+                "shrink_weight": 0.35,
+                "outcome": "win" if win else "loss",
+            }
+        )
+    data_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    result = ml.train_outcome_ml_from_file(
+        str(data_path),
+        holdout_frac=0.2,
+        min_holdout=40,
+        model_type="logistic",
+        output_model_path=str(out_path),
+        calibrate=True,
+    )
+
+    assert result["success"] is True
+    assert result["calibrated"] is True
+    assert "uncalibratedHoldout" in result
+    assert result["uncalibratedHoldout"]["accuracy"] is not None
+    assert result["metrics"]["holdout"]["brier"] is not None
+
+    # Calibrated model should still be loadable and predictable
+    loaded = ml.load_outcome_ml_bundle(str(out_path))
+    assert loaded["success"] is True
+    assert loaded["bundle"].get("calibrated") is True
+    pred = ml.predict_outcome_ml(
+        loaded["bundle"],
+        {
+            "stat": "pts",
+            "recommendedSide": "over",
+            "projection": 16.0,
+            "line": 12.5,
+            "probOver": 0.84,
+            "recommendedOdds": -110,
+            "usedRealLine": True,
+            "nGames": 16,
+            "shrinkWeight": 0.4,
+        },
+    )
+    assert pred is not None
+    assert 0.0 <= pred <= 1.0
+    data_path.unlink(missing_ok=True)
+    out_path.unlink(missing_ok=True)
+
+
 def test_score_rows_with_outcome_ml_skips_stats_outside_filter():
     data_path = _scratch_path("_test_outcome_rows_filter.jsonl")
     out_path = _scratch_path("_test_outcome_filter_model.pkl")

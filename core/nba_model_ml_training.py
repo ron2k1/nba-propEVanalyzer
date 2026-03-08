@@ -668,6 +668,7 @@ def train_outcome_ml_from_file(
     output_model_path=None,
     filter_stats=None,
     class_weight_balance=False,
+    calibrate=False,
 ):
     rows_result = load_training_rows(data_path)
     if not rows_result.get("success"):
@@ -727,6 +728,19 @@ def train_outcome_ml_from_file(
     if err:
         return {"success": False, "error": err}
 
+    # Pre-calibration metrics for comparison
+    uncal_hold_prob = est.predict_proba(X_hold)[:, 1]
+    uncal_metrics = _classification_metrics(y_hold, uncal_hold_prob)
+
+    if calibrate:
+        try:
+            from sklearn.calibration import CalibratedClassifierCV
+            cal_est = CalibratedClassifierCV(est, method="isotonic", cv=5)
+            cal_est.fit(X_train, y_train)
+            est = cal_est
+        except Exception as cal_err:
+            return {"success": False, "error": f"Isotonic calibration failed: {cal_err}"}
+
     train_prob = est.predict_proba(X_train)[:, 1]
     hold_prob = est.predict_proba(X_hold)[:, 1]
     train_metrics = _classification_metrics(y_train, train_prob)
@@ -741,6 +755,7 @@ def train_outcome_ml_from_file(
         "featureBuilder": "build_outcome_feature_row_v1",
         "filterStats": sorted(allowed_stats) if allowed_stats else None,
         "classWeightBalance": bool(class_weight_balance),
+        "calibrated": bool(calibrate),
         "metrics": {
             "train": train_metrics,
             "holdout": hold_metrics,
@@ -769,15 +784,19 @@ def train_outcome_ml_from_file(
     with open(out_path, "wb") as f:
         pickle.dump(payload, f)
 
-    return {
+    result = {
         "success": True,
         "outputModelPath": str(out_path),
         "modelType": payload["modelType"],
         "featureKeys": payload["featureKeys"],
         "filterStats": payload.get("filterStats"),
         "classWeightBalance": payload.get("classWeightBalance"),
+        "calibrated": payload.get("calibrated", False),
         "metrics": payload["metrics"],
     }
+    if calibrate:
+        result["uncalibratedHoldout"] = uncal_metrics
+    return result
 
 
 def train_projection_ml_from_file(

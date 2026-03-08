@@ -329,6 +329,35 @@ def compute_prop_ev(
         as_of_date=as_of_date,
     )
 
+    # D.1: Outcome model scoring — optional enrichment.
+    # If the production outcome model exists, score this prop and include the
+    # win probability. Does not gate or modify the EV calculation.
+    # Lazy import to avoid circular dependency (nba_model_ml_training -> nba_prop_engine).
+    outcome_model_prob = None
+    try:
+        from .nba_model_ml_training import load_outcome_ml_bundle, predict_outcome_ml
+        _om_loaded = load_outcome_ml_bundle()
+        if _om_loaded.get("success"):
+            _om_row = {
+                "projection": projection_val,
+                "line": line_val,
+                "probOver": ev_data.get("probOver"),
+                "probUnder": ev_data.get("probUnder"),
+                "confidence": proj.get("confidence"),
+                "stat": stat_key,
+                "nGames": proj.get("nGames"),
+                "shrinkWeight": proj.get("shrinkWeight"),
+                "usedRealLine": 1,
+                "odds": best_over_odds if ev_data.get("over", {}).get("edge", 0) >= ev_data.get("under", {}).get("edge", 0) else best_under_odds,
+                "recommendedSide": "over" if ev_data.get("over", {}).get("edge", 0) >= ev_data.get("under", {}).get("edge", 0) else "under",
+                "edge": max(ev_data.get("over", {}).get("edge", 0), ev_data.get("under", {}).get("edge", 0)),
+            }
+            _wp = predict_outcome_ml(_om_loaded["bundle"], _om_row)
+            if _wp is not None:
+                outcome_model_prob = safe_round(float(_wp), 4)
+    except Exception:
+        pass
+
     return {
         "success": True,
         "stat": stat_key,
@@ -355,6 +384,7 @@ def compute_prop_ev(
         "impliedProjection": implied_projection,
         "modelMarketDelta": model_market_delta,
         "commenceTime": commence_time,
+        "outcomeModelWinProb": outcome_model_prob,
     }
 
 

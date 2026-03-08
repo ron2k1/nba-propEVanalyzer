@@ -122,3 +122,21 @@ Specific failures:
 3. When accuracy is high but ROI is negative → the books are efficient on that market. Direction != edge
 4. Stay focused on accumulating paper trades for the proven signal (bin 0 unders, pts+ast, Normal CDF). Volume on that signal is the bottleneck, not expanding to more stats
 5. Any post-freeze pra re-evaluation must compare ROI under current config (no-blend + bins 0+9), not accuracy
+
+## 2026-03-07 — Classifier variant swapping is low-leverage; feature leakage traps
+
+**Findings from Phase 2-C training cycle:**
+
+1. **More classifiers != better performance.** GBC pts+ast (0.6302 AUC) vs XGBoost (0.5892) vs LightGBM (0.6066). Swapping classifiers on the same features gives diminishing returns. The all-stats GBC on 56K rows (0.6478 AUC) beats all pts+ast-filtered variants because more data > better algorithm.
+
+2. **Isotonic calibration has a sample-size threshold.** On 12.7K rows (pts+ast): Brier worsened 0.2344 -> 0.2362. On 56K rows (all stats): Brier improved 0.2200 -> 0.2195. The 5-fold isotonic estimator needs enough data per fold. Don't calibrate with <20K training rows.
+
+3. **Feature leakage gives false positives that look amazing.** Per-stat ML regression with auto-inferred features (including closingLine, pnl, clvDelta) showed pts MAE dropping from 4.66 to 3.14 (-32.6%). With clean features (no post-settlement data): MAE rose to 5.10 — *worse* than raw projection. The Bayesian shrinkage engine already uses all available pick-time information.
+
+4. **Quantile regression shows real but modest gain.** Clean-feature quantile P(over) vs Normal CDF: Brier 0.2216 vs 0.2249 (+1.49%). Real because it captures stat distribution skewness, but not large enough to justify replacing Normal CDF in production yet.
+
+**Rules going forward:**
+1. Always explicitly specify feature lists for ML training — never rely on auto-inference from JSONL columns. Block `closingLine`, `closingOverOdds`, `closingUnderOdds`, `clvDelta`, `clvOddsPct`, `pnl`, `outcome`, `actual`, `player_id`
+2. When ML holdout MAE < raw projection MAE by >20%, suspect leakage — verify no post-settlement features in the feature set
+3. Prefer more training rows over stat-specific filtering for outcome classifiers
+4. Isotonic calibration: use only when training set > 20K rows

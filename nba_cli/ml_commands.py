@@ -53,7 +53,7 @@ def handle_ml_command(command, argv):
                 "error": (
                     "Usage: train_outcome_ml <data_path> [feature_keys_csv|auto] "
                     "[holdout_frac] [min_holdout] [model_type] [date_key] [output_model_path] "
-                    "[--filter-stats pts,ast] [--class-weight-balance]\n"
+                    "[--filter-stats pts,ast] [--class-weight-balance] [--calibrate]\n"
                     "model_type: gradient_boosting|hist_gbc|xgboost|lightgbm|random_forest|logistic|tabpfn"
                 )
             }
@@ -61,6 +61,7 @@ def handle_ml_command(command, argv):
         positional = []
         filter_stats = None
         class_weight_balance = False
+        calibrate = False
         idx = 3
         while idx < len(argv):
             token = argv[idx]
@@ -70,6 +71,10 @@ def handle_ml_command(command, argv):
                 continue
             if token == "--class-weight-balance":
                 class_weight_balance = True
+                idx += 1
+                continue
+            if token == "--calibrate":
+                calibrate = True
                 idx += 1
                 continue
             positional.append(token)
@@ -96,6 +101,7 @@ def handle_ml_command(command, argv):
             output_model_path=output_model_path,
             filter_stats=filter_stats,
             class_weight_balance=class_weight_balance,
+            calibrate=calibrate,
         )
 
     if command == "train_projection_ml_per_stat":
