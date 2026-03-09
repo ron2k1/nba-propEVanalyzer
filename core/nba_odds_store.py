@@ -123,6 +123,75 @@ _PLAYER_ALIASES = {
 _PLAYER_ALIASES.update({v: k for k, v in list(_PLAYER_ALIASES.items())})
 
 
+def _resolve_player_name_candidate(query_name, candidate_names):
+    """
+    Resolve a requested player name to one stored in OddsStore.
+
+    Matching order:
+    1. Case-insensitive raw exact match
+    2. Normalized exact match (punctuation/suffix/initial tolerant)
+    3. Alias-normalized exact match
+    4. Unique last-name fallback within the candidate set
+
+    Returns the stored player_name string or None when ambiguous/unmatched.
+    """
+    query_raw = str(query_name or "").strip()
+    if not query_raw:
+        return None
+
+    names = []
+    seen = set()
+    for name in candidate_names or []:
+        raw = str(name or "").strip()
+        if raw and raw not in seen:
+            names.append(raw)
+            seen.add(raw)
+    if not names:
+        return None
+
+    query_raw_lower = query_raw.lower()
+    for cand in names:
+        if cand.lower() == query_raw_lower:
+            return cand
+
+    query_norm = _norm_player_name(query_raw)
+    if not query_norm:
+        return None
+
+    norm_targets = {query_norm}
+    alias_norm = _PLAYER_ALIASES.get(query_norm)
+    if alias_norm:
+        norm_targets.add(alias_norm)
+
+    norm_rows = []
+    for cand in names:
+        cand_norm = _norm_player_name(cand)
+        if cand_norm:
+            norm_rows.append((cand, cand_norm))
+
+    for target in norm_targets:
+        for cand, cand_norm in norm_rows:
+            if cand_norm == target:
+                return cand
+
+    last_targets = {
+        norm.split()[-1]
+        for norm in norm_targets
+        if norm and norm.split() and len(norm.split()[-1]) > 2
+    }
+    if not last_targets:
+        return None
+
+    last_matches = {
+        cand_norm: cand
+        for cand, cand_norm in norm_rows
+        if cand_norm.split() and cand_norm.split()[-1] in last_targets
+    }
+    if len(last_matches) == 1:
+        return next(iter(last_matches.values()))
+    return None
+
+
 _DEFAULT_DB_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "data", "reference", "odds_history", "odds_history.sqlite",
@@ -189,6 +258,7 @@ class OddsStore:
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._player_name_candidates_cache = {}
         self._init_db()
 
     def _init_db(self):
@@ -268,6 +338,7 @@ class OddsStore:
         ]
         with self._conn:
             self._conn.executemany(sql, params)
+        self._player_name_candidates_cache.clear()
         return len(params)
 
     def get_snapshots(self, date_str=None, event_id=None, market=None,
@@ -327,198 +398,110 @@ class OddsStore:
         ]
         with self._conn:
             self._conn.executemany(sql, params)
+        self._player_name_candidates_cache.clear()
         return len(params)
 
-    def get_closing_line(self, event_id, market, player_name, book=None):
-        """
-        Return closing line dict for one player prop, or None if not found.
-        Keys: book, close_line, close_over_odds, close_under_odds, close_ts_utc.
+    def _candidate_player_names(self, table, market, event_id=None, date_str=None, book=None):
+        cache_key = (table, str(event_id or ""), str(market or ""), str(date_str or ""), str(book or ""))
+        cached = self._player_name_candidates_cache.get(cache_key)
+        if cached is not None:
+            return list(cached)
 
-        Tries exact player name match first, then last-name partial match.
-        If book is None, returns first available book (alphabetical).
-        """
-        def _query(name_clause, name_val):
-            if book:
-                return self._conn.execute(
-                    f"SELECT book,close_line,close_over_odds,close_under_odds,close_ts_utc "
-                    f"FROM closing_lines "
-                    f"WHERE event_id=? AND market=? AND {name_clause} AND book=? LIMIT 1",
-                    (event_id, market, name_val, book),
-                ).fetchone()
-            return self._conn.execute(
-                f"SELECT book,close_line,close_over_odds,close_under_odds,close_ts_utc "
-                f"FROM closing_lines "
-                f"WHERE event_id=? AND market=? AND {name_clause} "
-                f"ORDER BY book LIMIT 1",
-                (event_id, market, name_val),
-            ).fetchone()
+        clauses = ["market=?"]
+        vals = [market]
+        if event_id is not None:
+            clauses.append("event_id=?")
+            vals.append(event_id)
+        if date_str is not None:
+            clauses.append("date(datetime(substr(commence_time,1,19), '-6 hours'))=?")
+            vals.append(date_str)
+        if book:
+            clauses.append("book=?")
+            vals.append(book)
 
-        # 1. Exact match
-        row = _query("player_name=?", player_name)
-        # 2. Alias-resolved match
-        if not row and player_name:
-            norm = _norm_player_name(player_name)
-            alias = _PLAYER_ALIASES.get(norm)
-            if alias and alias != norm:
-                # Search all names matching the alias via LIKE on last name
-                alias_last = alias.split()[-1] if alias else ""
-                if alias_last and len(alias_last) > 2:
-                    row = _query("player_name LIKE ?", f"%{alias_last}%")
-        # 3. Last-name partial match
-        if not row and player_name:
-            last = player_name.strip().split()[-1]
-            if len(last) > 2:
-                row = _query("player_name LIKE ?", f"%{last}%")
-        if not row:
+        where = " AND ".join(clauses)
+        rows = self._conn.execute(
+            f"SELECT DISTINCT player_name FROM {table} WHERE {where} ORDER BY player_name",
+            vals,
+        ).fetchall()
+        names = [row[0] for row in rows if row and row[0]]
+        self._player_name_candidates_cache[cache_key] = tuple(names)
+        return names
+
+    def _resolve_stored_player_name(self, table, market, player_name, event_id=None, date_str=None, book=None):
+        candidates = self._candidate_player_names(
+            table,
+            market,
+            event_id=event_id,
+            date_str=date_str,
+            book=book,
+        )
+        return _resolve_player_name_candidate(player_name, candidates)
+
+    def _resolve_player_name_for_scope(self, table, market, player_name, event_id=None, date_str=None, book=None):
+        resolved_name = self._resolve_stored_player_name(
+            table,
+            market,
+            player_name,
+            event_id=event_id,
+            date_str=date_str,
+            book=book,
+        )
+        if not resolved_name:
             return None
-        return {
-            "book":             row[0],
-            "close_line":       row[1],
-            "close_over_odds":  row[2],
-            "close_under_odds": row[3],
-            "close_ts_utc":     row[4],
-        }
+        return resolved_name
 
-    def get_closing_line_by_player_date(self, player_name, market, date_str, book=None):
-        """
-        Fallback lookup: find closing line by player name + market + NBA date,
-        without requiring a known event_id.  Used when find_event_for_game
-        returns None (e.g. game snapshots missing but closing lines present).
-        Returns the same dict shape as get_closing_line(), or None.
-        """
-        book_clause = "AND book=?" if book else ""
-        book_param  = [book] if book else []
+    def _query_closing_line_row(self, market, player_name, event_id=None, date_str=None, book=None):
+        clauses = ["market=?", "player_name=?"]
+        vals = [market, player_name]
+        if event_id is not None:
+            clauses.insert(0, "event_id=?")
+            vals.insert(0, event_id)
+        if date_str is not None:
+            clauses.append("date(datetime(substr(commence_time,1,19), '-6 hours'))=?")
+            vals.append(date_str)
+        if book:
+            clauses.append("book=?")
+            vals.append(book)
 
-        def _run(name_clause, name_val):
-            return self._conn.execute(
-                f"SELECT book,close_line,close_over_odds,close_under_odds,close_ts_utc "
-                f"FROM closing_lines "
-                f"WHERE market=? AND {name_clause} "
-                f"AND date(datetime(substr(commence_time,1,19), '-6 hours'))=? "
-                f"{book_clause} "
-                f"ORDER BY book LIMIT 1",
-                [market, name_val, date_str] + book_param,
-            ).fetchone()
+        where = " AND ".join(clauses)
+        order_by = "close_ts_utc DESC, book" if date_str is not None else "book"
+        return self._conn.execute(
+            "SELECT book,close_line,close_over_odds,close_under_odds,close_ts_utc "
+            f"FROM closing_lines WHERE {where} ORDER BY {order_by} LIMIT 1",
+            vals,
+        ).fetchone()
 
-        row = _run("player_name=?", player_name)
-        # Alias-resolved match
-        if not row and player_name:
-            norm = _norm_player_name(player_name)
-            alias = _PLAYER_ALIASES.get(norm)
-            if alias and alias != norm:
-                alias_last = alias.split()[-1] if alias else ""
-                if alias_last and len(alias_last) > 2:
-                    row = _run("player_name LIKE ?", f"%{alias_last}%")
-        if not row and player_name:
-            last = player_name.strip().split()[-1]
-            if len(last) > 2:
-                row = _run("player_name LIKE ?", f"%{last}%")
-        if not row:
-            return None
-        return {
-            "book":             row[0],
-            "close_line":       row[1],
-            "close_over_odds":  row[2],
-            "close_under_odds": row[3],
-            "close_ts_utc":     row[4],
-        }
+    def _query_snapshot_rows(self, event_id, market, player_name, book=None):
+        clauses = ["event_id=?", "market=?", "player_name=?"]
+        vals = [event_id, market, player_name]
+        if book:
+            clauses.append("book=?")
+            vals.append(book)
+        where = " AND ".join(clauses)
+        rows = self._conn.execute(
+            "SELECT ts_utc, book, side, line, odds, commence_time "
+            f"FROM snapshots WHERE {where} ORDER BY ts_utc, book, side",
+            vals,
+        ).fetchall()
+        return rows
 
-    def get_opening_line(self, event_id, market, player_name, book=None):
-        """
-        Return the EARLIEST snapshot (opening line proxy) for a player prop.
-
-        Uses the same fuzzy player-name matching as get_closing_line().
-        If book is None, returns the alphabetically first book at the earliest ts.
-
-        Returns dict: {book, open_line, open_over_odds, open_under_odds, open_ts_utc}
-        or None if no snapshot found.
-        """
-        def _query(name_clause, name_val):
-            bc     = "AND book=?" if book else ""
-            extra  = [book] if book else []
-
-            # Step 1: find the earliest ts_utc for this prop
-            min_row = self._conn.execute(
-                f"SELECT MIN(ts_utc) FROM snapshots "
-                f"WHERE event_id=? AND market=? AND player_name {name_clause} {bc}",
-                [event_id, market, name_val] + extra,
-            ).fetchone()
-            if not min_row or not min_row[0]:
-                return None
-            min_ts = min_row[0]
-
-            # Step 2: fetch over + under at that timestamp
-            rows = self._conn.execute(
-                f"SELECT side, line, odds, book FROM snapshots "
-                f"WHERE event_id=? AND market=? AND player_name {name_clause} "
-                f"AND ts_utc=? {bc} ORDER BY book, side",
-                [event_id, market, name_val, min_ts] + extra,
-            ).fetchall()
-            if not rows:
-                return None
-
-            over_line = over_odds = under_odds = snap_book = None
-            for side, line_val, odds_val, bk in rows:
-                if side == "over" and over_line is None:
-                    over_line, over_odds, snap_book = line_val, odds_val, bk
-                elif side == "under" and under_odds is None:
-                    under_odds = odds_val
-            if over_line is None:
-                return None
-            return {
-                "book":            snap_book,
-                "open_line":       over_line,
-                "open_over_odds":  over_odds,
-                "open_under_odds": under_odds,
-                "open_ts_utc":     min_ts,
-            }
-
-        row = _query("=?", player_name)
-        if not row and player_name:
-            last = player_name.strip().split()[-1]
-            if len(last) > 2:
-                row = _query("LIKE ?", f"%{last}%")
-        return row
-
-    def get_line_movement(self, event_id, market, player_name, book=None):
-        """
-        Return the full snapshot timeline for a player prop.
-
-        Each entry represents one timestamp with aggregated over/under data.
-        Returns list of dicts ordered by ts_utc (earliest first):
-            [{ts_utc, book, line, over_odds, under_odds, minutes_to_tip}, ...]
-        Empty list if no snapshots found.
-        """
-        bc    = "AND book=?" if book else ""
-        extra = [book] if book else []
-
-        def _query(name_clause, name_val):
-            rows = self._conn.execute(
-                f"SELECT ts_utc, book, side, line, odds, commence_time "
-                f"FROM snapshots "
-                f"WHERE event_id=? AND market=? AND player_name {name_clause} {bc} "
-                f"ORDER BY ts_utc, book, side",
-                [event_id, market, name_val] + extra,
-            ).fetchall()
-            return rows
-
-        raw = _query("=?", player_name)
-        if not raw and player_name:
-            last = player_name.strip().split()[-1]
-            if len(last) > 2:
-                raw = _query("LIKE ?", f"%{last}%")
-        if not raw:
+    def _aggregate_snapshot_rows(self, rows):
+        if not rows:
             return []
 
-        # Group by (ts_utc, book) and merge over/under sides
         from collections import OrderedDict
+
         grouped = OrderedDict()
-        for ts, bk, side, line_val, odds_val, commence in raw:
+        for ts, bk, side, line_val, odds_val, commence in rows:
             key = (ts, bk)
             if key not in grouped:
                 grouped[key] = {
-                    "ts_utc": ts, "book": bk,
-                    "line": None, "over_odds": None, "under_odds": None,
+                    "ts_utc": ts,
+                    "book": bk,
+                    "line": None,
+                    "over_odds": None,
+                    "under_odds": None,
                     "commence_time": commence,
                 }
             if side == "over":
@@ -531,7 +514,6 @@ class OddsStore:
 
         timeline = []
         for entry in grouped.values():
-            # Compute minutes to tip
             minutes_to_tip = None
             if entry["commence_time"] and entry["ts_utc"]:
                 try:
@@ -553,6 +535,107 @@ class OddsStore:
             })
         return timeline
 
+    def get_closing_line(self, event_id, market, player_name, book=None):
+        """
+        Return closing line dict for one player prop, or None if not found.
+        Keys: book, close_line, close_over_odds, close_under_odds, close_ts_utc.
+
+        Uses normalized exact matching plus a conservative unique last-name fallback.
+        If book is None, returns first available book (alphabetical).
+        """
+        resolved_name = self._resolve_player_name_for_scope(
+            "closing_lines", market, player_name, event_id=event_id, book=book
+        )
+        if not resolved_name:
+            return None
+        row = self._query_closing_line_row(
+            market, resolved_name, event_id=event_id, book=book
+        )
+        if not row:
+            return None
+        return {
+            "book":             row[0],
+            "close_line":       row[1],
+            "close_over_odds":  row[2],
+            "close_under_odds": row[3],
+            "close_ts_utc":     row[4],
+        }
+
+    def get_closing_line_by_player_date(self, player_name, market, date_str, book=None):
+        """
+        Fallback lookup: find closing line by player name + market + NBA date,
+        without requiring a known event_id.  Used when find_event_for_game
+        returns None (e.g. game snapshots missing but closing lines present).
+        Returns the same dict shape as get_closing_line(), or None.
+        """
+        resolved_name = self._resolve_player_name_for_scope(
+            "closing_lines", market, player_name, date_str=date_str, book=book
+        )
+        if not resolved_name:
+            return None
+
+        row = self._query_closing_line_row(
+            market, resolved_name, date_str=date_str, book=book
+        )
+        if not row:
+            return None
+        return {
+            "book":             row[0],
+            "close_line":       row[1],
+            "close_over_odds":  row[2],
+            "close_under_odds": row[3],
+            "close_ts_utc":     row[4],
+        }
+
+    def get_opening_line(self, event_id, market, player_name, book=None):
+        """
+        Return the EARLIEST snapshot (opening line proxy) for a player prop.
+
+        Uses the same normalized matching as get_closing_line().
+        If book is None, returns the alphabetically first book at the earliest ts.
+
+        Returns dict: {book, open_line, open_over_odds, open_under_odds, open_ts_utc}
+        or None if no snapshot found.
+        """
+        resolved_name = self._resolve_player_name_for_scope(
+            "snapshots", market, player_name, event_id=event_id, book=book
+        )
+        if not resolved_name:
+            return None
+
+        rows = self._query_snapshot_rows(event_id, market, resolved_name, book=book)
+        timeline = self._aggregate_snapshot_rows(rows)
+        if not timeline:
+            return None
+        first = timeline[0]
+        if first.get("line") is None:
+            return None
+        return {
+            "book": first["book"],
+            "open_line": first["line"],
+            "open_over_odds": first["over_odds"],
+            "open_under_odds": first["under_odds"],
+            "open_ts_utc": first["ts_utc"],
+        }
+
+    def get_line_movement(self, event_id, market, player_name, book=None):
+        """
+        Return the full snapshot timeline for a player prop.
+
+        Each entry represents one timestamp with aggregated over/under data.
+        Returns list of dicts ordered by ts_utc (earliest first):
+            [{ts_utc, book, line, over_odds, under_odds, minutes_to_tip}, ...]
+        Empty list if no snapshots found.
+        """
+        resolved_name = self._resolve_player_name_for_scope(
+            "snapshots", market, player_name, event_id=event_id, book=book
+        )
+        if not resolved_name:
+            return []
+
+        rows = self._query_snapshot_rows(event_id, market, resolved_name, book=book)
+        return self._aggregate_snapshot_rows(rows)
+
     def get_line_movement_by_date(self, player_name, market, date_str, book=None):
         """
         Get line movement for a player prop by date (no event_id needed).
@@ -560,29 +643,24 @@ class OddsStore:
         Finds the event via commence_time date matching, then delegates to
         get_line_movement(). Returns list of timeline dicts or empty list.
         """
-        bc    = "AND book=?" if book else ""
         extra = [book] if book else []
+        bc = "AND book=?" if book else ""
+        resolved_name = self._resolve_player_name_for_scope(
+            "snapshots", market, player_name, date_str=date_str, book=book
+        )
+        if not resolved_name:
+            return []
+
         row = self._conn.execute(
             f"SELECT DISTINCT event_id FROM snapshots "
             f"WHERE market=? AND player_name=? "
             f"AND date(datetime(substr(commence_time,1,19), '-6 hours'))=? {bc} "
             f"LIMIT 1",
-            [market, player_name, date_str] + extra,
+            [market, resolved_name, date_str] + extra,
         ).fetchone()
         if not row:
-            # Try last-name fuzzy match
-            last = player_name.strip().split()[-1] if player_name else ""
-            if len(last) > 2:
-                row = self._conn.execute(
-                    f"SELECT DISTINCT event_id FROM snapshots "
-                    f"WHERE market=? AND player_name LIKE ? "
-                    f"AND date(datetime(substr(commence_time,1,19), '-6 hours'))=? {bc} "
-                    f"LIMIT 1",
-                    [market, f"%{last}%", date_str] + extra,
-                ).fetchone()
-        if not row:
             return []
-        return self.get_line_movement(row[0], market, player_name, book=book)
+        return self.get_line_movement(row[0], market, resolved_name, book=book)
 
     def get_closing_lines_for_date(self, date_str, market=None, book=None):
         """Return all closing lines for events that commenced on date_str (NBA local time)."""
