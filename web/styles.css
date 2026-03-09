@@ -131,19 +131,12 @@ body {
 /* ── Page Header ──────────────────────────────────────── */
 .page-head {
   max-width: 1200px;
-  margin: 0 auto 24px auto;
+  margin: 0 auto 20px auto;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   text-align: center;
-}
-
-.page-logo {
-  width: 96px;
-  height: 96px;
-  border-radius: 16px;
-  filter: drop-shadow(0 2px 12px rgba(0, 224, 204, 0.25));
 }
 
 .page-head h1 {
@@ -169,16 +162,6 @@ body {
   margin: 0;
   color: var(--muted);
   font-size: 0.9rem;
-}
-
-.page-head p code {
-  font-family: var(--mono);
-  font-size: 0.82em;
-  background: var(--surface);
-  padding: 2px 6px;
-  border-radius: var(--radius-xs);
-  border: 1px solid var(--line);
-  color: var(--brand);
 }
 
 /* ── Health Badge ─────────────────────────────────────── */
@@ -1261,13 +1244,7 @@ details[open] summary {
   }
 
   .page-head {
-    flex-direction: column;
     gap: 4px;
-  }
-
-  .page-logo {
-    width: 72px;
-    height: 72px;
   }
 
   .tab-nav {
