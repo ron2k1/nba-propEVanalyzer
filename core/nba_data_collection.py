@@ -41,6 +41,26 @@ def get_season_string():
     y   = now.year
     return f"{y}-{str(y + 1)[-2:]}" if now.month >= 10 else f"{y - 1}-{str(y)[-2:]}"
 
+def _season_for_date(d):
+    """Derive NBA season string from a date.
+
+    NBA seasons run October-June:
+      - month >= 10 (Oct+): season starts this calendar year
+      - month <= 6 (Jun-):  season started the previous calendar year
+      - month 7-9 (offseason): use the just-completed season (prev year)
+
+    Examples:
+      2025-11-15  -> "2025-26"
+      2025-03-01  -> "2024-25"
+      2025-08-01  -> "2024-25"  (offseason after 2024-25)
+    """
+    if d is None:
+        return None
+    y = d.year
+    if d.month >= 10:
+        return f"{y}-{str(y + 1)[-2:]}"
+    return f"{y - 1}-{str(y)[-2:]}"
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     "Referer":    "https://www.nba.com/",
@@ -1516,8 +1536,9 @@ def get_team_defensive_ratings(as_of_date=None):
     Disk-cached 30 min — 3 API calls on cold cache.
     """
     cutoff_date = _coerce_date(as_of_date)
+    season = _season_for_date(cutoff_date) if cutoff_date else CURRENT_SEASON
     cutoff_key = cutoff_date.isoformat() if cutoff_date else "full"
-    cache_key = f"defense_{CURRENT_SEASON}_{cutoff_key}"
+    cache_key = f"defense_{season}_{cutoff_key}"
     cached    = cache_get(cache_key, _DEFENSE_CACHE_TTL)
     if cached:
         return cached
@@ -1529,21 +1550,21 @@ def get_team_defensive_ratings(as_of_date=None):
 
         def fetch_base():
             return leaguedashteamstats.LeagueDashTeamStats(
-                season=CURRENT_SEASON, per_mode_detailed="PerGame",
+                season=season, per_mode_detailed="PerGame",
                 season_type_all_star="Regular Season", headers=HEADERS, timeout=30,
                 date_to_nullable=date_to_nullable,
             )
 
         def fetch_opp():
             return leaguedashteamstats.LeagueDashTeamStats(
-                season=CURRENT_SEASON, measure_type_detailed_defense="Opponent",
+                season=season, measure_type_detailed_defense="Opponent",
                 per_mode_detailed="PerGame", season_type_all_star="Regular Season",
                 headers=HEADERS, timeout=30, date_to_nullable=date_to_nullable,
             )
 
         def fetch_adv():
             return leaguedashteamstats.LeagueDashTeamStats(
-                season=CURRENT_SEASON, measure_type_detailed_defense="Advanced",
+                season=season, measure_type_detailed_defense="Advanced",
                 per_mode_detailed="PerGame", season_type_all_star="Regular Season",
                 headers=HEADERS, timeout=30, date_to_nullable=date_to_nullable,
             )
@@ -1908,9 +1929,9 @@ def get_position_vs_team(opponent_team_id, season=None, as_of_date=None):
     Provides an independent corroboration of team-level defense multipliers.
     Disk-cached 30 min.
     """
-    if season is None:
-        season = CURRENT_SEASON
     cutoff_date = _coerce_date(as_of_date)
+    if season is None:
+        season = _season_for_date(cutoff_date) if cutoff_date else CURRENT_SEASON
     cutoff_key = cutoff_date.isoformat() if cutoff_date else "full"
 
     cache_key = f"pvt_{opponent_team_id}_{season}_{cutoff_key}"

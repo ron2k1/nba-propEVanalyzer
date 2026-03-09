@@ -44,6 +44,6 @@
 4. Verify all 8 stats show Brier improvement vs uncalibrated
 5. Check `_fitted_at` in the output JSON
 
-## Tier 2 Blocker: 2024-25 Season
+## Tier 2: 2024-25 Season (Fixed)
 
-`get_team_defensive_ratings`, `get_player_position`, `get_position_vs_team` hardcode `CURRENT_SEASON` (2025-26). A 2024-25 backtest would use 2025-26 defense data = severe lookahead contamination. Do NOT run until these functions accept a `season` parameter.
+`get_team_defensive_ratings` and `get_position_vs_team` now derive the correct NBA season string from `as_of_date` via `_season_for_date()`. A March 2025 date resolves to "2024-25", preventing lookahead contamination from 2025-26 data. `get_player_position` uses `CommonPlayerInfo` which is season-agnostic and was never affected. When `as_of_date` is None, all functions still default to `CURRENT_SEASON` (backwards compatible).
