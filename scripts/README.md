@@ -35,6 +35,7 @@
 | `compare_models.py` | Saved-model comparison and markdown report generation |
 | `compare_factorial.py` | Factorial experiment comparison (blend effects) |
 | `analyze_real_lines.py` | Real-line performance analysis |
+| `e1_summary.py` | Recompute the strict E1 real-line policy subset from saved backtest artifacts |
 | `bin0_killswitch.py` | Bin 0 emergency shutdown |
 | `backtest_summary.py` | Backtest result summarization |
 | `overfitting_chart.py` | Overfit detection visualization |
