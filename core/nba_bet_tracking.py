@@ -3,6 +3,7 @@
 
 import csv
 import json
+import logging
 import os
 import sys
 import tempfile
@@ -27,6 +28,92 @@ _PLAYERS_BY_ID = {
     for p in nba_players_static.get_players()
     if p.get("id")
 }
+
+_log = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Validation-excluded books: these entries are kept in the journal for
+# audit trail but must not pollute forward-validation metrics (hit rate,
+# ROI, CLV).  Mirrors _VALIDATION_EXCLUDED_BOOKS in nba_decision_journal.
+# ---------------------------------------------------------------------------
+_VALIDATION_EXCLUDED_BOOKS = frozenset({"user_supplied"})
+
+
+def _is_excluded_book_entry(entry):
+    """Return True if entry's book source is in the exclusion set."""
+    for field in ("bestOverBook", "bestUnderBook", "book"):
+        val = str(entry.get(field) or "").strip().lower()
+        if val in _VALIDATION_EXCLUDED_BOOKS:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Write-time validation: flag obviously bad entries as quarantine
+# ---------------------------------------------------------------------------
+
+_LINE_CEILING = {
+    "pts": 60, "pra": 60,
+    "reb": 30, "ast": 30,
+    "fg3m": 15, "stl": 15, "blk": 15, "tov": 15,
+}
+
+_CLOSING_LINE_MAX_DELTA = 8
+
+
+def _validate_entry(entry):
+    """Flag (but never reject) entries that look suspicious.
+
+    Adds ``quarantine=True`` and ``quarantineReason`` to the entry dict
+    *in-place* when a check fails.  Multiple reasons are joined with ``; ``.
+    Returns the same entry dict for convenience.
+    """
+    reasons = []
+    stat = str(entry.get("stat", "")).lower()
+    line = _as_float(entry.get("line"))
+
+    # 1. Team / player validity ------------------------------------------
+    player_team = str(entry.get("playerTeamAbbr", "")).upper()
+    opponent = str(entry.get("opponentAbbr", "")).upper()
+    if player_team and opponent and player_team == opponent:
+        reasons.append("team_equals_opponent")
+        _log.warning(
+            "quarantine: playerTeamAbbr (%s) == opponentAbbr for %s",
+            player_team, entry.get("playerName", "?"),
+        )
+
+    # 2. Line sanity ------------------------------------------------------
+    if line is not None:
+        ceiling = _LINE_CEILING.get(stat)
+        if ceiling is not None and abs(line) > ceiling:
+            reasons.append(f"line_out_of_range ({stat} line={line}, max={ceiling})")
+            _log.warning(
+                "quarantine: %s line %.1f exceeds ceiling %d for %s",
+                stat, line, ceiling, entry.get("playerName", "?"),
+            )
+
+    # 3. Closing-line delta -----------------------------------------------
+    closing = _as_float(entry.get("closingLine"))
+    if line is not None and closing is not None:
+        delta = abs(closing - line)
+        if delta >= _CLOSING_LINE_MAX_DELTA:
+            reasons.append(
+                f"closing_line_mismatch (line={line}, closing={closing}, delta={delta:.1f})"
+            )
+            _log.warning(
+                "quarantine: closing-line delta %.1f for %s %s (line=%.1f, close=%.1f)",
+                delta, entry.get("playerName", "?"), stat, line, closing,
+            )
+
+    if reasons:
+        entry["quarantine"] = True
+        existing = entry.get("quarantineReason", "")
+        combined = "; ".join(reasons)
+        entry["quarantineReason"] = (
+            f"{existing}; {combined}" if existing else combined
+        )
+
+    return entry
 
 
 def _now_utc_iso():
@@ -115,6 +202,8 @@ def _load_entries_from_path(path):
 
 
 def _write_journal_entries(entries):
+    for entry in entries:
+        _validate_entry(entry)
     _write_entries_to_path(JOURNAL_PATH, entries)
 
 
@@ -351,6 +440,8 @@ def log_prop_ev_entry(
     if minutes_cap_reason is not None:
         entry["minutesCapReason"] = str(minutes_cap_reason)
 
+    _validate_entry(entry)
+
     try:
         append_result = _append_journal_entry(entry)
         return {
@@ -535,7 +626,7 @@ def settle_entries_for_date(date_str):
             "message": "No pending entries for this date.",
             "pendingCount": 0,
             "settledNow": 0,
-            "summary": _summarize_settled([e for e in entries if str(e.get("pickDate")) == str(date_str)]),
+            "summary": _summarize_settled([e for e in entries if str(e.get("pickDate")) == str(date_str) and not _is_excluded_book_entry(e)]),
         }
 
     logs_cache = {}
@@ -626,12 +717,16 @@ def settle_entries_for_date(date_str):
         entry["pnl1u"] = _pnl_for_outcome(final_result, final_odds)
         touched += 1
 
-    _write_journal_entries(entries)
+    # Dedupe the full journal on settlement to prevent accumulation of stale duplicates
+    deduped_entries = _dedupe_latest(entries)
+    _write_journal_entries(deduped_entries)
 
-    same_day_entries = [e for e in entries if str(e.get("pickDate")) == str(date_str)]
+    same_day_entries = [e for e in deduped_entries if str(e.get("pickDate")) == str(date_str)]
     same_day_deduped = _dedupe_latest(same_day_entries)
-    summary = _summarize_settled(same_day_deduped)
-    summary.update(_summarize_clv(same_day_deduped))
+    # Exclude user_supplied entries from validation metrics
+    metric_deduped = [e for e in same_day_deduped if not _is_excluded_book_entry(e)]
+    summary = _summarize_settled(metric_deduped)
+    summary.update(_summarize_clv(metric_deduped))
     return {
         "success": True,
         "date": str(date_str),
@@ -1115,8 +1210,10 @@ def results_for_date(date_str=None, limit=50):
     filtered = [e for e in entries if str(e.get("pickDate")) == target]
     deduped = _dedupe_latest(filtered)
 
-    summary = _summarize_settled(deduped)
-    summary.update(_summarize_clv(deduped))
+    # Exclude user_supplied entries from validation metrics (hit rate, ROI, CLV)
+    metric_entries = [e for e in deduped if not _is_excluded_book_entry(e)]
+    summary = _summarize_settled(metric_entries)
+    summary.update(_summarize_clv(metric_entries))
     unsettled = [e for e in deduped if not bool(e.get("settled"))]
 
     graded = [e for e in deduped if str(e.get("result")) in {"win", "loss", "push"}]

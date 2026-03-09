@@ -3,6 +3,8 @@
 
 from contextlib import contextmanager
 import logging
+import signal as _signal
+import time as _time
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
@@ -10,6 +12,7 @@ from core.pipeline_progress import merge_status, read_status
 
 _log = logging.getLogger("nba_engine.scan")
 _LOCAL_TZ = ZoneInfo("America/New_York")
+_PER_PLAYER_TIMEOUT_SEC = 45  # kill single compute_prop_ev if stuck
 
 
 def _parse_roster_sweep_args(argv):
@@ -190,7 +193,8 @@ def _projection_data_context(use_local_projection_data):
             _pp.get_player_position = _orig_pp_pos
             _pp.get_position_vs_team = _orig_pp_pvt
             _pp.API_DELAY = _orig_pp_api_delay
-    except Exception:
+    except Exception as exc:
+        _log.warning("LocalNBAStats unavailable (%s), falling back to live API — roster_sweep will be slow", exc)
         yield {"mode": "live_api"}
 
 
@@ -325,8 +329,18 @@ def _handle_roster_sweep(argv):
     projection_data_scope = _projection_data_context(use_local_projection_data)
     projection_state = projection_data_scope.__enter__()
     projection_data_source = projection_state.get("mode", "live_api")
+    _sweep_start = _time.monotonic()
+    _SWEEP_MAX_SEC = 900  # 15-min hard ceiling; abort gracefully if exceeded
+
+    if projection_data_source == "live_api" and use_local_projection_data:
+        _log.warning("Local projection data requested but unavailable — sweep will use live API (slow)")
 
     for (pname, stat), snap in best_per_player_stat.items():
+        # Abort if total sweep time exceeds ceiling
+        if _time.monotonic() - _sweep_start > _SWEEP_MAX_SEC:
+            _log.warning("roster_sweep hit %ds ceiling after %d/%d players — aborting remaining", _SWEEP_MAX_SEC, scanned, total_candidates)
+            skipped_list.append({"player": "(remaining)", "stat": "*", "reason": "sweep_timeout"})
+            break
         scanned += 1
         if scanned == 1 or scanned % 10 == 0 or scanned == total_candidates:
             _update_roster_sweep_progress(
@@ -392,6 +406,7 @@ def _handle_roster_sweep(argv):
             }))
 
             _log.debug("Evaluating %s/%s: line=%.1f book=%s opp=%s", pname, stat, float(line), book, opp_abbr)
+            _t0 = _time.monotonic()
             result = compute_prop_ev(
                 player_id=player_id,
                 opponent_abbr=opp_abbr,
@@ -407,6 +422,9 @@ def _handle_roster_sweep(argv):
                 opponent_is_b2b=opp_is_b2b,
                 game_total=gtotal,
             )
+            _elapsed = _time.monotonic() - _t0
+            if _elapsed > _PER_PLAYER_TIMEOUT_SEC:
+                _log.warning("compute_prop_ev for %s/%s took %.1fs (> %ds) — possible API fallback", pname, stat, _elapsed, _PER_PLAYER_TIMEOUT_SEC)
 
             if not result.get("success"):
                 skipped_list.append({

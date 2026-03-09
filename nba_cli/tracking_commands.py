@@ -6,6 +6,7 @@ import json
 from core.nba_bet_tracking import (
     best_plays_for_date,
     best_today,
+    dedup_journal,
     export_training_rows,
     record_closing_values,
     results_for_date,
@@ -67,6 +68,10 @@ def handle_tracking_command(command, argv):
             return {"error": f"Invalid JSON for closing updates: {je}"}
         return record_closing_values(date_str, updates)
 
+    if command == "dedup_journal":
+        dry_run = "--dry-run" in argv
+        return dedup_journal(write=not dry_run)
+
     return None
 
 
@@ -76,4 +81,5 @@ _COMMANDS = {
     "results_yesterday":    lambda argv: handle_tracking_command("results_yesterday", argv),
     "export_training_rows": lambda argv: handle_tracking_command("export_training_rows", argv),
     "record_closing":       lambda argv: handle_tracking_command("record_closing", argv),
+    "dedup_journal":        lambda argv: handle_tracking_command("dedup_journal", argv),
 }
