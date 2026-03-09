@@ -131,12 +131,19 @@ body {
 /* ── Page Header ──────────────────────────────────────── */
 .page-head {
   max-width: 1200px;
-  margin: 0 auto 20px auto;
+  margin: 0 auto 24px auto;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   text-align: center;
+}
+
+.page-logo {
+  width: 96px;
+  height: 96px;
+  border-radius: 16px;
+  filter: drop-shadow(0 2px 12px rgba(0, 224, 204, 0.25));
 }
 
 .page-head h1 {
@@ -1256,6 +1263,11 @@ details[open] summary {
   .page-head {
     flex-direction: column;
     gap: 4px;
+  }
+
+  .page-logo {
+    width: 72px;
+    height: 72px;
   }
 
   .tab-nav {
