@@ -13,6 +13,12 @@ Usage:
     .venv/Scripts/python.exe scripts/betmgm_scan.py --skip 4 --games 4 --model full
 """
 
+# -----------------------------------------------------------------------
+# DEPRECATED: This script uses its own probability helpers that diverge
+# from the canonical compute_prop_ev() path.  Use `nba_mod.py auto_sweep`
+# instead.  Kept for reference only.  Do not use for production evaluation.
+# -----------------------------------------------------------------------
+
 import argparse
 import concurrent.futures
 import math

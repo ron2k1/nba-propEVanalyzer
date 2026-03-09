@@ -28,7 +28,7 @@ Four parallel backtests were run in isolated git worktrees to quantify each cont
 ### 1. Calibration Lookahead: ~16pp ROI inflation
 - Temps fitted on Dec 1–Feb 25 data, applied retroactively to Oct–Nov
 - Removing calibration: 384 bets/+19.6% → 1,175 bets/+3.78%
-- Mechanism: temperature scaling shifts raw probabilities into the "active" bins (0-10%, 10-20%), concentrating bets into a smaller, higher-quality subset
+- Mechanism: temperature scaling shifts raw probabilities into the "active" bins (0-10% only as of 2026-03-03; previously included 10-20%), concentrating bets into a smaller, higher-quality subset
 - **However:** clean-oos shows calibration has zero marginal effect with old (wider) policy — the 16pp effect is entirely an interaction between calibration and tight bin filtering
 
 ### 2. Policy Snooping: ~19.5pp ROI inflation

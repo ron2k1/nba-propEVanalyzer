@@ -1521,6 +1521,13 @@ def run_backtest(
             lt_tag = f"_{_line_timing}" if _line_timing != "closing" else ""
             fname = f"{start.isoformat()}_to_{end.isoformat()}_{model_tag}_{source_key}{realonly_tag}{ml_tag}{noblend_tag}{nogates_tag}{wf_tag}{lt_tag}.json"
             fpath = _os.path.join(results_dir, fname)
+            # Don't silently overwrite — append counter if file exists
+            if _os.path.exists(fpath):
+                base, ext = _os.path.splitext(fpath)
+                counter = 2
+                while _os.path.exists(f"{base}_v{counter}{ext}"):
+                    counter += 1
+                fpath = f"{base}_v{counter}{ext}"
             response["savedTo"] = fpath
             with open(fpath, "w", encoding="utf-8") as fh:
                 _json.dump(response, fh, indent=2)

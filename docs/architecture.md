@@ -51,7 +51,7 @@ Private NBA player-prop EV engine. Python backend + Alpine.js frontend + CLI.
 | `nba_ev_engine.py` | Probability/EV math (Normal, Poisson, reference) |
 | `nba_prop_engine.py` | Prop-level assembly, auto sweep, line matching |
 | `nba_parlay_engine.py` | Parlay EV |
-| `nba_backtest.py` | Historical backtesting (NBA API, BRef, local) |
+| `nba_backtest.py` | Historical backtesting (NBA API, BRef, local). BRef provider is implemented but **not currently provisioned** in this workspace (`data/bref/curated/` files are empty). Use `--local` or default NBA API mode instead. |
 | `nba_bet_tracking.py` | JSONL journal, settlement, CLV tracking |
 | `nba_decision_journal.py` | SQLite signal logger, paper-trading validator, gates |
 | `gates.py` | Signal qualification gates, SIGNAL_SPEC |

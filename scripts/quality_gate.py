@@ -90,10 +90,40 @@ def _check_js_syntax() -> tuple[bool, str]:
     node = _run(["node", "--version"], timeout=10)
     if node.returncode != 0:
         return True, "node missing (skipped)"
-    cp = _run(["node", "--check", "web/app.js"], timeout=30)
-    if cp.returncode != 0:
-        return False, (cp.stderr or cp.stdout).strip()
-    return True, "ok"
+    js_files = ["web/app.js"] + sorted(
+        str(p.relative_to(ROOT)).replace("\\", "/")
+        for p in (ROOT / "web" / "modules").glob("*.js")
+    )
+    failures: list[str] = []
+    for js_file in js_files:
+        cp = _run(["node", "--check", js_file], timeout=30)
+        if cp.returncode != 0:
+            failures.append(f"{js_file}: {(cp.stderr or cp.stdout).strip()}")
+    if failures:
+        return False, "; ".join(failures)
+    return True, f"ok ({len(js_files)} files)"
+
+
+def _check_js_imports() -> tuple[bool, str]:
+    """Verify that all ES module imports in web/app.js resolve to existing files."""
+    app_js = ROOT / "web" / "app.js"
+    if not app_js.exists():
+        return False, "web/app.js not found"
+    text = app_js.read_text(encoding="utf-8", errors="replace")
+    import_re = re.compile(r"""import\s+\w+\s+from\s+['"](\./[^'"]+)['"]""")
+    missing: list[str] = []
+    checked = 0
+    for m in import_re.finditer(text):
+        rel_path = m.group(1)
+        abs_path = (app_js.parent / rel_path).resolve()
+        checked += 1
+        if not abs_path.exists():
+            missing.append(rel_path)
+    if not checked:
+        return True, "no imports found (skipped)"
+    if missing:
+        return False, f"missing modules: {', '.join(missing)}"
+    return True, f"ok ({checked} imports verified)"
 
 
 def _json_from_last_line(raw: str) -> dict | None:
@@ -207,6 +237,10 @@ def main() -> int:
 
     ok, msg = _check_js_syntax()
     report["checks"].append({"name": "js_syntax", "ok": ok, "detail": msg})
+    report["ok"] = report["ok"] and ok
+
+    ok, msg = _check_js_imports()
+    report["checks"].append({"name": "js_imports", "ok": ok, "detail": msg})
     report["ok"] = report["ok"] and ok
 
     findings = _scan_patterns()

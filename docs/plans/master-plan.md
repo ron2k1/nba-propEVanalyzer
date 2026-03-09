@@ -271,8 +271,8 @@ Implemented:
 
 **Path (a) — Implemented:**
 - ~~Raise min EV~~ ✅ 0.03 → 0.05 (no-vig edge); verdict thresholds updated (Good Value < 0.08, Strong Value ≥ 0.08)
-- ~~Block 40–60% confidence bins~~ ✅ `BETTING_POLICY["blocked_prob_bins"] = {4, 5}`
-- ~~Stat whitelist~~ ✅ `BETTING_POLICY["stat_whitelist"] = {"pts", "reb", "ast", "pra"}`
+- ~~Block 40–60% confidence bins~~ ✅ `BETTING_POLICY["blocked_prob_bins"] = {1,2,3,4,5,6,7,8}` (narrowed to bins 0+9 only, 2026-03-03)
+- ~~Stat whitelist~~ ✅ `BETTING_POLICY["stat_whitelist"] = {"pts", "ast"}` (reb removed 2026-02-28)
 - Policy enforced in backtest + exposed in output (`bettingPolicy` field)
 
 **Path (b) — Find actual CLV (not yet started):**
@@ -336,7 +336,7 @@ Implemented:
 **This is the highest-leverage activity.** Everything else is secondary.
 
 **Infrastructure (already implemented):**
-- `SIGNAL_SPEC` aligned with `BETTING_POLICY`: stat whitelist `{pts, reb, ast, pra}`, blocked bins `{4, 5}`, min edge 0.05, min confidence 0.55
+- `SIGNAL_SPEC` aligned with `BETTING_POLICY`: stat whitelist `{pts, ast}`, blocked bins `{1,2,3,4,5,6,7,8}` (active: 0+9 only), min edge 0.08, min confidence 0.60
 - `_qualifies()` in `nba_decision_journal.py` enforces all policy gates
 - `best_today` output includes `policyQualified` per entry
 - `paper_settle` settles both JSONL + SQLite journals
@@ -505,7 +505,7 @@ Once live, the engine is at or near ceiling. Remaining work is maintenance:
 ## Phase 7: Model Improvement — Target 65-70% Real-Line Hit Rate
 
 > **Implemented 2026-03-01.** Changes done step-by-step with backtest validation gates.
-> Baseline: 30d Jan 26–Feb 25, bins {2,3,4,5,6} blocked → roiReal +13.9%, hitRate 65.1%, 215 bets (bins 0-1 only).
+> Baseline: 30d Jan 26–Feb 25, bins {1,2,3,4,5,6,7,8} blocked → active bins 0+9 only (narrowed 2026-03-03).
 
 ### 7.0 — Correctness Fixes Applied (2026-03-01)
 
@@ -621,7 +621,7 @@ Once live, the engine is at or near ceiling. Remaining work is maintenance:
 **Key findings:**
 - ast is carrying the model: 70% hit rate / +17.8% ROI — protect this
 - bin 1 is the main leak: -3.1% ROI despite passing all current gates. Pinnacle gate (Phase 1a) targets this bin directly
-- bin 7 (70-80% overs) essentially flat — consider blocking or monitoring
+- bin 7 (70-80% overs) essentially flat — **now blocked** (bins 1-8 blocked since 2026-03-03)
 
 ---
 
