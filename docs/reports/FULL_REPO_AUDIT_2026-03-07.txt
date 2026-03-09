@@ -1,0 +1,862 @@
+NBA PIPELINE FULL REPO AUDIT
+Generated: 2026-03-07
+Workspace: C:\Users\thegr\OneDrive\Desktop\nba data ver 2
+Auditor: Codex
+
+============================================================
+1. SCOPE AND METHOD
+============================================================
+
+This audit covered the full workspace structure with emphasis on the actual
+betting pipeline:
+
+- Repo structure and docs: README.md, docs/, tasks/, models/
+- Core engine: core/
+- CLI entrypoints: nba_mod.py, nba_cli/
+- Automation/scripts: scripts/
+- UI/API layer: server.py, web/
+- Tests: tests/
+- Runtime artifacts: data/, models/, logs/
+
+Key local validations run during this audit:
+
+1. .\.venv\Scripts\python.exe -m pytest -q
+   Result: 190 passed, 1 skipped
+
+2. .\.venv\Scripts\python.exe scripts\quality_gate.py --json
+   Result: ok=true
+
+3. .\.venv\Scripts\python.exe nba_mod.py backtest 2026-02-24 2026-02-25 --model full --local --odds-source local_history --real-only
+   Result: success
+
+4. .\.venv\Scripts\python.exe nba_mod.py minutes_eval 2026-02-24 2026-02-25 --local
+   Result: success
+
+5. .\.venv\Scripts\python.exe nba_mod.py odds_coverage
+   Result: success
+
+Limitations:
+
+- I did not call live external APIs during this audit session.
+- "Live-path" conclusions are based on code trace plus stored runtime artifacts.
+- Some docs/reports in the repo contradict each other; where that happens, I
+  treat code and current data artifacts as primary evidence.
+
+============================================================
+2. EXECUTIVE SUMMARY
+============================================================
+
+Bottom line:
+
+- The canonical live pipeline is real-data based, not synthetic.
+- Synthetic data still exists in the codebase, but mainly in backtest fallback
+  lines, tests/examples, and helper/research scripts.
+- The strongest parts of the repo are its modular core, explicit real-vs-
+  synthetic separation in backtesting, local historical index, odds snapshot
+  storage, and gate/versioning logic.
+- The weakest parts are operational reliability and evidence hygiene:
+  duplicated/dirty journal rows, workflow drift between automation entrypoints,
+  repeated roster_sweep timeouts, and documentation/report drift.
+
+My direct answer to your specific question:
+
+- Live production scan path: real sportsbook lines + real player history.
+- Backtest path: can use synthetic lines unless run with --real-only or
+  match-live.
+- I found no evidence that the main live scan/journal path fabricates player
+  game data or sportsbook lines.
+- I did find a few helper paths that can fall back to synthetic or shortcut
+  behavior, and I found raw journal artifacts that are not clean enough to be
+  blindly trusted without dedupe/sanity checks.
+
+============================================================
+3. DIRECT ANSWER: IS THE PIPELINE USING REAL DATA OR SYNTHETIC?
+============================================================
+
+Short answer:
+
+- Live pipeline: real data
+- Historical backtest pipeline: mixed, depending on flags
+- Tests/examples/helper scripts: synthetic inputs exist
+
+3.1 Canonical live pipeline uses real data
+
+Evidence:
+
+1. Line collection is from real sportsbook snapshots
+   - scripts\collect_lines.py
+   - core\nba_line_store.py
+   - core\nba_data_collection.py:get_todays_event_props_bulk
+
+   The collector writes append-only JSONL snapshots under data\line_history\.
+   Example from data\line_history\2026-03-07.jsonl:
+   - real player names
+   - real books (FanDuel)
+   - real lines and American odds
+   - real event ids and commence_time
+
+2. Live projection path uses real player/team history
+   - core\nba_prop_engine.py -> compute_prop_ev()
+   - core\nba_prep_projection.py -> compute_projection()
+   - core\nba_data_collection.py -> NBA API fetches
+   - core\nba_data_collection.py:98-110 -> local historical fallback when NBA
+     API is unavailable
+
+   Important nuance:
+   if the NBA API fails, the fallback is LocalNBAStats (real local historical
+   data from the Kaggle index), not synthetic gamelogs.
+
+3. Decision/signal logging uses the observed line context
+   - nba_cli\scan_commands.py -> roster_sweep
+   - core\gates.py
+   - core\nba_decision_journal.py
+
+   roster_sweep reads stored snapshots, computes EV against the snapshot line,
+   and journals qualifying signals or blocked leans.
+
+3.2 Backtest pipeline can use synthetic lines
+
+This is explicit in code, not hidden:
+
+- core\nba_backtest.py:268 defines _synthetic_line(proj_stat)
+- core\nba_backtest.py:815-817 sets:
+  - line = _synthetic_line(proj_stat)
+  - over_odds = -110
+  - under_odds = -110
+
+When this happens:
+
+- If historical closing line is missing and you are not in --real-only mode
+- If odds_source is None
+- If you are running broader simulated backtests
+
+How to disable synthetic fallback:
+
+- Use --odds-source local_history --real-only
+- Or use match-live mode, which forces real lines only
+
+This separation is well understood in the codebase and docs:
+- roiReal = real historical closing lines
+- roiSynth = synthetic fallback lines
+
+3.3 Synthetic or shortcut behavior exists outside the canonical live path
+
+Confirmed examples:
+
+1. Tests use synthetic inputs
+   - tests\test_compute_ev.py
+   - tests\test_gates.py
+   - tests\test_betting_policy.py
+
+2. Calibration sample/example artifacts exist
+   - examples\calibration_sample.csv
+   - models\calibration_sample_model.json
+   - models\calibration_sample_model_venv.json
+
+3. Helper script shortcut:
+   - scripts\betmgm_scan.py:420
+   - falls back to projection = float(line) if stat projection parse fails
+
+   This is not the canonical compute_prop_ev path. It is a research/convenience
+   scanner and should not be treated as the source of record.
+
+4. LLM line fallback exists for analysis UX
+   - nba_cli\llm_commands.py exposes projectionSource = "line_fallback"
+   - this is an explanatory/LLM path, not the main live betting pipeline
+
+Verdict:
+
+- The main live pipeline is using real data.
+- The backtest layer can still use synthetic lines by design.
+- If you want strict real-only evaluation, use real historical odds modes only
+  and ignore synthetic ROI entirely.
+
+============================================================
+4. ARCHITECTURE AUDIT
+============================================================
+
+4.1 High-level architecture
+
+The repo is structured more like a real internal tool than a toy project:
+
+- nba_mod.py
+  Thin CLI wrapper
+
+- nba_cli/
+  Command routing and handlers
+
+- core/
+  Actual engine logic
+
+- server.py + web/
+  Local HTTP server plus Alpine/vanilla JS frontend
+
+- scripts/
+  Standalone workflow runners, backfills, and analysis utilities
+
+- data/
+  Runtime stores, journals, backtests, line history, local indexes
+
+This separation is good. The main logic is mostly kept in core/ instead of
+leaking into CLI or UI files.
+
+4.2 Canonical path through the system
+
+CLI/UI entry:
+- nba_mod.py
+- nba_cli\router.py
+- server.py shells nba_mod.py for HTTP endpoints
+
+Live line path:
+- scripts\collect_lines.py or nba_mod.py collect_lines
+- core\nba_data_collection.py -> Odds API
+- core\nba_line_store.py -> data\line_history\YYYY-MM-DD.jsonl
+
+Live analysis path:
+- nba_cli\scan_commands.py -> roster_sweep
+- core\nba_prop_engine.py -> compute_prop_ev
+- core\nba_prep_projection.py -> compute_projection
+- core\nba_ev_engine.py -> probability + EV math
+- core\gates.py -> qualification rules
+- core\nba_decision_journal.py -> signal and lean logging
+
+Historical backtest path:
+- nba_cli\backtest_commands.py
+- core\nba_backtest.py
+- local data via core\nba_local_stats.py or bref via core\nba_bref_data.py or
+  NBA API path
+- historical odds via core\nba_odds_store.py
+
+4.3 Policy/gate layering
+
+There are two important policy layers:
+
+1. SIGNAL_SPEC in core\gates.py
+   Determines whether a signal qualifies
+
+2. BETTING_POLICY in core\nba_data_collection.py
+   Determines what stats/bins are in the bettable whitelist
+
+This is intentional and useful:
+- reb can still be signal-eligible for research
+- but excluded from the actual betting whitelist
+
+============================================================
+5. DATA PROVENANCE AUDIT
+============================================================
+
+5.1 Local historical player/game data
+
+Primary local historical source:
+- data\reference\kaggle_nba\index.pkl
+- built from the Eoin Moore Kaggle dataset in
+  "NBA Database (1947 - Present)"
+
+Verified metadata from the local index:
+- schema: eoin
+- min_date: 1946-11-26
+- max_date: 2026-03-05
+- games_by_date days: 14,384
+- boxscore_games: 68,958
+- players_indexed: 5,272
+
+Verified raw source files exist and look real:
+- NBA Database (1947 - Present)\Games.csv
+- NBA Database (1947 - Present)\PlayerStatistics.csv
+- file sizes are large and consistent with full historical exports
+
+Conclusion:
+- Local historical player/game data is real imported data, not synthetic.
+
+5.2 Historical odds data
+
+Primary historical odds source:
+- data\reference\odds_history\odds_history.sqlite
+- accessed via core\nba_odds_store.py
+
+Verified database inventory:
+- runs: 74
+- snapshots: 952,309
+- closing_lines: 178,828
+- snapshot date range: 2025-10-21 to 2026-03-07
+- books: betmgm, draftkings, fanduel, pinnacle
+- markets include pts, ast, reb, pra, fg3m, stl, blk, tov
+
+Coverage command result:
+- eventCount: 950
+- playerCount: 429
+- closingCount: 178,828
+
+Conclusion:
+- Historical odds are real stored sportsbook snapshots/derived closes.
+
+5.3 Live line snapshot storage
+
+Verified:
+- data\line_history\2026-03-07.jsonl contains real-looking observed prop lines
+  with books, odds, player names, opponent/team abbreviations, and timestamps.
+
+Conclusion:
+- Live line storage is real observed line data.
+
+5.4 Basketball-Reference path
+
+Code support exists:
+- scripts\bref_ingest.py
+- core\nba_bref_data.py
+
+But current workspace state:
+- data\bref\curated\games.jsonl = 0 bytes
+- data\bref\curated\player_boxscores.jsonl = 0 bytes
+
+Raw BRef folder exists, but curated files are empty.
+
+Conclusion:
+- BRef is implemented in code but not actually provisioned in this workspace.
+- It should currently be treated as inactive/unusable.
+
+5.5 Local parquet staging
+
+Manifest shows a staged parquet file:
+- data\reference\local_parquet\manifest.json
+- sourcePath = C:\Users\thegr\Downloads\full_dataset_clean.parquet
+
+But manifest probe failed:
+- pyarrow missing
+- fastparquet missing
+
+Conclusion:
+- Parquet staging exists, but this workspace cannot currently introspect that
+  file without extra dependency installation.
+
+============================================================
+6. WHAT THE SYSTEM DOES WELL
+============================================================
+
+1. Real-vs-synthetic separation is explicit
+
+The code does not hide synthetic fallback behind vague naming. It exposes
+roiReal vs roiSynth, odds-only modes, and real-line-only commands. This is one
+of the strongest design choices in the repo.
+
+2. Good modular decomposition
+
+Core logic lives in core/, CLI handlers in nba_cli/, workflows in scripts/,
+and UI in web/. This reduces the chance of one-off logic being buried inside
+entrypoints.
+
+3. Strong local historical fallback
+
+When NBA API calls fail, the game log fallback uses the local indexed dataset:
+- core\nba_data_collection.py:98-110
+- quality gate smoke confirmed source=local_index_fallback games=25
+
+This is real-data resilience, not synthetic-data resilience.
+
+4. Signal gating is centralized
+
+core\gates.py is reused by live and backtest flows. That is the right pattern.
+
+5. Versioned policy/calibration history exists
+
+- models\policy_history.json
+- models\walk_forward\prob_cal_*.json
+- models\prob_calibration.json
+
+This makes walk-forward and date-specific policy replay possible.
+
+6. Runtime observability is better than average
+
+The repo tracks:
+- line history
+- decision journal
+- lean journal
+- outcomes
+- CLV/OLV
+- backtest checkpoints/results
+
+That is more mature than most hobby betting repos.
+
+7. Local validation tooling exists and works
+
+- pytest passed
+- quality_gate passed
+- backtest and minutes_eval commands run locally
+
+============================================================
+7. VALIDATION RESULTS FROM THIS AUDIT
+============================================================
+
+7.1 Tests
+
+Command:
+- .\.venv\Scripts\python.exe -m pytest -q
+
+Result:
+- 190 passed
+- 1 skipped
+
+Important nuance:
+- The suite is passing, but it is narrow (see findings section).
+
+7.2 Quality gate
+
+Command:
+- .\.venv\Scripts\python.exe scripts\quality_gate.py --json
+
+Result:
+- ok = true
+- python_compile = pass
+- js_syntax = pass
+- hallucination_patterns = pass
+- gamelog_fallback_smoke = pass
+
+This is good and meaningful.
+
+7.3 Short real-line backtest slice
+
+Command:
+- nba_mod.py backtest 2026-02-24 2026-02-25 --model full --local --odds-source local_history --real-only
+
+Key outputs:
+- sampleCount: 1,388
+- realLineSamples: 1,388
+- missingLineSamples: 0
+- roiReal betsPlaced: 12
+- roiReal hitRatePct: 75.0
+- roiReal roiPctPerBet: 32.888
+
+Interpretation:
+- Command runs correctly
+- Real-only mode works
+- Small-sample ROI is not decision-grade by itself
+
+7.4 Short minutes evaluation
+
+Command:
+- nba_mod.py minutes_eval 2026-02-24 2026-02-25 --local
+
+Outputs:
+- MAE: 5.538
+- bias: -1.155
+- sampleCount: 367
+
+Interpretation:
+- Minutes layer is usable but still fairly noisy
+- Short-window results are not catastrophic, but not "solved"
+
+7.5 Odds coverage
+
+Command:
+- nba_mod.py odds_coverage
+
+Outputs:
+- snapshotCount: 952,309
+- closingCount: 178,828
+- eventCount: 950
+- playerCount: 429
+
+Interpretation:
+- Odds archive is large and real
+- Historical coverage is materially better than a toy backfill
+
+============================================================
+8. FINDINGS AND RISKS
+============================================================
+
+I am listing these in priority order.
+
+------------------------------------------------------------
+FINDING 1 - RAW JOURNAL DATA INTEGRITY IS NOT CLEAN
+Severity: High
+------------------------------------------------------------
+
+Evidence from data\prop_journal.jsonl:
+
+- total rows: 225
+- duplicate key groups: 23
+- rows inside duplicate groups: 74
+- player ids with conflicting team abbreviations: 5
+- rows with abs(closingLine - line) >= 8 points: 9
+
+Examples found:
+
+- Jaylen Brown recorded once with team=OKC, opp=DET, line=10.5, closingLine=29.5
+- another Jaylen Brown row with team=BOS, opp=DEN, line=6.5, closingLine=29.5
+- Jamal Murray row with line=41.5, closingLine=24.5
+- Brandin Podziemski row with line=30.5, closingLine=16.5
+
+Likely causes:
+
+- append-only raw journal without write-time uniqueness enforcement
+- historical/manual bad entries
+- context mismatch between player/team/opponent on some CLI/manual entries
+
+Impact:
+
+- Any analysis reading raw prop_journal.jsonl directly can be misled
+- training export quality depends on dedupe/sanity rules
+- manual audit trail is not clean enough to trust as-is
+
+Mitigating factor:
+
+- best_today/results exports do dedupe on read via _dedupe_latest()
+- so downstream views are somewhat protected
+
+But the raw store is still too dirty for a "source of truth" audit trail.
+
+------------------------------------------------------------
+FINDING 2 - DAILY AUTOMATION IS OPERATIONALLY DEGRADED
+Severity: High
+------------------------------------------------------------
+
+Two separate problems exist.
+
+Problem A: workflow ordering mismatch
+
+- scripts\nba_agent.py defines daily_scan as:
+  collect_lines -> best_today -> roster_sweep
+
+- nba_cli\ops_commands.py defines daily_ops as:
+  collect_lines -> roster_sweep -> best_today
+
+The ops_commands order is correct. The nba_agent.py order is stale/wrong.
+
+Impact:
+- one automation path can summarize stale journal state before fresh signals are
+  swept and logged
+
+Problem B: repeated roster_sweep timeouts
+
+From data\agent_logs\daily_scan_2026-03-02.log through
+data\agent_logs\daily_scan_2026-03-06.log:
+
+- roster_sweep timed out after 120s on every recorded day
+
+This is not a one-off.
+
+Impact:
+- fresh signals may not be journaled by the scheduled workflow
+- automation output can be stale or incomplete
+- the daily workflow is not currently reliable end-to-end
+
+Additional note:
+- some logs also show "Ollama not running - summary unavailable"
+- that is secondary; the primary problem is roster_sweep timing out
+
+------------------------------------------------------------
+FINDING 3 - DOCS AND REPORTS HAVE DRIFTED FROM CURRENT CODE
+Severity: High
+------------------------------------------------------------
+
+Confirmed mismatches:
+
+1. tasks\FREEZE_2026-03-01.md is outdated
+   Doc says active bins include 10-20% and 80-100%.
+   Current code blocks bins 1-8 and only leaves bins 0 and 9 active:
+   - core\gates.py
+   - core\nba_data_collection.py BETTING_POLICY
+
+2. docs\requirements.md is outdated
+   Doc still lists:
+   - stat whitelist {pts, reb, ast, pra}
+   - edge >= 0.05
+   - confidence >= 0.55
+
+   Current code is stricter:
+   - whitelist {pts, ast}
+   - min_edge 0.08 global, ast 0.09
+   - min_confidence 0.60
+
+3. Stored reports conflict with current result artifacts
+
+Example:
+- data\backtest_60d_log.jsonl (written 2026-03-01) records for
+  2025-12-28_to_2026-02-25_full_local.json:
+  - realLineSamples = 17,068
+  - roiRealPctPerBet = 1.404 and later 0.35
+
+But the current file at
+data\backtest_results\2025-12-28_to_2026-02-25_full_local.json
+(mtime 2026-03-05) now contains:
+  - realLineSamples = 32,865
+  - roiRealPctPerBet = 51.835
+
+That means the filename is not immutable evidence. It has been overwritten or
+re-generated under the same path.
+
+Impact:
+
+- historical claims are not reproducible from filenames alone
+- report consumers can easily cite stale or overwritten results
+- the repo needs command/version/hash capture for result artifacts
+
+------------------------------------------------------------
+FINDING 4 - NBA API HISTORICAL BACKTEST PATH STILL HAS LEAKAGE RISK
+Severity: Medium-High
+------------------------------------------------------------
+
+Confirmed in code:
+
+- core\nba_data_collection.py:get_team_defensive_ratings(as_of_date=None)
+  hardcodes season=CURRENT_SEASON
+
+This means:
+- backtests using data_source="nba" for older date ranges can still fetch
+  current-season defense context instead of date-correct season context
+
+Nuance:
+
+- local backtests avoid this because core\nba_backtest.py monkey-patches the
+  relevant data functions to core\nba_local_stats.LocalNBAStats when
+  data_source="local"
+- so this is mainly a risk for NBA API historical runs, not the local-index
+  path you appear to rely on most
+
+Impact:
+- older NBA API backtests are not safe to treat as fully leakage-free
+
+------------------------------------------------------------
+FINDING 5 - BREF DATA SOURCE IS IMPLEMENTED BUT EMPTY IN THIS WORKSPACE
+Severity: Medium
+------------------------------------------------------------
+
+Evidence:
+
+- data\bref\curated\games.jsonl = 0 bytes
+- data\bref\curated\player_boxscores.jsonl = 0 bytes
+
+Impact:
+
+- data_source="bref" is not actually usable right now
+- docs/README can imply a supported path that is not provisioned in the current
+  workspace state
+
+------------------------------------------------------------
+FINDING 6 - TEST COVERAGE IS TOO NARROW FOR A REPO THIS LARGE
+Severity: Medium
+------------------------------------------------------------
+
+What is tested:
+
+- gates
+- EV math
+- betting policy constants/behavior
+
+What is not directly tested:
+
+- core\nba_prep_projection.py
+- core\nba_prop_engine.py
+- core\nba_backtest.py line matching / real-only behavior
+- core\nba_odds_store.py
+- core\nba_line_store.py
+- core\nba_bet_tracking.py
+- core\nba_decision_journal.py
+- scripts\nba_agent.py / daily workflows
+- server.py API behavior
+- web module behavior
+
+So:
+- 190 passing tests is good
+- but it does not mean the whole pipeline is well-covered
+
+------------------------------------------------------------
+FINDING 7 - HELPER SCRIPTS CAN DIVERGE FROM CANONICAL ENGINE BEHAVIOR
+Severity: Medium
+------------------------------------------------------------
+
+Best example:
+- scripts\betmgm_scan.py
+
+Issues:
+- it uses its own probability helpers instead of the canonical live path
+- if projection parsing fails, it falls back to projection = line
+
+Impact:
+- users can get materially different outputs depending on which script they run
+- helper scripts should not be treated as equivalent to compute_prop_ev()
+
+------------------------------------------------------------
+FINDING 8 - FRONTEND VALIDATION IS LIMITED
+Severity: Medium-Low
+------------------------------------------------------------
+
+The frontend is reasonably modular:
+- web\app.js
+- web\modules\*.js
+
+But validation is light:
+- quality_gate checks JS syntax on web\app.js only
+- there are no browser-flow tests in this repo
+- imported modules are not meaningfully exercised in CI
+
+Impact:
+- UI can drift without detection even when core logic is fine
+
+------------------------------------------------------------
+FINDING 9 - SOME SIGNALS ARE USER-SUPPLIED, NOT MARKET-SOURCED
+Severity: Low but important for analysis hygiene
+------------------------------------------------------------
+
+Decision journal query:
+- signals with used_real_line = 0: 4
+- all are book = user_supplied
+
+Examples:
+- Anthony Edwards pts, book=user_supplied
+- Cade Cunningham pts, book=user_supplied
+- Jarrett Allen reb, book=user_supplied
+
+Interpretation:
+- this is not proof of synthetic live pipeline behavior
+- it is proof that manual/user-supplied signals coexist with market-sourced
+  signals in the same table
+
+Recommendation:
+- keep manual/user-supplied signals excluded from paper/live validation metrics
+  by default unless explicitly requested
+
+============================================================
+9. WHAT THE CURRENT PIPELINE APPEARS TO BE DOING TODAY
+============================================================
+
+Based on code, logs, and current data:
+
+1. The freeze logic is doing what you described
+
+- bins 1-8 are blocked
+- bins 0 and 9 are the only active bins
+- pts and ast are the actual betting whitelist
+- reb survives as research signal only
+
+This means the model can still see many positive-edge leans, but almost all of
+them will be blocked if they land in bins 3-6 after temperature scaling.
+
+2. The system is producing qualifying picks, but sparsely
+
+Evidence:
+- decision_journal.sqlite currently has 32 signals and 614 leans
+- signal stats by stat:
+  - pts: 25
+  - reb: 6
+  - ast: 1
+
+3. The lean table is consistent with your described distribution story
+
+The most common skip reasons in the live leans table are blocked bins:
+- blocked_prob_bin:6
+- blocked_prob_bin:3
+- blocked_prob_bin:7
+
+That is exactly what I would expect from the current freeze configuration.
+
+============================================================
+10. SYNTHETIC VS REAL - FINAL VERDICT
+============================================================
+
+Strict verdict:
+
+- Real player/game history in live path: yes
+- Real sportsbook lines in live path: yes
+- Synthetic player/game data in live path: not found
+- Synthetic historical line fallback in backtests: yes, explicit by design
+- Synthetic/test/example artifacts elsewhere in repo: yes
+
+If your goal is strict market-valid performance measurement:
+
+- Trust only runs with:
+  - data_source=local or fully date-safe historical source
+  - odds_source=local_history
+  - --real-only or equivalent
+
+- Do not use:
+  - roiSynth
+  - blended synthetic ROI
+  - raw prop_journal.jsonl without dedupe/sanity filtering
+  - scripts\betmgm_scan.py as a canonical evaluator
+
+============================================================
+11. RECOMMENDED ACTION PLAN
+============================================================
+
+Priority 0 - Fix before trusting the next paper-trading cycle
+
+1. Retire or fix scripts\nba_agent.py daily_scan
+   - make it use collect_lines -> roster_sweep -> best_today
+   - raise timeout above 120s or optimize roster_sweep
+   - ideally point users to nba_mod.py daily_ops as the canonical runner
+
+2. Harden prop_journal write path
+   - add write-time uniqueness or post-write dedupe
+   - reject obviously impossible player/team/opponent combinations
+   - tag or quarantine malformed journal rows
+
+3. Make result artifacts immutable
+   For every saved backtest/report, store:
+   - git commit hash
+   - command line
+   - policy hash
+   - calibration hash
+   - created timestamp
+   - input odds db path/hash if feasible
+
+Priority 1 - Improve evidence quality
+
+4. Default all decision-grade reports to real-only
+   - lead with roiReal only
+   - keep roiSynth labeled diagnostic only
+
+5. Separate manual signals from market signals
+   - book=user_supplied should not mix into forward-validation summaries by
+     default
+
+6. Either populate BRef curated files or remove BRef from active docs/runbooks
+
+Priority 2 - Add missing tests
+
+7. Add integration tests for:
+   - log_prop_ev_entry()
+   - run_backtest real-only behavior
+   - odds store close matching
+   - roster_sweep happy path and timeout budget
+   - daily_ops ordering
+   - results export/dedupe
+
+8. Add frontend validation beyond syntax
+   - node syntax check for all web\modules\*.js
+   - one browser smoke test if Playwright is acceptable
+
+Priority 3 - Reduce path divergence
+
+9. Refactor helper scanners to call canonical compute_prop_ev path
+   - especially scripts\betmgm_scan.py
+
+10. Install parquet dependencies if local_parquet is intended to remain active
+   - pyarrow or fastparquet
+
+============================================================
+12. AUDITOR'S CONCLUSION
+============================================================
+
+This is not a fake-data pipeline. It is a real-data pipeline with:
+
+- a real live line collector
+- real historical local player/game data
+- real historical odds storage
+- explicit synthetic backtest fallbacks that are visible and configurable
+
+The bigger problems are not "is the data fake?".
+The bigger problems are:
+
+1. operational reliability
+2. raw journal cleanliness
+3. documentation/report reproducibility
+4. keeping helper paths from drifting away from the canonical engine
+
+If you want one sentence:
+
+The main live pipeline is using real data, but the repo still contains
+synthetic backtest fallbacks and enough artifact/automation drift that you
+should trust only real-line-only reports, deduped journal views, and the
+canonical daily_ops/live scan path.
+

@@ -1,0 +1,678 @@
+NBA PIPELINE FULL REPO AUDIT
+Generated: 2026-03-09
+Workspace: C:\Users\thegr\OneDrive\Desktop\nba data ver 2
+Auditor: Codex (updated repo-wide review)
+
+============================================================
+1. SCOPE AND METHOD
+============================================================
+
+Since the 2026-03-07 audit, I re-ran a repo-wide review with focus on:
+
+- EV pipeline core and calibration:
+  - core\nba_ev_engine.py
+  - core\nba_prop_engine.py
+  - core\nba_parlay_engine.py
+- Projections and minutes:
+  - core\nba_prep_projection.py
+  - core\nba_minutes_model.py
+  - core\nba_data_prep.py
+  - core\nba_prep_usage.py
+- Policy, gates, journal, odds, backtest, risk:
+  - core\nba_data_collection.py
+  - core\gates.py
+  - core\nba_decision_journal.py
+  - core\nba_odds_store.py
+  - core\nba_bet_tracking.py
+  - core\nba_backtest.py
+  - core\nba_risk_metrics.py
+  - core\pipeline_progress.py
+- CLI and scripts:
+  - nba_cli\*_commands.py
+  - scripts\quality_gate.py and odds/backfill utilities
+- Tests:
+  - tests\test_compute_ev.py
+  - tests\test_betting_policy.py
+  - tests\test_gates.py
+  - tests\test_prop_engine_snapshot_mode.py
+  - tests\test_odds_store_matching.py
+  - tests\test_bet_tracking_journal.py
+  - tests\test_backtest_artifact_metadata.py
+  - tests\test_risk_metrics.py
+  - tests\test_ops_commands_progress.py
+  - tests\test_scan_commands_bridge.py
+
+I did not re-run long backtests or network calls for this written audit; findings
+are based on static code + tests + prior validated behavior.
+
+This 2026-03-09 audit should be read as a refinement of the 2026-03-07 audit:
+same repo, but with a deeper, file-by-file look at the EV core, projections,
+minutes, and gate/test surface.
+
+============================================================
+2. EXECUTIVE SUMMARY (2026‑03‑09)
+============================================================
+
+Headline:
+
+- The core engine (EV math, prop engine, projections, minutes, gates, risk) is
+  structurally sound and already "tight" — very little truly useless jargon.
+- Most long comments are actually encoding calibration decisions, ROI history,
+  or NBA API quirks and should not be deleted.
+- The biggest remaining value is in **adding a few targeted tests** for delicate
+  areas (projection/minutes heuristics, reference-mode EV, parlay EV), not in
+  refactoring core logic.
+- The earlier operational and data-quality risks from 2026‑03‑07 (journal
+  cleanliness, automation drift, doc/report drift) are still relevant; this
+  audit refines where tests and safeguards could be strengthened rather than
+  changing that story.
+
+My concise answer to "is there extra useless jargon, where are the edge cases?":
+
+- True dead/commentary "noise" is rare in core code. Most complexity is
+  working complexity with strong justifications.
+- There *are* a few places where:
+  - behavior is subtle but under-tested (especially projections/minutes, parlay EV),
+  - helper scripts or tests could be slightly de-noised,
+  - more explicit tests would lock in invariants you're currently relying on
+    by convention.
+
+============================================================
+3. EV CORE REVIEW (nba_ev_engine, nba_prop_engine, nba_parlay_engine)
+============================================================
+
+3.1 nba_ev_engine.py (single-leg EV + calibration)
+
+Role:
+
+- Convert projections, lines, and stdevs into:
+  - probabilities for over/under/push
+  - no-vig implied probs
+  - EV and edge vs no-vig fair
+  - verdicts (Negative EV / Thin Edge / Good Value / Strong Value)
+- Apply per-stat + per-bin temperature scaling from:
+  - models\prob_calibration.json
+  - models\walk_forward\prob_cal_YYYY-MM-DD.json (as_of_date)
+
+Simplification targets:
+
+- Structure is already clean:
+  - helpers for sigmoid, Normal CDF fallback, Poisson PMF/CDF, odds conversions.
+  - single public entrypoint: compute_ev().
+- Realistic small cleanups (no behavior change):
+  - Factor the "choose best walk_forward calibration file ≤ as_of_date" into
+    a tiny helper to visually shrink _load_prob_calibration_for_date().
+  - Optionally extract the "normalize and clamp probOver/Under/Push" block into
+    a small helper. This is purely stylistic; current code is clear.
+
+Edge-case handling (good points):
+
+- Normal vs Poisson vs reference:
+  - Poisson stats = {"stl","blk","fg3m","tov"} with integer vs half-line handling.
+  - Normal path catches exceptions and falls back to error-function approximation.
+- stdev behavior:
+  - eff_stdev floor uses 20% of projection or 1.0 minimum, avoiding zero-variance.
+- Probability safety:
+  - clamps each prob to [0,1], re-normalizes if sum>0; falls back to 50/50 when
+    probabilities collapse.
+- Calibration:
+  - _load_prob_calibration_for_date() handles:
+    - global calibration when as_of_date is None.
+    - exact file match for backtest.
+    - "latest ≤ as_of_date" search otherwise.
+    - per-stat sample-count gating via _MIN_SAMPLES_GATE with removal of low-
+      sample temps so _global is used.
+
+Test coverage and gaps:
+
+- tests\test_compute_ev.py:
+  - Good coverage of:
+    - Normal vs Poisson modes.
+    - zero stdev fallback.
+    - odds asymmetry.
+    - edge-sum and prob-sum invariants.
+    - basic calibration integration (stat= parameter presence, distributionMode).
+  - Gaps:
+    - No explicit test that *reference_probs* mode:
+      - sets distributionMode == "reference".
+      - bypasses temperature scaling (probabilities unchanged apart from
+        normalization).
+    - No direct tests for *walk-forward calibration selection* behavior:
+      - exact-date file vs latest ≤ date vs global fallback.
+      - enforcement of _MIN_SAMPLES_GATE (stat-specific temps dropped below 200
+        samples but _global retained).
+
+Recommendations:
+
+- Add a small test block to test_compute_ev.py:
+  - "reference mode" test calling compute_ev(..., reference_probs={...}) and
+    asserting that:
+    - distributionMode == "reference"
+    - output probOver/Under/Push match reference_probs (within rounding).
+- Add a test module or class that monkeypatches the models directory to include
+  a couple of toy walk_forward files and:
+  - ensures the correct file is chosen for various as_of_date.
+  - ensures stat-specific temps with sample_counts < _MIN_SAMPLES_GATE are
+    removed while _global remains.
+
+3.2 nba_prop_engine.py (single-prop EV + auto line sweep)
+
+Role:
+
+- compute_prop_ev():
+  - Pull projections (compute_projection).
+  - Optionally blend projections with book line (line blending disabled by
+    default post-freeze).
+  - Fetch live offerings from Odds API (get_nba_player_prop_offers).
+  - Optionally auto-inject Pinnacle as a reference book:
+    - compute no-vig reference_probs from Pinnacle lines.
+  - Compute EV via compute_ev() with stat= and optional reference_probs.
+  - Optionally score with outcome ML and include that in the response.
+- compute_auto_line_sweep():
+  - Sweep across all offers for a player/stat.
+  - Score each line with compute_ev().
+  - Sort by best EV + vigSpread + distance from projection + book priority.
+  - Compute and surface cross-book stats: nBooksOffering, bookLineStdev,
+    softLineBooks, staleConsensus.
+
+Simplification targets:
+
+- Code is dense but well organized. A few low-risk, purely cosmetic options:
+  - Extract the "auto Pinnacle reference" block into its own helper:
+    - currently ~30 lines inside compute_prop_ev() reading pin_offers and
+      computing reference_probs + reference_book_meta.
+  - Extract the "derive commenceTime from get_todays_games()" fallback block
+    into a helper to clarify error-handling and keep compute_prop_ev() shorter.
+- I would **not** change any of the ranking logic in compute_auto_line_sweep
+  without new tests; it is subtle and interacts with downstream gates and
+  reporting.
+
+Edge-case handling (good points):
+
+- Book filtering:
+  - _clean_bookmaker_csv() normalizes CSV lists; auto Pinnacle adds Pinnacle
+    only if user hasn't specified reference_book.
+- Offer fetching:
+  - Handles both failure and "no offers" separately.
+  - allow_book_fallback flag toggles expansion to all books when requested books
+    have no complete pairs.
+- Line shopping:
+  - _best_side_prices_for_line() chooses best odds with bookmaker priority
+    BetMGM > DraftKings > FanDuel in case of ties.
+- Pinnacle reference:
+  - Uses ±0.501 tolerance to find lines "near" the requested line.
+  - Handles missing no-vig (skip reference_probs).
+
+Test coverage and gaps:
+
+- tests\test_prop_engine_snapshot_mode.py:
+  - Confirms that compute_prop_ev() honors refresh_market_offers=False and
+    does not hit get_nba_player_prop_offers in that mode.
+- Gaps:
+  - No tests for:
+    - auto Pinnacle reference branch (auto_pinnacle=True, no explicit
+      reference_book) and correctness of referenceBook + reference_probs.
+    - explicit reference_book argument overriding auto Pinnacle behavior.
+    - nBooksOffering/bookLineStdev/softLineBooks and staleConsensus flags in
+      compute_auto_line_sweep().
+
+Recommendations:
+
+- Extend tests\test_prop_engine_snapshot_mode.py or add a new test module:
+  - Use monkeypatches for compute_projection and get_nba_player_prop_offers
+    to simulate:
+    - Offers that include Pinnacle with known odds around a given line, so you
+      can assert that:
+      - referenceBook["book"] == "pinnacle"
+      - referenceBook["noVigOver"/"noVigUnder"] match computed no-vig values.
+      - ev["distributionMode"] == "reference" when reference_probs is provided.
+    - Cases where reference_book="pinnacle" is passed explicitly and confirm
+      auto Pinnacle behavior isn't duplicating or conflicting with it.
+- Consider a small test that:
+  - Builds synthetic offers with varying lines across books and asserts that
+    bookLineStdev, nBooksOffering, softLineBooks, and staleConsensus are
+    populated as expected in compute_auto_line_sweep() output. This pins the
+    inputs that gates rely on (nBooksOffering, etc.).
+
+3.3 nba_parlay_engine.py (2–3 leg correlated parlays)
+
+Role:
+
+- Combine single-leg probabilities (probOver and chosen side) into:
+  - jointProb using a Gaussian-copula-style approximation.
+  - parlayDecOdds (product of decimal odds).
+  - EV, EV%, Kelly, verdict.
+- Estimate correlations based on:
+  - Same-player stat pairs (e.g., pts+reb, pts+pra).
+  - Same-team different-player pairs (pts+pts, ast+ast).
+  - Optionally use empirical correlations from game logs when available.
+
+Simplification targets:
+
+- The implementation is already compact:
+  - _get_stat_correlation() calls static tables or computes sample correlation
+    from logs if n≥10.
+  - _joint_prob_2 and _joint_prob_3 encapsulate the probit/phi math.
+- I would not attempt to simplify the formulas further; they are clear and
+  mathematically motivated. There is no real "jargon" to delete here.
+
+Edge-case handling:
+
+- Clamps correlations to ±0.99, joint probabilities to [0.0001,0.9999] to
+  avoid degeneracy.
+- Validates odds: any leg with dec_odds<=1.0 returns an error.
+- Separate correlation lookup for:
+  - same player vs same team/diff player vs different teams.
+
+Test coverage and gaps:
+
+- I did not find a dedicated tests\test_parlay_engine.py.
+- All parlay behavior is effectively unpinned by unit tests; any bug here
+  would be caught only by integration behavior, if at all.
+
+Recommendations:
+
+- Add a minimal tests\test_parlay_engine.py to pin:
+  - 2-leg independent parlay:
+    - legs with p=0.6 each, rho=0:
+      - naiveJointProb≈0.36, EV behaves as expected.
+  - 2-leg positively correlated parlay (e.g. pts+pra same player):
+    - show jointProb>naiveJointProb and EV > independent-case EV at equal odds.
+  - 3-leg example using a few correlated stats (e.g. pts+reb+pra for same
+    player) just to ensure:
+    - correlations dict keys (leg1_leg2, etc.) are populated correctly.
+    - jointProb and verdict fields are consistent.
+
+============================================================
+4. PROJECTIONS & MINUTES REVIEW
+============================================================
+
+4.1 nba_minutes_model.py (minutes multiplier + reasoning)
+
+Role:
+
+- Given rolling minutes stats + game logs + B2B/splits/excluded_games, compute:
+  - a multiplier (0.85–1.15, clamped to ≥0.50) on top of base projected minutes.
+  - a minutesConfidence value.
+  - a list of reasoning tags (high_volatility, streak_up_3g, injury_return_*, etc.).
+- Feed these into nba_prep_projection.compute_projection(), which then surfaces:
+  - minutesProjection.minutesReasoning
+  - minutesCapApplied / minutesCapReason
+
+Simplification targets:
+
+- Tunable constants and detection logic are well-structured and commented.
+- The only realistic cleanups are:
+  - Factor out portions of compute_minutes_multiplier() into tiny helpers
+    (e.g., _apply_volatility_signal, _apply_streak_signal) to shrink the body.
+  - Keep the injury_return detection logic in its own helper, as it already is.
+  - Do **not** change the thresholds or caps unless you are ready to re-fit
+    calibration and re-run minutes_eval.
+
+Edge-case handling:
+
+- Reasoning tags and multiplier are bounded to avoid wild outputs in pathological
+  inputs (e.g., low sample size, zero averages).
+- detect_injury_return() handles:
+  - explicit DNP entries via excluded_games.
+  - missing DNP rows via calendar gaps (>=_LAYOFF_GAP_DAYS), estimating DNP
+    count and games_since_return heuristically.
+- For B2B, streak, trend, and volatility, signals are *additive but bounded*,
+  which is exactly what you want in a minutes model.
+
+Test coverage and gaps:
+
+- No first-class minutes model tests currently; behavior is validated indirectly
+  through:
+  - nba_mod.py minutes_eval (runtime command).
+  - gates injury-return gate tests (which consume minutesReasoning tags).
+- Gaps:
+  - No explicit tests that:
+    - specific injury-return patterns (e.g. 6 DNPs, first game back) map to the
+      expected cap_multiplier and reasoning tag.
+    - volatility thresholds actually register high_volatility vs low_volatility
+      and adjust confidence and multiplier.
+
+Recommendations:
+
+- Add tests\test_minutes_model.py that:
+  - Feeds synthetic logs and excluded_games to detect_injury_return() and
+    asserts cap_multiplier and reasoning for each row of _INJURY_CAP_TABLE.
+  - Feeds rolling stats with controlled min_avg_season and min_stdev to
+    exercise high/low volatility and check:
+    - minutesReasoning includes the right tags.
+    - minutesConfidence shifts in the expected direction.
+
+4.2 nba_prep_usage.py (usage redistribution)
+
+Role:
+
+- Given a team roster with statuses and usgPct (via get_team_roster_status),
+  compute:
+  - usageMultiplier and effectiveMultiplier for the target player when teammates
+    are inactive.
+  - per-stat multipliers using _USG_STAT_ELASTICITY.
+  - cross-stat damping between pts and ast (+ pa) to avoid double counting.
+
+Simplification targets:
+
+- Implementation is straightforward:
+  - safe defaults when roster fetch fails.
+  - explicit filters for "Likely Inactive"/"Inactive" high-usage teammates.
+- There is little to simplify; most lines are necessary for clarity.
+
+Edge-case handling:
+
+- Caps effectiveMult to [1.0, 1.45] and ensures stat multipliers can't explode.
+- Uses simple elasticity exponents per-stat, striking a good balance between
+  flexibility and interpretability.
+- Cross-stat damping (cap ast_mult at pts_mult * 0.88) is clearly documented and
+  implemented in a few lines.
+
+Test coverage and gaps:
+
+- Usage logic is not directly unit-tested; its impact is visible only through
+  projections and EV results.
+
+Recommendations:
+
+- Add a small tests\test_prep_usage.py that:
+  - Constructs fake roster_data with:
+    - a 28% usg teammate marked Likely Inactive.
+    - a 24% usg target player.
+  - Asserts that:
+    - effectiveMultiplier > 1.0.
+    - statMultipliers["pts"] > 1.0.
+    - statMultipliers["ast"] is damped relative to pts in the expected way.
+
+4.3 nba_prep_projection.py (full projection engine)
+
+Role:
+
+- Full pregame projection engine, combining:
+  - recent logs and rolling stats.
+  - home/away, rest days, opponent defense, and matchup history.
+  - minutesProjection and minutes multiplier + external overrides.
+  - role-change, blowout, altitude, rest-advantage, 3-in-4, high-min fatigue,
+    road-trip fatigue adjustments.
+  - usage multipliers, pace-based variance, stdev shrinkage, line-blend stdev
+    reduction, and high-variance widening.
+  - combo stats (pra, pr, pa, ra).
+
+Simplification targets:
+
+- This file is long, but:
+  - It is mostly a linear, well-commented pipeline.
+  - "Gap 8.x" comments encode calibration experiments and ROI findings; they
+    are high-signal documentation, not fluff.
+- Safe simplifications:
+  - Group repeated stat-sets ({"pts","ast"}, {"pts","reb","ast"}) into named
+    constants to reduce repeated tuple literals and slightly declutter the
+    inner loop.
+  - Move the large "Gap 8.X" multi-line comments into shorter references if
+    documentation is repeated elsewhere (e.g. docs/ev-rules.md); but do not
+    delete the unique rationale text from everywhere — at least one copy should
+    live next to the implementation.
+- I do **not** recommend attempting any behavioral refactor here without a
+  full calibration re-fit and comparative backtests.
+
+Edge-case handling:
+
+- DNP filtering in get_player_game_log plus dnp_min_threshold ensures weird
+  very-low-minute games don't poison rolling stats.
+- Base minutes come from _project_minutes(), then reasoned adjustments from
+  minutes_model, then external override clamp; this layering is explicit and
+  well-bounded.
+- All multi-factor stat multipliers are capped by PROJECTION_CONFIG["combined"]
+  and clamped via _cclamp(), protecting against combined over-scaling.
+- High-variance detection (|last-5 stdev| > 1.5× full stdev) is used to widen
+  projStdev by 1.2×, which is a conservative guardrail.
+
+Test coverage and gaps:
+
+- No direct unit tests for compute_projection(); behavior is checked via:
+  - EV tests.
+  - minutes_eval command.
+  - gating tests that rely on minutesReasoning and recentHighVariance flags.
+- Gaps:
+  - No pinned tests for specific Gap 8.* behaviors (e.g. altitudeMult, blowout
+    adjustment, restAdvantage, roadTripFatigue).
+  - No tests that assert that minutesProjection.minutesReasoning tags are
+    wired through and recognized by gates._qualifies().
+
+Recommendations:
+
+- Add targeted, synthetic tests that:
+  - Mock get_player_game_log, get_player_splits, get_team_defensive_ratings, and
+    compute_usage_adjustment to simple deterministic structures.
+  - Call compute_projection() once and assert:
+    - minutesProjection contains injury_return_* tags for a designed DNP pattern.
+    - For a DEN away game with close spread and no B2B, pts projection is
+      slightly higher vs a neutral opponent, within configured altitude caps.
+    - _rest_advantage and _is_3in4 toggles adjust statMult within combined bounds.
+
+============================================================
+5. POLICY, GATES, JOURNAL, ODDS, BACKTEST, RISK
+============================================================
+
+5.1 Policy & gates (BETTING_POLICY, SIGNAL_SPEC, _qualifies, gate_check)
+
+State:
+
+- BETTING_POLICY (core\nba_data_collection.py):
+  - stat_whitelist = {"pts","ast"}.
+  - blocked_prob_bins = {1,2,3,4,5,6,7,8}.
+  - min_ev_pct = 0.0 (not used as a primary gate).
+- SIGNAL_SPEC (core\gates.py v1):
+  - eligible_stats = {"pts","reb","ast"}.
+  - min_edge = 0.08; ast has 0.09; reb 0.08.
+  - min_confidence = 0.60.
+  - blocked_prob_bins = {1..8}.
+  - real_line_required_stats = {"reb"}.
+  - require_pinnacle = True with per-bin and per-stat no-vig thresholds.
+  - block_high_variance = True.
+  - min_books_offering = 2 (market depth gate).
+
+Findings:
+
+- Two-layer architecture is intact and well-documented:
+  - SIGNAL_SPEC governs "model signals" (including research-only stats).
+  - BETTING_POLICY governs what counts toward GO-LIVE metrics (whitelist).
+- gates._qualifies() is long but clean and heavily test-pinned:
+  - Gate order is deliberate: stat -> real_line -> edge -> confidence -> bins
+    -> CLV -> injury_return -> Pinnacle -> high_variance -> market depth.
+  - Tests assert not only pass/fail but exact reasons ("edge_too_low", 
+    "blocked_prob_bin:3", "recent_high_variance", "only_one_book:1", etc.).
+- gate_check() in DecisionJournal correctly uses stat_whitelist to:
+  - include only pts+ast in gate metrics.
+  - separately report research_stats for reb (and any future research-only stats).
+
+Simplification:
+
+- There is almost nothing to simplify without changing behavior:
+  - Comments near gates encode subtle calibration and ROI decisions; they are
+    valuable documentation.
+  - The function body is logically grouped by gate, with explicit, named
+    reasons; it's already "senior review" quality.
+
+Edge-case handling:
+
+- bin mapping uses int(prob_over*10) and explicit tests confirm all boundaries.
+- CLV gate only engages when *both* clvLine and clvOddsPct are present; absent
+  CLV fields are explicitly treated as "pre-settlement, skip CLV gate."
+- Pinnacle gate only fires when referenceBook is present; a missing no-vig key
+  results in explicit "no_pinnacle_no_vig_*" reasons.
+- Market depth gate engages only when nBooksOffering>0 and <min_books;
+  nBooksOffering=0 is treated as "no data," not as a hard failure.
+
+5.2 Decision journal, odds store, backtest, risk, pipeline_progress
+
+Summary:
+
+- Decision journal:
+  - Schema and gate_check behavior are well-tested (in-memory replicas in
+    tests\test_betting_policy.py).
+  - gate_check's stats filtering (whitelist vs research-only) is correct.
+- Odds store:
+  - Name normalization and alias handling for players and teams is robust.
+  - Tests assert that synonyms like "AJ Green"/"A.J. Green", "Nic Claxton"/
+    "Nicolas Claxton", "Moe Wagner"/"Moritz Wagner" map to the same stored
+    lines and snapshots.
+- Backtest:
+  - _normalized_backtest_args and _build_artifact_metadata are pinned by tests,
+    including gitHead, calibrationHash, policyHash, and normalized CLI args.
+  - The synthetic vs real-line behavior discussed in the 2026‑03‑07 audit is
+    still accurate: synthetic lines only appear in backtests when odds data is
+    missing or the user asks for it.
+- Risk metrics (nba_risk_metrics.py):
+  - All helper functions are pure, well-factored, and thoroughly tested by
+    tests\test_risk_metrics.py.
+  - No meaningful "jargon" to delete; comments are minimal and clarifying.
+- Pipeline progress (pipeline_progress.py):
+  - Tiny, robust helper for JSON status files with atomic writes; correctly
+    exercised via tests\test_ops_commands_progress.py.
+
+Recommendations:
+
+- Focus on the test additions described earlier rather than refactors:
+  - Additional tests for projection/minutes, reference-mode EV, and parlay EV
+    will further lock in behavior.
+- Retain comments and field names that explicitly differentiate:
+  - real vs synthetic lines.
+  - policy-qualified vs research-only stats.
+  - CLV-informed vs non-CLV metrics.
+
+============================================================
+6. TESTS, CLI, SCRIPTS, AND WEB
+============================================================
+
+6.1 Tests
+
+State:
+
+- 190+ tests covering:
+  - EV, gates, betting policy, odds store matching, backtest artifacts, risk
+    metrics, bet tracking/journal dedupe, scan command wiring, ops progress.
+- Most tests are high-signal, with detailed docstrings explaining freeze
+  constraints and design rationale.
+
+Noise / simplification:
+
+- Some docstrings in tests\test_gates.py and tests\test_betting_policy.py
+  duplicate information that now also lives in CLAUDE.md and this audit.
+- Assertions themselves are lean; the "noise" is just repeated narratives.
+
+Recommendation:
+
+- If you want to de-noise tests:
+  - Keep one thorough "spec" docstring per class.
+  - Shorten per-test docstrings where they merely restate the name.
+  - Do **not** remove comments that describe non-obvious behavior, like gate
+    ordering and ROI-driven threshold changes; those are valuable future-proofing.
+
+6.2 CLI and scripts
+
+Findings:
+
+- CLI commands in nba_cli are mostly thin, delegating to core modules.
+- ops_commands._handle_daily_ops and risk_commands._handle_risk_metrics are
+  pinned by tests; they correctly:
+  - enforce ordering (collect_lines → roster_sweep → best_today).
+  - respect policy-only vs all-bets flags.
+- scan_commands._handle_roster_sweep is well-tested for the "duplicate signal
+  but still log_prop_ev_entry" scenario and uses _qualifies() as expected.
+
+Remaining risks (from 2026‑03‑07, unchanged by this static review):
+
+- scripts\nba_agent.py's workflow ordering and timeouts still need cleanup:
+  - simple structural fix: mirror daily_ops order and ensure roster_sweep has
+    enough timeout budget or smaller work units.
+- Helper scripts like scripts\betmgm_scan.py still diverge from canonical
+  compute_prop_ev() behavior and should not be treated as production evaluators.
+
+6.3 Web frontend
+
+Findings:
+
+- web\app.js plus web\modules\*.js form a small Alpine.js frontend:
+  - state management is mostly per-tab.
+  - minimal global complexity.
+- There is still no automated browser-level test coverage; quality_gate only
+  checks JS syntax on app.js.
+
+Recommendation:
+
+- If you want to invest here:
+  - Add a simple Playwright or similar smoke test that:
+    - loads the dashboard.
+    - hits 1–2 API endpoints via server.py.
+    - asserts core UI elements render and parse responses without JS errors.
+
+============================================================
+7. UPDATED VERDICT AND ACTIONABLE NEXT STEPS (2026‑03‑09)
+============================================================
+
+7.1 Verdict (unchanged on fundamentals)
+
+- Live pipeline:
+  - Real player/game history: Yes.
+  - Real sportsbook lines: Yes.
+  - Synthetic gamelogs in live path: Not found.
+- Backtest:
+  - Can use synthetic lines by explicit design when odds are missing or when
+    odds_source doesn't point at the historical local store.
+- Repo artifacts:
+  - Still contain synthetic examples, calibration samples, and helper paths
+    that must not be confused with the canonical engine.
+
+7.2 Highest-ROI next work from this audit
+
+1) Tests to add (small, surgical):
+
+- Reference-mode EV and walk-forward calibration tests for nba_ev_engine.
+- Minutes/injury-return and volatility tests for nba_minutes_model.
+- Usage-redistribution tests for nba_prep_usage.
+- Minimal parlay EV tests for nba_parlay_engine.
+- One or two compute_projection tests that assert:
+  - minutesReasoning tags are consistent with gates._qualifies() expectations.
+  - pace/altitude/rest adjustments stay within documented caps.
+
+2) Operational fixes from 2026‑03‑07 audit (still recommended):
+
+- Align scripts\nba_agent.py daily_scan with nba_mod.py daily_ops (ordering +
+  timeouts).
+- Harden prop_journal.jsonl write path (dedupe, validation, quarantine of bad
+  rows).
+- Make long-run result artifacts immutable (commit hash + CLI args + policy and
+  calibration hashes).
+
+3) Documentation + test hygiene:
+
+- Update any remaining docs that still reference:
+  - older stat whitelists (e.g. reb, pra).
+  - outdated edge/confidence or bin activation descriptions.
+- Lightly de-duplicate repeated narrative text in test docstrings where it no
+  longer adds new information beyond CLAUDE.md and this audit.
+
+============================================================
+8. CONCLUSION
+============================================================
+
+Relative to 2026‑03‑07, this audit:
+
+- Confirms that the **core EV, projection, minutes, and gating logic remain
+  behaviorally consistent and already high quality**, with little pure "jargon"
+  to remove.
+- Identifies a few **concrete, high-value test additions** that will harden the
+  most complex parts of the system without changing behavior.
+- Leaves intact the earlier recommendations around **operational reliability,
+  journal cleanliness, and artifact reproducibility**, which are still the
+  main barriers between this engine and decision-grade GO-LIVE confidence.
+
+If you want one updated sentence:
+
+> The main live pipeline is still a real-data, calibration-aware engine with
+> well-pinned gates; the best improvements now are targeted tests for projections/
+> minutes/EV edge cases and small operational fixes, not wholesale refactors or
+> comment deletions.
+
