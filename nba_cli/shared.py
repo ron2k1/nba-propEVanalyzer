@@ -14,7 +14,7 @@ AVAILABLE_COMMANDS = (
     "parlay_ev, odds, odds_live, "
     "player_lookup, settle_yesterday, best_today, "
     "results_yesterday, export_training_rows, record_closing, train_model, starter_accuracy, "
-    "train_outcome_ml, train_projection_ml, train_projection_ml_per_stat, train_quantile_projection, promote_projection_ml, backtest, live_projection"
+    "train_outcome_ml, train_projection_ml, train_projection_ml_per_stat, train_quantile_projection, promote_projection_ml, backtest, live_projection, risk_metrics"
 )
 VALID_LIVE_PROJECTION_STATS = {"pts", "reb", "ast", "fg3m", "pra", "stl", "blk", "tov"}
 

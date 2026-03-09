@@ -1346,6 +1346,7 @@ def run_backtest(
                                     "opening_line": _open_line_val,
                                     "line_movement": round(_line_movement, 2) if _line_movement is not None else None,
                                     "olv_favorable": _olv_favorable,
+                                    "bet_order": len(acc["_bet_records"]),
                                 }
                                 acc["_bet_records"].append(_bet_record)
 
@@ -1424,6 +1425,25 @@ def run_backtest(
                 accumulators[m].pop("_bet_records", None)
 
         model_reports = {m: _finalize_accumulator(accumulators[m]) for m in models}
+
+        # --- Risk metrics (drawdown, Sharpe, Calmar, streaks) ---
+        if _bet_records_by_model:
+            from .nba_risk_metrics import compute_risk_metrics, filter_bets
+            for m in models:
+                recs = _bet_records_by_model.get(m, [])
+                policy_bets = filter_bets(recs, policy_pass_only=True)
+                if policy_bets:
+                    model_reports[m]["riskMetrics"] = compute_risk_metrics(
+                        policy_bets
+                    ).get("riskMetrics")
+                real_policy = filter_bets(
+                    recs, policy_pass_only=True, real_line_only=True
+                )
+                if real_policy:
+                    model_reports[m]["riskMetricsRealLine"] = compute_risk_metrics(
+                        real_policy
+                    ).get("riskMetrics")
+
         _betting_policy = _artifact_betting_policy(walk_forward)
         response = {
             "success": True,
