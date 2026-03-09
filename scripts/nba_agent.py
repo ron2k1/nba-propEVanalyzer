@@ -33,7 +33,7 @@ _OLLAMA_BASE = "http://localhost:11434"
 _OLLAMA_MODEL = "gpt-oss:20b"
 _OLLAMA_TIMEOUT = 120
 _STEP_TIMEOUT_DEFAULT = 120
-_STEP_TIMEOUT_LONG = 600
+_STEP_TIMEOUT_LONG = 960  # must exceed roster_sweep's 900s internal ceiling
 
 
 # ── Workflow definitions ──────────────────────────────────────────────────────
