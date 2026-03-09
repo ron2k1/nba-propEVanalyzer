@@ -10,6 +10,7 @@
 | `build_closing_lines.py` | Closing line derivation from odds snapshots |
 | `line_to_odds_bridge.py` | Bridge line store to odds history |
 | `index_local_data.py` | Build local backtest index from Kaggle/parquet data |
+| `extend_local_index.py` | Safely extend the local backtest index with newer completed NBA API games |
 | `walk_forward_cal.py` | Walk-forward calibration validation |
 | `lean_analysis.py` | Lean signal analysis pipeline |
 
