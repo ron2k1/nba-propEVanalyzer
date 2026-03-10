@@ -140,3 +140,71 @@ Specific failures:
 2. When ML holdout MAE < raw projection MAE by >20%, suspect leakage — verify no post-settlement features in the feature set
 3. Prefer more training rows over stat-specific filtering for outcome classifiers
 4. Isotonic calibration: use only when training set > 20K rows
+
+## 2026-03-09 — Model Audit Implementation (30+ fixes)
+
+**Changes implemented across 10 files, all verified with 330 tests passing:**
+
+1. **CLV gate neutral pass (gates.py):** Changed `<= 0` to `< 0` — neutral CLV (zero) no longer blocks signals. Mixed-sign still blocks correctly.
+
+2. **Minutes volatility reordering (nba_minutes_model.py):** Moved volatility dampening AFTER streak/trend signals 2-6. Previously it ran first when multiplier=1.0 (no-op). Now it actually compresses extreme multipliers. Added directional guard (`abs > 0.01`).
+
+3. **Minutes multiplier floor naming (nba_minutes_model.py):** Dual-floor system: `_MULTIPLIER_NORMAL_MIN=0.85` for model signals, `_MULTIPLIER_ABSOLUTE_MIN=0.50` for injury caps. Docstring updated.
+
+4. **Stdev shrinkage by sample size (nba_prep_projection.py):** Replaced fixed 0.75 factor with `max_shrink * min(1.0, n/25)`. At n=5: 0.15x shrinkage. At n=25: full 0.75x. Env overrides set the max factor.
+
+5. **Combo stat stdev (nba_prep_projection.py):** Same n-dependent shrinkage applied to PRA/combo stats. Added diagnostic `componentStdevSum` field for PRA calibration comparison.
+
+6. **Mass absence model (nba_prep_usage.py):** Three tiers (normal/moderate/extreme) based on absent starters (`max(seasonMin, recentMin) >= 28`). Lower USG threshold in extreme tier (12% vs 18%). Higher caps (2.00 vs 1.45). Minutes model gets roster_context for starter boost.
+
+7. **Usage adjustment scope (nba_prep_projection.py):** Usage/mass-absence is LIVE-ONLY. `get_team_roster_status()` uses `last_n_games=5` from *now*, not from `as_of_date`, so running it in backtests would be lookahead. The `if player_team_abbr:` guard keeps it live-only (backtest doesn't pass that arg). See Finding 1 in §2026-03-09 below.
+
+8. **Policy config module (core/policy_config.py):** Single source of truth for STAT_WHITELIST, BLOCKED_PROB_BINS, ELIGIBLE_STATS, MIN_EDGE, etc. Both gates.py and nba_data_collection.py import from it.
+
+9. **Role-change threshold (nba_prep_projection.py):** Made relative to season avg: `max(3.0, seasonMin * 0.15)` instead of fixed 5.0. Bench players (15min) trigger at 3min delta, starters (32min) at 4.8min.
+
+10. **ML feature importances (nba_model_ml_training.py):** `_extract_feature_importances()` extracts from tree-based or linear models. Added to both outcome classifier and projection training output dicts.
+
+11. **Defense rank weighting (nba_prep_projection.py):** Rank modulates multiplier distance from neutral. Top/bottom 5 ranks: 120% effect. Middle ranks: 80% effect. No double-counting.
+
+**Rules going forward:**
+1. Volatility dampening must run AFTER signals that move the multiplier, not before
+2. Policy constants should live in `core/policy_config.py` — both gates.py and nba_data_collection.py import from there
+3. Stdev shrinkage must be sample-dependent — fixed factors overfit to large-sample regime
+4. Mass absence tiers use `max(seasonMin, recentMin) >= 28` for starter classification, not raw USG%
+
+## 2026-03-09 — Post-audit code review findings (6 issues)
+
+**Findings from code review of model audit implementation:**
+
+1. **Usage adjustment is NOT date-aware (HIGH).** `get_team_roster_status()` uses `LeagueDashPlayerStats(last_n_games=5)` which returns last 5 games from *now*, not from `as_of_date`. Wiring `player_team_abbr` into the backtest caller would be lookahead. Fixed: corrected misleading "date-aware" comment, kept usage as live-only via the `if player_team_abbr:` guard (backtest doesn't pass it).
+
+2. **Mass-absence boost missed promoted role players (MEDIUM).** Original threshold `avg_s >= 28.0` only helped established starters. Fixed: extreme tier now also boosts players with `avg_s >= 20.0` (1.04x vs 1.06x for starters) — these are the bench/fringe players who absorb vacated minutes.
+
+3. **Defense rank mapping included unpopulated stats (MEDIUM).** `_STAT_TO_DEF_RANK` mapped stl/blk/tov but `get_team_defensive_ratings()` only populates OPP_*_RANK for pts/reb/ast/fg3m. Silently fell back to neutral rank=15. Fixed: removed stl/blk/tov from the mapping.
+
+4. **Missing tests for new behavior (MEDIUM).** Added 6 tests to `test_minutes_model.py` for roster_context/mass-absence boost: extreme starter, extreme promoted, extreme bench (no boost), moderate starter, normal (no boost), missing context (no boost).
+
+5. **Stale comments (LOW).** Fixed multiplier range in minutes model docstring (now "0.50–1.15"), fixed CLV rule description in test_betting_policy.py (now "< 0 OR < 0").
+
+**Rules going forward:**
+1. Never claim an API is "date-aware" without verifying the actual query parameters — `last_n_games=5` means "last 5 from today"
+2. When a feature is live-only due to data limitations, the guard must be explicit and commented — don't rely on coincidental parameter absence
+3. Any mapping dict must only reference fields that the data source actually populates — silent fallbacks to neutral hide bugs
+4. New behavioral paths need tests BEFORE marking implementation complete — if the review has to find it, it was shipped untested
+
+## 2026-03-09 — Second review pass (5 findings)
+
+1. **(MEDIUM) No backtest path for usage/mass-absence.** Accepted as design limitation — usage is live-only because `last_n_games=5` returns from now. Corrected lesson #7 above (was contradictory).
+
+2. **(MEDIUM) `_classify_absence_tier` missed deadline arrivals.** `seasonMin` alone misses mid-season trades/role changes. Fixed: now uses `max(seasonMin, recentMin) >= 28`. Both fields come from `get_team_roster_status()`. Added `test_recent_min_fallback_counts_as_starter` in `test_prep_usage.py`.
+
+3. **(MEDIUM) Mass-absence tests too loose.** Tests checked `multiplier > 1.0` but code claims 1.06x/1.04x/1.03x. Fixed: tests now compute baseline without roster_context and verify `result ≈ baseline * boost_factor` with `pytest.approx(abs=0.005)`.
+
+4. **(LOW) No tests for defense-rank modulation, role-change, feature-importance.** Fixed: added `tests/test_projection_signals.py` with 15 tests (6 defense-rank, 5 role-change, 4 ML feature-importance).
+
+5. **(LOW) lessons.md contradiction.** Line 160 said "usage now runs in backtests" while line 180 said opposite. Fixed line 160.
+
+**New rules:**
+5. Starter classification should use `max(seasonMin, recentMin)` — catches deadline arrivals and recent role changes
+6. Tests for specific multiplier factors must verify the exact factor relative to baseline, not just > 1.0 — prevents silent weakening in refactors
