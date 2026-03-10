@@ -26,9 +26,20 @@ export default function () {
 
     async init() {
       this.checkHealth();
+      // Auto-settle finished games before loading data
+      this.autoSettle();
       this.loadGames();
       this.loadGate();
       this.lastRefresh = new Date().toLocaleTimeString();
+    },
+
+    async autoSettle() {
+      try {
+        const r = await apiGet('/api/auto_settle');
+        if (r && r.settledNow > 0) {
+          toast(`Auto-settled ${r.settledNow} entries`, 'ok');
+        }
+      } catch { /* silent — non-critical */ }
     },
 
     async checkHealth() {
@@ -111,6 +122,7 @@ export default function () {
       if (this._refreshTimer) { clearInterval(this._refreshTimer); this._refreshTimer = null; }
       if (this.autoRefresh) {
         this._refreshTimer = setInterval(async () => {
+          await this.autoSettle();
           await this.loadGames();
           await this.loadGate();
           this.lastRefresh = new Date().toLocaleTimeString();
