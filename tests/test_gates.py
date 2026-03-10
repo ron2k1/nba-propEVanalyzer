@@ -431,15 +431,14 @@ class TestClvGate:
         ok, reason = _qualifies(prop, stat="pts")
         assert "clv_gate_failed" not in reason
 
-    def test_clv_line_zero_fails(self):
-        # clvLine <= 0 → fails
+    def test_clv_line_zero_passes(self):
+        # CLV=0 is neutral — should pass (not strictly negative)
         prop = _make_prop(
             probOver=0.05, probUnder=0.95, over_edge=0.10,
             clv_line=0.0, clv_odds=1.0,
         )
         ok, reason = _qualifies(prop, stat="pts")
-        assert ok is False
-        assert "clv_gate_failed" in reason
+        assert "clv_gate_failed" not in reason
 
     def test_clv_line_negative_fails(self):
         prop = _make_prop(
@@ -450,19 +449,48 @@ class TestClvGate:
         assert ok is False
         assert "clv_gate_failed" in reason
 
-    def test_clv_odds_zero_fails(self):
+    def test_clv_odds_zero_passes(self):
+        # CLV odds=0 is neutral — should pass
         prop = _make_prop(
             probOver=0.05, probUnder=0.95, over_edge=0.10,
             clv_line=1.0, clv_odds=0.0,
         )
         ok, reason = _qualifies(prop, stat="pts")
-        assert ok is False
-        assert "clv_gate_failed" in reason
+        assert "clv_gate_failed" not in reason
 
     def test_clv_odds_negative_fails(self):
         prop = _make_prop(
             probOver=0.05, probUnder=0.95, over_edge=0.10,
             clv_line=0.5, clv_odds=-1.0,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert ok is False
+        assert "clv_gate_failed" in reason
+
+    def test_both_clv_zero_passes(self):
+        # Both zero (completely neutral) should pass
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            clv_line=0.0, clv_odds=0.0,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "clv_gate_failed" not in reason
+
+    def test_clv_mixed_sign_positive_line_negative_odds_fails(self):
+        # Line moved favorably but odds moved against — still block
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            clv_line=0.5, clv_odds=-2.0,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert ok is False
+        assert "clv_gate_failed" in reason
+
+    def test_clv_mixed_sign_negative_line_positive_odds_fails(self):
+        # Line moved against but odds moved favorably — still block
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            clv_line=-0.5, clv_odds=2.0,
         )
         ok, reason = _qualifies(prop, stat="pts")
         assert ok is False

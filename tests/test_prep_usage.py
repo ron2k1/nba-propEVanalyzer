@@ -24,7 +24,9 @@ from core.nba_prep_usage import compute_usage_adjustment
 # Fake roster builders
 # ---------------------------------------------------------------------------
 
-def _make_player(player_id: int, name: str, usg_pct: float, status: str, season_gp: int = 30) -> dict:
+def _make_player(player_id: int, name: str, usg_pct: float, status: str,
+                  season_gp: int = 30, season_min: float = 20.0,
+                  recent_min: float = 0.0) -> dict:
     """Build a minimal player dict matching the shape compute_usage_adjustment() reads."""
     return {
         "playerId": player_id,
@@ -32,6 +34,8 @@ def _make_player(player_id: int, name: str, usg_pct: float, status: str, season_
         "usgPct": usg_pct,
         "status": status,
         "seasonGP": season_gp,
+        "seasonMin": season_min,
+        "recentMin": recent_min,
         "riskLevel": "High" if usg_pct >= 25 else "Medium",
     }
 
@@ -71,12 +75,13 @@ class TestHighUsageTeammateInactive:
         absent_usg = [t["usgPct"] for t in result["absentTeammates"]]
         assert 28.0 in absent_usg
 
-    def test_multiplier_capped_at_1_45(self, monkeypatch):
-        """effectiveMultiplier is capped at 1.45 (max in source)."""
+    def test_multiplier_capped_at_tier_limit(self, monkeypatch):
+        """effectiveMultiplier is capped at the tier's cap (normal=1.45, extreme=2.00)."""
+        # Two non-starters inactive (seasonMin < 28) → normal tier → cap 1.45
         players = [
             _make_player(1, "Target", usg_pct=20.0, status="Active"),
-            _make_player(2, "Mega Star A", usg_pct=40.0, status="Inactive"),
-            _make_player(3, "Mega Star B", usg_pct=40.0, status="Inactive"),
+            _make_player(2, "Mega Star A", usg_pct=40.0, status="Inactive", season_min=25.0),
+            _make_player(3, "Mega Star B", usg_pct=40.0, status="Inactive", season_min=25.0),
         ]
 
         monkeypatch.setattr(
@@ -217,3 +222,151 @@ class TestNoAbsentTeammates:
         # statMultipliers should be all 1.0 (fallback in source)
         for stat, mult in result["statMultipliers"].items():
             assert mult == pytest.approx(1.0), f"{stat}: {mult}"
+
+
+# ---------------------------------------------------------------------------
+# Test 4: Mass-absence tier classification
+# ---------------------------------------------------------------------------
+
+class TestMassAbsenceTier:
+
+    def test_normal_tier_0_absent_starters(self, monkeypatch):
+        """No absent starters → normal tier."""
+        players = [
+            _make_player(1, "Target", usg_pct=22.0, status="Active", season_min=32.0),
+            _make_player(2, "Teammate", usg_pct=24.0, status="Active", season_min=30.0),
+        ]
+        monkeypatch.setattr(
+            "core.nba_prep_usage.get_team_roster_status",
+            lambda team_abbr, season=None: _fake_roster_data(players),
+        )
+        result = compute_usage_adjustment(player_id=1, team_abbr="MIN")
+        assert result["success"] is True
+        assert result["massAbsenceTier"] == "normal"
+        assert result["absentStarterCount"] == 0
+
+    def test_normal_tier_1_absent_starter(self, monkeypatch):
+        """1 absent starter → still normal tier."""
+        players = [
+            _make_player(1, "Target", usg_pct=22.0, status="Active", season_min=32.0),
+            _make_player(2, "Star Out", usg_pct=28.0, status="Inactive", season_min=34.0),
+            _make_player(3, "Role Player", usg_pct=18.0, status="Active", season_min=22.0),
+        ]
+        monkeypatch.setattr(
+            "core.nba_prep_usage.get_team_roster_status",
+            lambda team_abbr, season=None: _fake_roster_data(players),
+        )
+        result = compute_usage_adjustment(player_id=1, team_abbr="MIN")
+        assert result["success"] is True
+        assert result["massAbsenceTier"] == "normal"
+        assert result["absentStarterCount"] == 1
+
+    def test_moderate_tier_2_absent_starters(self, monkeypatch):
+        """2 absent starters (seasonMin >= 28) → moderate tier."""
+        players = [
+            _make_player(1, "Target", usg_pct=22.0, status="Active", season_min=32.0),
+            _make_player(2, "Star A Out", usg_pct=25.0, status="Inactive", season_min=30.0),
+            _make_player(3, "Star B Out", usg_pct=23.0, status="Inactive", season_min=29.0),
+            _make_player(4, "Role Player", usg_pct=15.0, status="Active", season_min=20.0),
+        ]
+        monkeypatch.setattr(
+            "core.nba_prep_usage.get_team_roster_status",
+            lambda team_abbr, season=None: _fake_roster_data(players),
+        )
+        result = compute_usage_adjustment(player_id=1, team_abbr="MIN")
+        assert result["success"] is True
+        assert result["massAbsenceTier"] == "moderate"
+        assert result["absentStarterCount"] == 2
+
+    def test_extreme_tier_3_absent_starters(self, monkeypatch):
+        """3 absent starters → extreme tier with higher cap."""
+        players = [
+            _make_player(1, "Target", usg_pct=22.0, status="Active", season_min=32.0),
+            _make_player(2, "Star A", usg_pct=25.0, status="Inactive", season_min=33.0),
+            _make_player(3, "Star B", usg_pct=24.0, status="Inactive", season_min=30.0),
+            _make_player(4, "Star C", usg_pct=20.0, status="Inactive", season_min=29.0),
+            _make_player(5, "Bench A", usg_pct=13.0, status="Active", season_min=15.0),
+        ]
+        monkeypatch.setattr(
+            "core.nba_prep_usage.get_team_roster_status",
+            lambda team_abbr, season=None: _fake_roster_data(players),
+        )
+        result = compute_usage_adjustment(player_id=1, team_abbr="MIN")
+        assert result["success"] is True
+        assert result["massAbsenceTier"] == "extreme"
+        assert result["absentStarterCount"] == 3
+        # Extreme tier cap is 2.00
+        assert result["effectiveMultiplier"] <= 2.00
+
+    def test_extreme_tier_lower_usg_threshold(self, monkeypatch):
+        """Extreme tier uses lower usg threshold (12%) — picks up lower-usage absent players."""
+        players = [
+            _make_player(1, "Target", usg_pct=22.0, status="Active", season_min=32.0),
+            _make_player(2, "Star A", usg_pct=25.0, status="Inactive", season_min=33.0),
+            _make_player(3, "Star B", usg_pct=24.0, status="Inactive", season_min=30.0),
+            _make_player(4, "Star C", usg_pct=20.0, status="Inactive", season_min=29.0),
+            # 14% usg teammate — below normal threshold (18%) but above extreme (12%)
+            _make_player(5, "Mid Player", usg_pct=14.0, status="Inactive", season_min=24.0),
+            _make_player(6, "Bench", usg_pct=10.0, status="Active", season_min=15.0),
+        ]
+        monkeypatch.setattr(
+            "core.nba_prep_usage.get_team_roster_status",
+            lambda team_abbr, season=None: _fake_roster_data(players),
+        )
+        result = compute_usage_adjustment(player_id=1, team_abbr="MIN")
+        assert result["success"] is True
+        assert result["massAbsenceTier"] == "extreme"
+        # 14% usg player should be included in absent list (>= 12% extreme threshold)
+        absent_names = [t["name"] for t in result["absentTeammates"]]
+        assert "Mid Player" in absent_names
+
+    def test_non_starter_inactive_not_counted_for_tier(self, monkeypatch):
+        """Players with seasonMin < 28 are NOT counted as absent starters for tier."""
+        players = [
+            _make_player(1, "Target", usg_pct=22.0, status="Active", season_min=32.0),
+            # High usage but bench player (seasonMin 20) — doesn't count for tier
+            _make_player(2, "Bench Star A", usg_pct=28.0, status="Inactive", season_min=20.0),
+            _make_player(3, "Bench Star B", usg_pct=26.0, status="Inactive", season_min=22.0),
+            _make_player(4, "Bench Star C", usg_pct=25.0, status="Inactive", season_min=18.0),
+        ]
+        monkeypatch.setattr(
+            "core.nba_prep_usage.get_team_roster_status",
+            lambda team_abbr, season=None: _fake_roster_data(players),
+        )
+        result = compute_usage_adjustment(player_id=1, team_abbr="MIN")
+        assert result["success"] is True
+        # All are bench players (seasonMin < 28) — still normal tier
+        assert result["massAbsenceTier"] == "normal"
+        assert result["absentStarterCount"] == 0
+
+    def test_recent_min_fallback_counts_as_starter(self, monkeypatch):
+        """Deadline arrival: seasonMin < 28 but recentMin >= 28 counts as starter."""
+        players = [
+            _make_player(1, "Target", usg_pct=22.0, status="Active", season_min=32.0),
+            # Traded mid-season: low seasonMin (split between two teams) but recent starter
+            _make_player(2, "Trade A", usg_pct=24.0, status="Inactive",
+                         season_min=22.0, recent_min=33.0),
+            _make_player(3, "Trade B", usg_pct=23.0, status="Inactive",
+                         season_min=20.0, recent_min=30.0),
+        ]
+        monkeypatch.setattr(
+            "core.nba_prep_usage.get_team_roster_status",
+            lambda team_abbr, season=None: _fake_roster_data(players),
+        )
+        result = compute_usage_adjustment(player_id=1, team_abbr="MIN")
+        assert result["success"] is True
+        # recentMin >= 28 should classify them as starters → moderate tier
+        assert result["massAbsenceTier"] == "moderate"
+        assert result["absentStarterCount"] == 2
+
+    def test_as_of_date_parameter_accepted(self, monkeypatch):
+        """compute_usage_adjustment accepts as_of_date parameter."""
+        players = [
+            _make_player(1, "Target", usg_pct=22.0, status="Active", season_min=32.0),
+        ]
+        monkeypatch.setattr(
+            "core.nba_prep_usage.get_team_roster_status",
+            lambda team_abbr, season=None: _fake_roster_data(players),
+        )
+        result = compute_usage_adjustment(player_id=1, team_abbr="MIN", as_of_date="2026-02-15")
+        assert result["success"] is True

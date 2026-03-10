@@ -234,3 +234,92 @@ class TestComputeMinutesMultiplier:
         # Reasoning should contain an injury_return tag
         reasoning = result["minutesReasoning"]
         assert any("injury_return" in r for r in reasoning)
+
+
+# ---------------------------------------------------------------------------
+# Test 3: roster_context / mass-absence minutes boost
+# ---------------------------------------------------------------------------
+
+class TestMassAbsenceMinutesBoost:
+    """Verify roster_context drives mass-absence boost in minutes model."""
+
+    def _rolling(self, avg: float = 32.0) -> dict:
+        return {
+            "min_avg5": avg,
+            "min_avg10": avg,
+            "min_avg_season": avg,
+            "min_stdev": 2.0,
+        }
+
+    def _logs(self, n: int = 10, minutes: float = 32.0) -> list:
+        return [_game_log(f"2026-02-{i+1:02d}", minutes) for i in range(n)]
+
+    def test_extreme_tier_starter_gets_boost(self):
+        """Starter (avg_s >= 28) in extreme tier gets 1.06x boost."""
+        ctx = {"massAbsenceTier": "extreme"}
+        # Compute baseline without roster_context
+        baseline = compute_minutes_multiplier(
+            self._rolling(32.0), self._logs(10, 32.0),
+            roster_context=None,
+        )
+        result = compute_minutes_multiplier(
+            self._rolling(32.0), self._logs(10, 32.0),
+            roster_context=ctx,
+        )
+        assert any("mass_absence_extreme_starter" in r for r in result["minutesReasoning"])
+        # Boost should be exactly 1.06x of baseline (within floating-point tolerance)
+        assert result["multiplier"] == pytest.approx(baseline["multiplier"] * 1.06, abs=0.005)
+
+    def test_extreme_tier_promoted_player_gets_boost(self):
+        """Role player (avg_s 20-27) in extreme tier gets 1.04x boost."""
+        ctx = {"massAbsenceTier": "extreme"}
+        baseline = compute_minutes_multiplier(
+            self._rolling(24.0), self._logs(10, 24.0),
+            roster_context=None,
+        )
+        result = compute_minutes_multiplier(
+            self._rolling(24.0), self._logs(10, 24.0),
+            roster_context=ctx,
+        )
+        assert any("mass_absence_extreme_promoted" in r for r in result["minutesReasoning"])
+        assert result["multiplier"] == pytest.approx(baseline["multiplier"] * 1.04, abs=0.005)
+
+    def test_extreme_tier_bench_no_boost(self):
+        """Deep bench player (avg_s < 20) gets no mass-absence boost."""
+        ctx = {"massAbsenceTier": "extreme"}
+        result = compute_minutes_multiplier(
+            self._rolling(15.0), self._logs(10, 15.0),
+            roster_context=ctx,
+        )
+        assert not any("mass_absence" in r for r in result["minutesReasoning"])
+
+    def test_moderate_tier_starter_gets_boost(self):
+        """Starter in moderate tier gets 1.03x boost."""
+        ctx = {"massAbsenceTier": "moderate"}
+        baseline = compute_minutes_multiplier(
+            self._rolling(32.0), self._logs(10, 32.0),
+            roster_context=None,
+        )
+        result = compute_minutes_multiplier(
+            self._rolling(32.0), self._logs(10, 32.0),
+            roster_context=ctx,
+        )
+        assert any("mass_absence_moderate" in r for r in result["minutesReasoning"])
+        assert result["multiplier"] == pytest.approx(baseline["multiplier"] * 1.03, abs=0.005)
+
+    def test_normal_tier_no_boost(self):
+        """Normal tier never produces a mass-absence tag."""
+        ctx = {"massAbsenceTier": "normal"}
+        result = compute_minutes_multiplier(
+            self._rolling(32.0), self._logs(10, 32.0),
+            roster_context=ctx,
+        )
+        assert not any("mass_absence" in r for r in result["minutesReasoning"])
+
+    def test_no_roster_context_no_boost(self):
+        """Missing roster_context produces no mass-absence tag."""
+        result = compute_minutes_multiplier(
+            self._rolling(32.0), self._logs(10, 32.0),
+            roster_context=None,
+        )
+        assert not any("mass_absence" in r for r in result["minutesReasoning"])

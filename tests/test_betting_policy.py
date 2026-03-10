@@ -741,7 +741,7 @@ class TestQualifiesEdgeCases:
         assert "recent_high_variance" in reason
 
     def test_clv_gate_blocks_when_both_negative(self):
-        """CLV gate: clvLine <= 0 AND clvOddsPct <= 0 must block signal."""
+        """CLV gate: clvLine < 0 OR clvOddsPct < 0 must block signal."""
         prop = _make_prop_result(
             prob_over=0.05, edge_over=0.10,
             clv_line=-0.5, clv_odds_pct=-1.0
