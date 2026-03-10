@@ -208,3 +208,12 @@ Specific failures:
 **New rules:**
 5. Starter classification should use `max(seasonMin, recentMin)` — catches deadline arrivals and recent role changes
 6. Tests for specific multiplier factors must verify the exact factor relative to baseline, not just > 1.0 — prevents silent weakening in refactors
+
+## 2026-03-09 — Third review pass (merge readiness)
+
+1. **(HIGH) "Policy unchanged = safe to merge" is wrong.** Gates consume `probOver`, `edge`, `confidence`, and minutes-restriction tags from the projection pipeline (`nba_prop_engine.py:135,304`, `gates.py:68,93`). Stdev shrinkage changes `probOver`, mass-absence changes `confidence` via usage adjustment, defense weighting changes projection mean, minutes reorder changes restriction tags. All can flip a prop from pass → block or vice versa. Correct framing: "projection accuracy improvements → different props pass gates → need forward validation before live deployment."
+2. **(MEDIUM) Branch 4 commits behind master.** Always sync with base branch and retest before merging.
+3. **(MEDIUM) Scope understated (129 files, 22k insertions).** Large merges need honest scope description, not minimization.
+
+**New rule:**
+7. Never claim "policy unchanged = safe" for projection/calibration changes. The projection pipeline feeds gates — any change to mean, stdev, or multiplier can change which props pass or fail gating.
