@@ -74,9 +74,9 @@ def main():
     parser = argparse.ArgumentParser(description="NBA prop line snapshot collector")
     parser.add_argument("--interval",  type=int,   default=0,
                         help="Polling interval in minutes (0 = run once)")
-    parser.add_argument("--books",     type=str,   default="betmgm,draftkings,fanduel",
+    parser.add_argument("--books",     type=str,   default="betmgm,draftkings,fanduel,pinnacle",
                         help="Comma-separated bookmaker keys")
-    parser.add_argument("--stats",     type=str,   default="pts,reb,ast,fg3m,tov",
+    parser.add_argument("--stats",     type=str,   default="pts,reb,ast,pra,fg3m,stl,blk",
                         help="Comma-separated stat keys, or 'all'")
     parser.add_argument("--stale",     action="store_true",
                         help="Print stale-line report after each snapshot")

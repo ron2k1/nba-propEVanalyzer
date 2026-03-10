@@ -27,8 +27,8 @@ _CLI_ROOT = Path(__file__).resolve().parent.parent
 def _handle_collect_lines(argv):
     from core.nba_data_collection import get_todays_event_props_bulk
 
-    books = "betmgm,draftkings,fanduel"
-    stats = ["pts", "reb", "ast", "fg3m", "tov"]
+    books = "betmgm,draftkings,fanduel,pinnacle"
+    stats = ["pts", "reb", "ast", "pra", "fg3m", "stl", "blk"]
     show_stale = False
 
     idx = 2

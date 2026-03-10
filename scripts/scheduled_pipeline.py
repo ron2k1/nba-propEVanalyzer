@@ -84,8 +84,8 @@ def _build_pipeline_plan(args) -> list[dict]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run scheduled NBA prop pipeline tasks.")
-    parser.add_argument("--books", default="betmgm,draftkings,fanduel")
-    parser.add_argument("--stats", default="pts,ast,reb,pra")
+    parser.add_argument("--books", default="betmgm,draftkings,fanduel,pinnacle")
+    parser.add_argument("--stats", default="pts,ast,reb,pra,fg3m,stl,blk")
     parser.add_argument("--limit", type=int, default=20)
     parser.add_argument("--date", default=None, help="Optional YYYY-MM-DD for roster_sweep.")
     parser.add_argument("--collect-only", action="store_true")
