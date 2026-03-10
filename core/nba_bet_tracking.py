@@ -746,22 +746,42 @@ def settle_yesterday():
 def auto_settle_today():
     """Settle any finished games for today + yesterday (catches late-night UTC overlap).
 
-    Called on page refresh so the UI shows settled results for completed games.
-    Returns a lightweight summary — not the full settle payload.
+    Settles BOTH journal entries (prop_journal.jsonl) AND decision-journal leans
+    (lean_outcomes in SQLite). Called on page refresh so the UI shows settled
+    results for completed games.
     """
     today = _today_local_str()
     yesterday = _yesterday_local_str()
-    settled_total = 0
+    settled_journal = 0
+    settled_leans = 0
     errors = []
+
+    # 1. Settle journal entries (prop_journal.jsonl)
     for d in (today, yesterday):
         try:
             r = settle_entries_for_date(d)
-            settled_total += r.get("settledNow", 0)
+            settled_journal += r.get("settledNow", 0)
         except Exception as e:
-            errors.append(f"{d}: {e}")
+            errors.append(f"journal {d}: {e}")
+
+    # 2. Settle decision-journal leans (SQLite lean_outcomes)
+    try:
+        from .nba_decision_journal import DecisionJournal
+        dj = DecisionJournal()
+        for d in (today, yesterday):
+            try:
+                r = dj.settle_leans_for_date(d)
+                settled_leans += r.get("settled", 0)
+            except Exception as e:
+                errors.append(f"leans {d}: {e}")
+    except Exception as e:
+        errors.append(f"leans init: {e}")
+
     return {
         "success": True,
-        "settledNow": settled_total,
+        "settledNow": settled_journal + settled_leans,
+        "settledJournal": settled_journal,
+        "settledLeans": settled_leans,
         "dates": [today, yesterday],
         "errors": errors or None,
     }
@@ -1131,7 +1151,7 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
         )
 
     # Load model leans for the target date from lean_bets.jsonl
-    model_leans = _load_leans_for_date(target, limit=limit_val)
+    model_leans = _load_leans_for_date(target, limit=limit_val, include_outcomes=True)
     lean_score_result = score_rows_with_outcome_ml(model_leans, model_path=DEFAULT_OUTCOME_ML_MODEL_PATH)
     if lean_score_result.get("success"):
         model_leans = lean_score_result.get("rows") or model_leans
@@ -1212,6 +1232,7 @@ def _load_leans_for_date(target_date: str, limit: int = 50, include_outcomes: bo
         }
         if include_outcomes:
             entry["result"] = r["result"]
+            entry["settled"] = r["result"] is not None
             entry["pnl"] = r["pnl_units"]
             entry["actual"] = r["actual_stat"]
         leans.append(entry)
