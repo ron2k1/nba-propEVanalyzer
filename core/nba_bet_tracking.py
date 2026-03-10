@@ -743,6 +743,30 @@ def settle_yesterday():
     return settle_entries_for_date(_yesterday_local_str())
 
 
+def auto_settle_today():
+    """Settle any finished games for today + yesterday (catches late-night UTC overlap).
+
+    Called on page refresh so the UI shows settled results for completed games.
+    Returns a lightweight summary — not the full settle payload.
+    """
+    today = _today_local_str()
+    yesterday = _yesterday_local_str()
+    settled_total = 0
+    errors = []
+    for d in (today, yesterday):
+        try:
+            r = settle_entries_for_date(d)
+            settled_total += r.get("settledNow", 0)
+        except Exception as e:
+            errors.append(f"{d}: {e}")
+    return {
+        "success": True,
+        "settledNow": settled_total,
+        "dates": [today, yesterday],
+        "errors": errors or None,
+    }
+
+
 def _load_line_history(date_str):
     """Load line-history JSONL for date_str → {(player_name_lower, stat_lower): [snapshots]}."""
     import json as _json

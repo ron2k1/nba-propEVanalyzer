@@ -486,6 +486,13 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                 args.extend([bookmakers, regions, sport, model_variant])
                 return self._send_json(200, _run_nba_command(args, timeout_sec=LONG_TIMEOUT_SEC))
 
+            if path == "/api/auto_settle":
+                try:
+                    from core.nba_bet_tracking import auto_settle_today
+                    return self._send_json(200, auto_settle_today())
+                except Exception as e:
+                    return self._send_json(200, {"success": False, "error": str(e)})
+
             if path == "/api/settle_yesterday":
                 date_str = (query.get("date") or [""])[0].strip()
                 args = ["settle_yesterday"]
