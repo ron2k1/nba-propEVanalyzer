@@ -35,6 +35,8 @@ import json
 import os
 import sys
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone, date as _date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -289,6 +291,8 @@ def run_backfill(
     resume=False,
     dry_run=False,
     db_path=None,
+    workers=1,
+    sleep_sec=0.05,
 ):
     """
     Run the historical odds backfill for [date_from, date_to].
@@ -348,26 +352,57 @@ def run_backfill(
 
             # ---- Step 2: fetch props per event x stat ----
             day_snaps = 0
+
+            # Build work items for this date
+            work_items = []
             for event in events:
                 tss = _snapshot_timestamps(event["commence_time"], offset_minutes, interval_minutes, snap_offsets)
                 for ts_str in tss:
                     for stat in stats:
-                        if max_requests > 0 and request_count >= max_requests:
-                            break
-                        rows, quota = _fetch_prop_snapshot(
-                            event, stat, books, ts_str, sport, dry_run=dry_run
-                        )
-                        request_count += 1
-                        if quota.get("remaining") is not None:
-                            quota_remaining = quota["remaining"]
-                        if not dry_run and rows:
-                            saved = store.upsert_snapshots(rows)
-                            day_snaps += saved
-                        elif dry_run:
-                            day_snaps += len(rows)
-                        # Gentle throttle: avoid hammering the API
-                        if not dry_run:
-                            time.sleep(0.25)
+                        work_items.append((event, stat, ts_str))
+
+            if workers > 1 and not dry_run and len(work_items) > 1:
+                # Concurrent execution with bounded workers
+                _lock = threading.Lock()
+
+                def _fetch_one(item):
+                    ev, st, ts = item
+                    if sleep_sec > 0:
+                        time.sleep(sleep_sec)
+                    return _fetch_prop_snapshot(ev, st, books, ts, sport, dry_run=False)
+
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    # Submit up to budget
+                    budget = max_requests - request_count if max_requests > 0 else len(work_items)
+                    batch = work_items[:budget]
+                    futures = {pool.submit(_fetch_one, item): item for item in batch}
+                    for fut in as_completed(futures):
+                        rows, quota = fut.result()
+                        with _lock:
+                            request_count += 1
+                            if quota.get("remaining") is not None:
+                                quota_remaining = quota["remaining"]
+                            if rows:
+                                saved = store.upsert_snapshots(rows)
+                                day_snaps += saved
+            else:
+                # Sequential fallback (dry-run, single worker, or single item)
+                for event, stat, ts_str in work_items:
+                    if max_requests > 0 and request_count >= max_requests:
+                        break
+                    rows, quota = _fetch_prop_snapshot(
+                        event, stat, books, ts_str, sport, dry_run=dry_run
+                    )
+                    request_count += 1
+                    if quota.get("remaining") is not None:
+                        quota_remaining = quota["remaining"]
+                    if not dry_run and rows:
+                        saved = store.upsert_snapshots(rows)
+                        day_snaps += saved
+                    elif dry_run:
+                        day_snaps += len(rows)
+                    if not dry_run and sleep_sec > 0:
+                        time.sleep(sleep_sec)
 
             total_snaps += day_snaps
             quota_msg = f"  quota_remaining={quota_remaining}" if quota_remaining is not None else ""
@@ -426,6 +461,10 @@ def main():
                    help="Print what would be fetched without making API calls")
     p.add_argument("--db",               default=None,
                    help="Override SQLite DB path")
+    p.add_argument("--workers",         type=int, default=1,
+                   help="Concurrent API workers (default 1; try 4 for ~3x speedup)")
+    p.add_argument("--sleep-sec",       type=float, default=0.05,
+                   help="Throttle between requests in seconds (default 0.05)")
     args = p.parse_args()
 
     stats = [s.strip() for s in args.stats.split(",") if s.strip()]
@@ -446,6 +485,8 @@ def main():
         resume=args.resume,
         dry_run=args.dry_run,
         db_path=args.db,
+        workers=args.workers,
+        sleep_sec=args.sleep_sec,
     )
     print(json.dumps(result, indent=2))
     sys.exit(0 if result.get("success") else 1)
