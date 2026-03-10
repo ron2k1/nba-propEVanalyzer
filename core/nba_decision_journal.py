@@ -58,6 +58,23 @@ def _ct_day_utc_bounds(date_str):
     )
 
 
+def _utc_to_ct_date(ts_utc_str):
+    """Convert a UTC ISO timestamp to a Central Time date string (YYYY-MM-DD).
+
+    NBA games belong to CT calendar days; a scan at 12:05 AM UTC on Mar 10
+    is still Mar 9 in Central Time (6:05 PM CT).
+    """
+    try:
+        dt = datetime.fromisoformat(str(ts_utc_str).replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        from zoneinfo import ZoneInfo
+        ct = dt.astimezone(ZoneInfo("America/Chicago"))
+        return ct.strftime("%Y-%m-%d")
+    except Exception:
+        return str(ts_utc_str)[:10]
+
+
 from .nba_data_collection import safe_round
 from .nba_bet_tracking import (
     _now_utc_iso,
@@ -119,9 +136,6 @@ CREATE TABLE IF NOT EXISTS signals (
     context_json     TEXT
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_signals_dedup
-    ON signals (player_id, stat, book, line, substr(ts_utc, 1, 10));
-
 CREATE TABLE IF NOT EXISTS outcomes (
     outcome_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     signal_id        TEXT NOT NULL REFERENCES signals(signal_id),
@@ -165,9 +179,6 @@ CREATE TABLE IF NOT EXISTS leans (
     context_json     TEXT
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_leans_dedup
-    ON leans (player_id, stat, book, line, substr(ts_utc, 1, 10));
-
 CREATE TABLE IF NOT EXISTS lean_outcomes (
     outcome_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     lean_id          TEXT NOT NULL REFERENCES leans(lean_id),
@@ -206,6 +217,9 @@ class DecisionJournal:
     def _init_db(self):
         self._conn.executescript(_SCHEMA)
         self._conn.commit()
+        # ------- v2 dedup migration: drop old book-inclusive indexes,
+        # purge cross-book duplicates, then create book-free indexes.
+        self._migrate_dedup_v2()
         # Migrate lean_outcomes: add CLV columns if missing
         for col, typ in [
             ("close_line", "REAL"),
@@ -218,6 +232,84 @@ class DecisionJournal:
                 self._conn.commit()
             except Exception:
                 pass  # column already exists
+
+    def _migrate_dedup_v2(self):
+        """Dedup migration v4: key is ``(player_id, stat, game_date_ct)``.
+
+        Uses Central Time date so a late-night scan crossing UTC midnight
+        doesn't create a separate entry for the same game day.
+        One entry per player-stat per CT calendar day.
+        """
+        # Check if v4 index already exists (idempotent guard)
+        v4_exists = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_signals_dedup_v4'"
+        ).fetchone()
+        if v4_exists:
+            return  # already migrated
+
+        _log.info("dedup-v4 migration: key = (player_id, stat, game_date_ct)")
+
+        # --- Add game_date_ct column if missing ---
+        for tbl in ("signals", "leans"):
+            try:
+                self._conn.execute(f"ALTER TABLE {tbl} ADD COLUMN game_date_ct TEXT")
+            except Exception:
+                pass  # already exists
+
+        # Backfill game_date_ct from ts_utc for existing rows
+        for tbl in ("signals", "leans"):
+            cur = self._conn.execute(
+                f"SELECT rowid, ts_utc FROM {tbl} WHERE game_date_ct IS NULL"
+            )
+            updates = [((_utc_to_ct_date(row[1]),), row[0]) for row in cur.fetchall()]
+            for (ct_date,), rid in updates:
+                self._conn.execute(
+                    f"UPDATE {tbl} SET game_date_ct = ? WHERE rowid = ?",
+                    (ct_date, rid),
+                )
+
+        # --- signals table: dedup on CT date ---
+        self._conn.execute("""
+            DELETE FROM signals WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM signals
+                GROUP BY player_id, stat, game_date_ct
+            )
+        """)
+        self._conn.execute("""
+            DELETE FROM outcomes WHERE signal_id NOT IN (
+                SELECT signal_id FROM signals
+            )
+        """)
+        self._conn.execute("DROP INDEX IF EXISTS idx_signals_dedup")
+        self._conn.execute("DROP INDEX IF EXISTS idx_signals_dedup_v2")
+        self._conn.execute("DROP INDEX IF EXISTS idx_signals_dedup_v3")
+        self._conn.execute("""
+            CREATE UNIQUE INDEX idx_signals_dedup_v4
+                ON signals (player_id, stat, game_date_ct)
+        """)
+
+        # --- leans table: dedup on CT date ---
+        self._conn.execute("""
+            DELETE FROM leans WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM leans
+                GROUP BY player_id, stat, game_date_ct
+            )
+        """)
+        self._conn.execute("""
+            DELETE FROM lean_outcomes WHERE lean_id NOT IN (
+                SELECT lean_id FROM leans
+            )
+        """)
+        self._conn.execute("DROP INDEX IF EXISTS idx_leans_dedup")
+        self._conn.execute("DROP INDEX IF EXISTS idx_leans_dedup_v2")
+        self._conn.execute("DROP INDEX IF EXISTS idx_leans_dedup_v3")
+        self._conn.execute("""
+            CREATE UNIQUE INDEX idx_leans_dedup_v4
+                ON leans (player_id, stat, game_date_ct)
+        """)
+
+        self._conn.commit()
+        _log.info("dedup-v4 migration complete")
 
     def __enter__(self):
         return self
@@ -249,6 +341,7 @@ class DecisionJournal:
         import json as _json
         signal_id = str(uuid.uuid4())
         ts_utc = _now_utc_iso()
+        game_date_ct = _utc_to_ct_date(ts_utc)
         context_json = _json.dumps(context, separators=(",", ":")) if context else None
         try:
             cur = self._conn.execute(
@@ -258,8 +351,9 @@ class DecisionJournal:
                     stat, line, book, over_odds, under_odds,
                     projection, prob_over, prob_under,
                     edge_over, edge_under, recommended_side, recommended_edge, confidence,
-                    used_real_line, action_taken, skip_reason, context_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    used_real_line, action_taken, skip_reason, context_json,
+                    game_date_ct
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     signal_id, ts_utc, signal_version,
                     int(player_id) if player_id is not None else None,
@@ -283,6 +377,7 @@ class DecisionJournal:
                     int(action_taken) if action_taken is not None else 0,
                     str(skip_reason) if skip_reason else None,
                     context_json,
+                    game_date_ct,
                 ),
             )
             self._conn.commit()
@@ -308,6 +403,7 @@ class DecisionJournal:
         import json as _json
         lean_id = str(uuid.uuid4())
         ts_utc = _now_utc_iso()
+        game_date_ct = _utc_to_ct_date(ts_utc)
         context_json = _json.dumps(context, separators=(",", ":")) if context else None
         try:
             cur = self._conn.execute(
@@ -317,8 +413,9 @@ class DecisionJournal:
                     stat, line, book, over_odds, under_odds,
                     projection, prob_over, prob_under,
                     edge_over, edge_under, recommended_side, recommended_edge, confidence,
-                    skip_reason, context_json
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    skip_reason, context_json,
+                    game_date_ct
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     lean_id, ts_utc,
                     int(player_id) if player_id is not None else None,
@@ -340,6 +437,7 @@ class DecisionJournal:
                     float(confidence) if confidence is not None else None,
                     str(skip_reason) if skip_reason else None,
                     context_json,
+                    game_date_ct,
                 ),
             )
             self._conn.commit()
