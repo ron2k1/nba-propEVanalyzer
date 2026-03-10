@@ -468,6 +468,13 @@ def _fetch_player_logs(player_id, season):
 
 
 def _find_game_row(logs, target_date, opponent_abbr=None, is_home=None):
+    """Find player game-log row for a specific date.
+
+    When opponent_abbr or is_home are provided they are **hard** filters —
+    if no row matches the supplied opponent/home, return None instead of
+    falling back to the first same-date row.  This prevents grading a bet
+    against the wrong game (e.g. after a trade or on a doubleheader date).
+    """
     candidates = []
     for row in logs:
         game_date = _parse_game_date(row.get("GAME_DATE"))
@@ -479,27 +486,37 @@ def _find_game_row(logs, target_date, opponent_abbr=None, is_home=None):
         candidates.append((row, opp, home_flag))
 
     if opponent_abbr:
-        filtered = [x for x in candidates if str(x[1]).upper() == str(opponent_abbr).upper()]
-        if filtered:
-            candidates = filtered
+        candidates = [x for x in candidates if str(x[1]).upper() == str(opponent_abbr).upper()]
 
     if is_home is not None:
-        filtered = [x for x in candidates if bool(x[2]) == bool(is_home)]
-        if filtered:
-            candidates = filtered
+        candidates = [x for x in candidates if bool(x[2]) == bool(is_home)]
 
     return candidates[0][0] if candidates else None
 
 
 def _extract_stat_from_row(row, stat):
-    pts = _as_float(row.get("PTS"), 0.0)
-    reb = _as_float(row.get("REB"), 0.0)
-    ast = _as_float(row.get("AST"), 0.0)
-    stl = _as_float(row.get("STL"), 0.0)
-    blk = _as_float(row.get("BLK"), 0.0)
-    tov = _as_float(row.get("TOV"), 0.0)
-    fg3m = _as_float(row.get("FG3M"), 0.0)
+    """Extract a stat value from a game-log row.
 
+    Returns None (not 0.0) when a component field is missing, non-numeric, or
+    outside sane bounds — prevents grading on corrupted NBA API data.
+    """
+    _MAX_STAT = {"PTS": 100, "REB": 40, "AST": 35, "STL": 15, "BLK": 15, "TOV": 20, "FG3M": 20}
+
+    def _safe(key):
+        v = _as_float(row.get(key))
+        if v is None or v < 0 or v > _MAX_STAT.get(key, 100):
+            return None
+        return v
+
+    pts = _safe("PTS")
+    reb = _safe("REB")
+    ast = _safe("AST")
+    stl = _safe("STL")
+    blk = _safe("BLK")
+    tov = _safe("TOV")
+    fg3m = _safe("FG3M")
+
+    stat_key = str(stat or "").lower()
     mapping = {
         "pts": pts,
         "reb": reb,
@@ -508,12 +525,18 @@ def _extract_stat_from_row(row, stat):
         "blk": blk,
         "tov": tov,
         "fg3m": fg3m,
-        "pra": pts + reb + ast,
-        "pr": pts + reb,
-        "pa": pts + ast,
-        "ra": reb + ast,
     }
-    return mapping.get(str(stat or "").lower())
+    # Combo stats: require all components to be valid
+    if stat_key == "pra":
+        return (pts + reb + ast) if pts is not None and reb is not None and ast is not None else None
+    if stat_key == "pr":
+        return (pts + reb) if pts is not None and reb is not None else None
+    if stat_key == "pa":
+        return (pts + ast) if pts is not None and ast is not None else None
+    if stat_key == "ra":
+        return (reb + ast) if reb is not None and ast is not None else None
+
+    return mapping.get(stat_key)
 
 
 def _grade_side(actual, line, side):
@@ -678,6 +701,14 @@ def settle_entries_for_date(date_str):
                 entry["phantomActualTeam"] = _act
                 touched += 1
                 continue
+            entry["settlementStatus"] = "pending_data"
+            entry["lastSettlementAttemptUtc"] = _now_utc_iso()
+            unresolved += 1
+            continue
+
+        # Safety: PlayerGameLog normally only returns completed-game rows,
+        # but verify MIN field is present as belt-and-suspenders for final status.
+        if "MIN" not in row and "min" not in row:
             entry["settlementStatus"] = "pending_data"
             entry["lastSettlementAttemptUtc"] = _now_utc_iso()
             unresolved += 1

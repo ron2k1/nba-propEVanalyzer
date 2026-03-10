@@ -401,7 +401,10 @@ class DecisionJournal:
                 except Exception:
                     logs_cache[cache_key] = []
 
-            row = _find_game_row(logs_cache[cache_key], date_obj)
+            row = _find_game_row(
+                logs_cache[cache_key], date_obj,
+                opponent_abbr=lean.get("opponent_abbr"),
+            )
             if not row:
                 unresolved += 1
                 continue
@@ -745,7 +748,10 @@ class DecisionJournal:
                 except Exception:
                     logs_cache[cache_key] = []
 
-            row = _find_game_row(logs_cache[cache_key], date_obj)
+            row = _find_game_row(
+                logs_cache[cache_key], date_obj,
+                opponent_abbr=sig.get("opponent_abbr"),
+            )
             if not row:
                 unresolved += 1
                 continue

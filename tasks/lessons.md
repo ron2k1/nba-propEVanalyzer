@@ -217,3 +217,17 @@ Specific failures:
 
 **New rule:**
 7. Never claim "policy unchanged = safe" for projection/calibration changes. The projection pipeline feeds gates — any change to mean, stdev, or multiplier can change which props pass or fail gating.
+
+## 2026-03-09 — Fourth review pass (settlement pipeline hardening)
+
+1. **(HIGH) `_find_game_row` soft-filter fallback.** When `opponent_abbr` or `is_home` were provided but didn't match, the function fell back to the first same-date row instead of returning None. Could grade a bet against the wrong game (e.g. post-trade or doubleheader). Fixed: opponent and is_home are now hard filters — no match → None. Same fix applied to decision journal settlement paths (lines 404, 748) which previously didn't pass `opponent_abbr` at all.
+2. **(MEDIUM) `_extract_stat_from_row` trusted raw values.** `_as_float(row.get("PTS"), 0.0)` coerced missing/malformed values to 0.0 instead of failing. Fixed: now returns None for missing fields, negative values, or values exceeding per-stat ceilings (PTS>100, STL>15, etc.). Combo stats (PRA, PR, etc.) require all components valid.
+3. **(MEDIUM) No final-status safety gate.** Settlement didn't verify the game-log row came from a completed game. PlayerGameLog normally only returns completed games, so the risk is low but the guard was absent. Fixed: added MIN-field presence check before grading.
+4. **(LOW-corrected) Fuzzy name matcher false positive.** Last-name fallback in `nba_odds_store.py:177` only resolves when there is exactly one match; ambiguous cases return None. Already tested. Not a red-tier issue.
+5. **(LOW-corrected) Cache corruption impact overstated.** `cache_get` returns None on error → triggers refetch, not stale data. `cache_set` can fail silently but doesn't serve bad data.
+6. **(LOW-corrected) Quota enforcement overstated.** On non-200 responses, `_odds_api_get` returns `success: False`. System doesn't silently serve stale odds — it fails the operation.
+
+**New rules:**
+8. Settlement row matching must be strict — opponent_abbr and is_home are hard filters, never soft fallbacks.
+9. Never coerce missing stat values to 0.0 — a missing field means the data isn't ready, not that the stat is zero.
+10. Audit findings must distinguish confirmed failure modes from missing safety checks.
