@@ -417,6 +417,40 @@ def infer_projection_feature_keys(rows, target_key="actual", min_non_null=10):
     return ordered + tail
 
 
+def _extract_feature_importances(est, feature_keys):
+    """Extract feature importances from a fitted estimator.
+
+    Returns a sorted list of {feature, importance} dicts (descending),
+    or None if the estimator doesn't expose importances.
+    """
+    imp = None
+    # Tree-based models: feature_importances_
+    if hasattr(est, "feature_importances_"):
+        imp = est.feature_importances_
+    # Linear models: coef_ (normalize to sum-to-1)
+    elif hasattr(est, "coef_"):
+        raw = est.coef_.flatten() if hasattr(est.coef_, "flatten") else est.coef_
+        total = sum(abs(v) for v in raw)
+        imp = [abs(v) / total if total > 0 else 0.0 for v in raw]
+    # CalibratedClassifierCV: try to reach the base estimator
+    elif hasattr(est, "estimator") and hasattr(est.estimator, "feature_importances_"):
+        imp = est.estimator.feature_importances_
+    elif hasattr(est, "calibrated_classifiers_"):
+        for cc in est.calibrated_classifiers_:
+            base = getattr(cc, "estimator", None) or getattr(cc, "base_estimator", None)
+            if base and hasattr(base, "feature_importances_"):
+                imp = base.feature_importances_
+                break
+    if imp is None:
+        return None
+    pairs = sorted(
+        [{"feature": f, "importance": round(float(v), 4)} for f, v in zip(feature_keys, imp)],
+        key=lambda x: x["importance"],
+        reverse=True,
+    )
+    return pairs
+
+
 def _fit_projection_estimator(X_train, y_train, model_type="gradient_boosting", random_state=42):
     mt = str(model_type or "gradient_boosting").lower().strip()
 
@@ -794,6 +828,9 @@ def train_outcome_ml_from_file(
         "calibrated": payload.get("calibrated", False),
         "metrics": payload["metrics"],
     }
+    _fi = _extract_feature_importances(est, feature_keys)
+    if _fi is not None:
+        result["featureImportances"] = _fi
     if calibrate:
         result["uncalibratedHoldout"] = uncal_metrics
     return result
@@ -870,7 +907,7 @@ def train_projection_ml_from_file(
     with open(out_path, "wb") as f:
         pickle.dump(payload, f)
 
-    return {
+    _result = {
         "success": True,
         "outputModelPath": str(out_path),
         "modelType": payload["modelType"],
@@ -878,6 +915,10 @@ def train_projection_ml_from_file(
         "targetKey": payload["targetKey"],
         "metrics": payload["metrics"],
     }
+    _fi = _extract_feature_importances(est, feature_keys)
+    if _fi is not None:
+        _result["featureImportances"] = _fi
+    return _result
 
 
 def train_projection_ml_per_stat_from_file(

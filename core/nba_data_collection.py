@@ -85,10 +85,12 @@ PROJECTION_CONFIG = {
     "min_edge_threshold": 0.08,      # raised 2026-03-01: 0.05→0.08 (30-40%/60-80% bins losing on 87d real-line data)
 }
 
+from .policy_config import STAT_WHITELIST as _STAT_WL, BLOCKED_PROB_BINS as _BLOCKED_BINS, MIN_EV_PCT as _MIN_EV
+
 BETTING_POLICY = {
-    "stat_whitelist": {"pts", "ast"},  # reb removed 2026-02-28: -5.34% ROI; pra removed 2026-03-01: -3.81% ROI on 318 real-line bets
-    "blocked_prob_bins": {1, 2, 3, 4, 5, 6, 7, 8},  # bins 1+8 added 2026-03-03: bin 1 +4.3% ROI/28.9 cal error; bin 8 n=11 insufficient. Active: 0 (0-10%) + 9 (90-100%)
-    "min_ev_pct": 0.0,                 # evPercent floor
+    "stat_whitelist": set(_STAT_WL),
+    "blocked_prob_bins": set(_BLOCKED_BINS),
+    "min_ev_pct": _MIN_EV,
 }
 CURRENT_SEASON = get_season_string()
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".nba_cache")

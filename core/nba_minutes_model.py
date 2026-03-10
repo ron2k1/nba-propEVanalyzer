@@ -12,7 +12,8 @@ to apply additional signals that _project_minutes() doesn't capture:
   - Sample-size confidence
 
 The minutesMultiplier is applied multiplicatively to _project_minutes() output.
-Hard bounds: 0.85–1.15 to avoid large swings from the base projection.
+Dual-floor system: normal range 0.85–1.15 for model signals; absolute floor
+0.50 allows injury caps below the normal range.
 
 External callers (e.g., injury_monitor, CLI) can call compute_minutes_multiplier()
 directly to get a multiplier for a specific situation.
@@ -27,8 +28,9 @@ from datetime import datetime
 # Tunable constants
 # ---------------------------------------------------------------------------
 
-_MULTIPLIER_MIN    = 0.85    # floor on model-computed multiplier
-_MULTIPLIER_MAX    = 1.15    # ceiling on model-computed multiplier
+_MULTIPLIER_NORMAL_MIN  = 0.85    # floor for model signals (streak, trend)
+_MULTIPLIER_ABSOLUTE_MIN = 0.50   # absolute floor — allows injury caps below normal range
+_MULTIPLIER_MAX         = 1.15    # ceiling on model-computed multiplier
 _VOLATILITY_HIGH   = 0.28    # CV > this → high_volatility (dampen trend)
 _VOLATILITY_LOW    = 0.10    # CV < this → low_volatility (boost confidence)
 _STREAK_N          = 3       # games to check for monotonic streak
@@ -206,6 +208,7 @@ def compute_minutes_multiplier(
     is_b2b: bool = False,
     splits: dict = None,
     excluded_games: list = None,
+    roster_context: dict = None,
 ) -> dict:
     """
     Compute a multiplier and confidence score for minutes projection.
@@ -219,11 +222,12 @@ def compute_minutes_multiplier(
     logs    : list   game-log list, most-recent-first
     is_b2b  : bool   True if this is a back-to-back game
     splits  : dict   player splits dict (currently used only for B2B reasoning tag)
+    roster_context : dict   optional usage adjustment output with massAbsenceTier
 
     Returns
     -------
     {
-      "multiplier":        float,       # 0.85–1.15, apply ON TOP of _project_minutes
+      "multiplier":        float,       # 0.50–1.15 (normal floor 0.85; injury cap floor 0.50)
       "minutesConfidence": float,       # 0.10–0.95
       "minutesReasoning":  list[str],   # machine-readable tags
       "last5Avg":          float,
@@ -245,12 +249,11 @@ def compute_minutes_multiplier(
     cv = stdev / avg_s if avg_s > 0 else 1.0
 
     # ------------------------------------------------------------------
-    # Signal 1 — Volatility dampening
-    # Does NOT duplicate _project_minutes() trend; this is pure risk mgmt.
+    # Signal 1 — Volatility confidence adjustment
+    # Confidence-only effect here; multiplier dampening happens after
+    # signals 2-6 move the multiplier away from 1.0.
     # ------------------------------------------------------------------
     if cv > _VOLATILITY_HIGH:
-        # High variance: pull multiplier 40% closer to neutral
-        multiplier  = 1.0 + (multiplier - 1.0) * 0.60
         confidence -= 0.12
         reasoning.append("high_volatility")
     elif cv < _VOLATILITY_LOW:
@@ -271,7 +274,7 @@ def compute_minutes_multiplier(
             multiplier = min(_MULTIPLIER_MAX, multiplier * _STREAK_BOOST)
             reasoning.append("streak_up_3g")
         elif all_below:
-            multiplier = max(_MULTIPLIER_MIN, multiplier * _STREAK_REDUCE)
+            multiplier = max(_MULTIPLIER_NORMAL_MIN, multiplier * _STREAK_REDUCE)
             reasoning.append("streak_down_3g")
         else:
             reasoning.append("no_streak")
@@ -311,6 +314,27 @@ def compute_minutes_multiplier(
         reasoning.append("deep_bench")
 
     # ------------------------------------------------------------------
+    # Signal 5b — Mass-absence minutes boost
+    # When multiple starters are out, remaining players get expanded
+    # minutes. Starters (avg_s >= 28) get a larger boost; promoted role
+    # players (avg_s >= 20) get a smaller one since they absorb the
+    # vacated minutes in extreme scenarios.
+    # ------------------------------------------------------------------
+    _mass_tier = (roster_context or {}).get("massAbsenceTier")
+    if _mass_tier == "extreme":
+        if avg_s >= 28.0:
+            multiplier = min(_MULTIPLIER_MAX, multiplier * 1.06)
+            confidence += 0.04
+            reasoning.append(f"mass_absence_{_mass_tier}_starter")
+        elif avg_s >= 20.0:
+            multiplier = min(_MULTIPLIER_MAX, multiplier * 1.04)
+            confidence += 0.02
+            reasoning.append(f"mass_absence_{_mass_tier}_promoted")
+    elif _mass_tier == "moderate" and avg_s >= 28.0:
+        multiplier = min(_MULTIPLIER_MAX, multiplier * 1.03)
+        reasoning.append(f"mass_absence_{_mass_tier}")
+
+    # ------------------------------------------------------------------
     # Signal 6 — Sample size confidence
     # ------------------------------------------------------------------
     n = len(logs or [])
@@ -320,6 +344,16 @@ def compute_minutes_multiplier(
     elif n >= 15:
         confidence += 0.05
         reasoning.append("large_sample")
+
+    # ------------------------------------------------------------------
+    # Volatility dampening (applied after signals 2-6 move multiplier)
+    # High-CV players: compress multiplier 40% toward 1.0 to limit
+    # extreme swings from streak/trend signals. Only fires when
+    # multiplier has actually moved away from neutral.
+    # ------------------------------------------------------------------
+    if cv > _VOLATILITY_HIGH and abs(multiplier - 1.0) > 0.01:
+        multiplier = 1.0 + (multiplier - 1.0) * 0.60
+        reasoning.append("volatility_dampened")
 
     # ------------------------------------------------------------------
     # Signal 7 — Injury-return cap (hard ceiling; overrides streak/volatility)
@@ -334,7 +368,7 @@ def compute_minutes_multiplier(
     # ------------------------------------------------------------------
     # Bounds
     # ------------------------------------------------------------------
-    multiplier = max(0.50, min(_MULTIPLIER_MAX, multiplier))
+    multiplier = max(_MULTIPLIER_ABSOLUTE_MIN, min(_MULTIPLIER_MAX, multiplier))
     confidence = max(0.10, min(0.95, confidence))
 
     return {

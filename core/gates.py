@@ -6,27 +6,25 @@ Extracted from nba_decision_journal.py so backtest and live pipelines
 can share a single source of truth for signal qualification.
 """
 
+from . import policy_config as _pc
+
 # ---------------------------------------------------------------------------
 # Signal specification (frozen constant)
 # ---------------------------------------------------------------------------
 
 SIGNAL_SPEC = {
     "v1": {
-        "eligible_stats":      {"pts", "reb", "ast"},  # pra removed 2026-03-01: -3.81% ROI on 318 real-line bets
-        "min_edge":            0.08,   # raised 2026-03-01: 0.05→0.08 (87d real-line data)
-        "min_edge_by_stat":    {"reb": 0.08, "ast": 0.09},  # ast: -1.11% ROI on 2,255 bets → higher bar
-        "min_confidence":      0.60,   # raised 2026-03-01: 0.55→0.60 (marginal 55-60% bin losing)
-        "blocked_prob_bins":   {1, 2, 3, 4, 5, 6, 7, 8},  # bins 1+8 added 2026-03-03: bin 1 +4.3% ROI/28.9 cal error; bin 8 n=11 insufficient. Active: 0 (0-10%) + 9 (90-100%)
-        "real_line_required_stats": {"reb"},    # skip reb if no real Odds API line
+        "eligible_stats":      set(_pc.ELIGIBLE_STATS),
+        "min_edge":            _pc.MIN_EDGE,
+        "min_edge_by_stat":    dict(_pc.MIN_EDGE_BY_STAT),
+        "min_confidence":      _pc.MIN_CONFIDENCE,
+        "blocked_prob_bins":   set(_pc.BLOCKED_PROB_BINS),
+        "real_line_required_stats": set(_pc.REAL_LINE_REQUIRED_STATS),
         "paper_mode":          True,
         # Pinnacle confirmation gate (Phase 1a)
-        # require_pinnacle=True: if referenceBook present, enforce threshold.
-        # If referenceBook absent (backtest, no Pinnacle call), gate is skipped.
         "require_pinnacle":    True,
-        "pinnacle_thresholds": {0: 0.75, 9: 0.75},  # conservative on bin 9 (N=4, no calibration data); revisit at 30+ bets
-        # Per-stat Pinnacle threshold (overrides global when set; gap #7)
-        # ast is a sharper market — raise bar; pts is broader distribution — lower bar
-        "pinnacle_min_no_vig_by_stat": {"pts": 0.62, "ast": 0.67, "reb": 0.62},
+        "pinnacle_thresholds": dict(_pc.PINNACLE_THRESHOLDS),
+        "pinnacle_min_no_vig_by_stat": dict(_pc.PINNACLE_MIN_NO_VIG_BY_STAT),
         # High-variance role-instability block (Phase 2b)
         "block_high_variance": True,
         # Intraday CLV: informational only — stored in context_json (Phase 1c)
@@ -83,11 +81,11 @@ def _qualifies(prop_result: dict, stat: str, used_real_line=None) -> tuple:
         bin_idx = max(0, min(9, int(prob_over * 10)))
         if bin_idx in blocked:
             return False, f"blocked_prob_bin:{bin_idx}"
-    # CLV gate: both must be > 0 when present; absent = skip (pre-settlement compat)
+    # CLV gate: block strictly negative; CLV=0 (neutral) passes through
     x = prop_result.get("clvLine"); clv_line = float(x) if x is not None else None
     x = prop_result.get("clvOddsPct"); clv_odds = float(x) if x is not None else None
     if clv_line is not None and clv_odds is not None:
-        if clv_line <= 0 or clv_odds <= 0:
+        if clv_line < 0 or clv_odds < 0:
             return False, f"clv_gate_failed:line={clv_line} odds={clv_odds}"
     # Injury-return gate: block first-game-back with severe minutes restriction (≤72%)
     # Handles both explicit-DNP tag "injury_return_g1:72pct"

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Usage-adjustment prep logic."""
+"""Usage-adjustment prep logic with mass-absence tiering."""
 
 import traceback
 
@@ -18,10 +18,40 @@ _USG_STAT_ELASTICITY = {
     "pa": 0.65,
     "ra": 0.30,
 }
-_USG_REDISTRIBUTION_DAMPENING = 0.60
+
+# Mass-absence tier configuration
+# tier: (min_absent_starters, usg_threshold, cap, dampening)
+_ABSENCE_TIERS = {
+    "normal":   {"min_absent": 0, "usg_threshold": 18.0, "cap": 1.45, "dampening": 0.60},
+    "moderate": {"min_absent": 2, "usg_threshold": 15.0, "cap": 1.65, "dampening": 0.50},
+    "extreme":  {"min_absent": 3, "usg_threshold": 12.0, "cap": 2.00, "dampening": 0.40},
+}
+_STARTER_MIN_THRESHOLD = 28.0  # seasonMin >= this → classify as starter
 
 
-def compute_usage_adjustment(player_id, team_abbr, season=None):
+def _classify_absence_tier(players, player_id):
+    """Count absent starters to determine mass-absence tier.
+
+    Uses max(seasonMin, recentMin) >= 28 to identify starters — catches
+    deadline arrivals and recent role changes that haven't moved the
+    season average yet.  Both fields come from get_team_roster_status().
+    Returns tier name and count of absent starters.
+    """
+    absent_starters = sum(
+        1 for p in players
+        if p["playerId"] != player_id
+        and p["status"] in ("Likely Inactive", "Inactive")
+        and max((p.get("seasonMin") or 0), (p.get("recentMin") or 0)) >= _STARTER_MIN_THRESHOLD
+        and p["seasonGP"] >= 10
+    )
+    if absent_starters >= 3:
+        return "extreme", absent_starters
+    elif absent_starters >= 2:
+        return "moderate", absent_starters
+    return "normal", absent_starters
+
+
+def compute_usage_adjustment(player_id, team_abbr, season=None, as_of_date=None):
     if season is None:
         season = CURRENT_SEASON
 
@@ -39,13 +69,17 @@ def compute_usage_adjustment(player_id, team_abbr, season=None):
                 "statMultipliers": {s: 1.0 for s in _USG_STAT_ELASTICITY},
             }
 
+        # Determine mass-absence tier
+        tier_name, absent_starter_count = _classify_absence_tier(players, player_id)
+        tier = _ABSENCE_TIERS[tier_name]
+
         target_usg = target["usgPct"] or 0.0
         absent = [
             p
             for p in players
             if p["playerId"] != player_id
             and p["status"] in ("Likely Inactive", "Inactive")
-            and p["usgPct"] >= 18.0
+            and p["usgPct"] >= tier["usg_threshold"]
             and p["seasonGP"] >= 10
         ]
 
@@ -60,6 +94,8 @@ def compute_usage_adjustment(player_id, team_abbr, season=None):
                 "effectiveMultiplier": 1.0,
                 "statMultipliers": {s: 1.0 for s in _USG_STAT_ELASTICITY},
                 "absentTeammates": [],
+                "massAbsenceTier": tier_name,
+                "absentStarterCount": absent_starter_count,
                 "note": "No high-usage teammates flagged as inactive.",
             }
 
@@ -77,8 +113,8 @@ def compute_usage_adjustment(player_id, team_abbr, season=None):
             new_usg = target_usg + absorbed_usg
             usage_ratio = new_usg / target_usg
 
-        effective_mult = 1.0 + (usage_ratio - 1.0) * _USG_REDISTRIBUTION_DAMPENING
-        effective_mult = max(1.0, min(1.45, effective_mult))
+        effective_mult = 1.0 + (usage_ratio - 1.0) * tier["dampening"]
+        effective_mult = max(1.0, min(tier["cap"], effective_mult))
 
         stat_mults = {
             stat: safe_round(effective_mult ** elasticity, 3)
@@ -114,6 +150,8 @@ def compute_usage_adjustment(player_id, team_abbr, season=None):
                 {"name": p["name"], "usgPct": p["usgPct"], "status": p["status"], "riskLevel": p["riskLevel"]}
                 for p in absent
             ],
+            "massAbsenceTier": tier_name,
+            "absentStarterCount": absent_starter_count,
         }
     except Exception as e:
         return {"success": False, "error": str(e), "traceback": traceback.format_exc()}

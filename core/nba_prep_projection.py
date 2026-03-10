@@ -98,6 +98,17 @@ _DEF_WEIGHTS = {
 }
 
 
+# Stat → defensive rank key mapping (for rank-weighted defense adjustment)
+# Only stats whose ranks are actually populated by get_team_defensive_ratings().
+# stl/blk/tov are omitted — their OPP_*_RANK fields don't exist in the API.
+_STAT_TO_DEF_RANK = {
+    "pts":  "defPtsRank",
+    "reb":  "defRebRank",
+    "ast":  "defAstRank",
+    "fg3m": "defFg3mRank",
+}
+
+
 def _defense_adj(stat, opp_def, position, pvt_mults=None):
     if not opp_def:
         return 1.0
@@ -117,8 +128,33 @@ def _defense_adj(stat, opp_def, position, pvt_mults=None):
         if pvt_val is not None:
             adj = 0.80 * adj + 0.20 * pvt_val
 
+    # Rank-weight modulation: extreme ranks (top/bottom 5) get 120% of the
+    # multiplier effect, middle ranks get 80%. Scales the distance from
+    # neutral rather than replacing the multiplier.
+    rank_key = _STAT_TO_DEF_RANK.get(stat)
+    if rank_key:
+        rank = opp_def.get(rank_key, 15) or 15
+        rank_weight = 0.8 + 0.4 * abs(rank - 15) / 15
+        adj = 1.0 + (adj - 1.0) * rank_weight
+
     lo, hi = PROJECTION_CONFIG["defense_adj"]
     return max(lo, min(hi, adj))
+
+
+def _detect_role_change(rolling, logs):
+    """Detect recent role change from last-3 min avg vs season min avg.
+
+    Returns (detected: bool, delta: float, threshold: float).
+    Threshold is max(3.0, season_avg * 0.15) — relative for starters,
+    floored at 3 min for bench players.
+    """
+    season_base = float(rolling.get("min_avg_season", 0) or 0) or 1.0
+    last3 = [max(0.0, float(logs[i].get("min", 0) or 0)) for i in range(min(3, len(logs)))]
+    last3_avg = sum(last3) / len(last3) if last3 else season_base
+    delta = last3_avg - season_base
+    threshold = max(3.0, season_base * 0.15)
+    detected = abs(delta) > threshold and len(logs) >= 3
+    return detected, delta, threshold
 
 
 def _home_away_adj(splits, stat, is_home, season_avg):
@@ -199,12 +235,26 @@ def _add_combo_projections(projections, logs, rolling):
         vals = [g[key] for g in logs]
         s_avg = safe_round(statistics.mean(vals), 1) if vals else 0
         s_stdev = safe_round(statistics.stdev(vals), 2) if len(vals) >= 2 else 0
+        # Sample-size-dependent stdev shrinkage (same as core stats in 1.5)
+        _combo_n = len(vals)
+        _combo_max_shrink = _get_stdev_shrink(key)
+        _combo_n_scale = min(1.0, _combo_n / _N_GAMES_REF) if _combo_n > 0 else 0.0
+        _combo_proj_stdev = s_stdev * (_combo_max_shrink * _combo_n_scale)
+        # Diagnostic: component stdev sum for PRA calibration comparison
+        _component_stdev_sum = None
+        if key == "pra" and all(p in projections for p in parts):
+            _comp_vars = sum(
+                (projections[p].get("stdev") or 0) ** 2 for p in parts
+            )
+            _component_stdev_sum = safe_round(math.sqrt(_comp_vars), 2) if _comp_vars > 0 else 0
         projections[key] = {
             "projection": safe_round(proj, 1),
             "confidence": conf,
             "seasonAvg": s_avg,
             "stdev": s_stdev,
-            "projStdev": safe_round(s_stdev * _get_stdev_shrink(key), 2),
+            "projStdev": max(safe_round(_combo_proj_stdev, 2), 0.5),
+            "comboStdevMethod": "empirical",
+            "componentStdevSum": _component_stdev_sum,
             "recentHighVariance": False,
             "last5Avg": rolling.get(f"{key}_avg5", 0),
             "last10Avg": rolling.get(f"{key}_avg10", 0),
@@ -347,13 +397,35 @@ def compute_projection(
                 if pvt_data.get("success"):
                     pvt_mults = pvt_data.get("multipliers")
 
+        # Feature 1: Usage rate integration — LIVE MODE ONLY.
+        # get_team_roster_status uses LeagueDashPlayerStats(last_n_games=5)
+        # which returns the last 5 games from *now*, not from as_of_date.
+        # Until we have historical roster snapshots, running this in backtests
+        # would be lookahead. The `if player_team_abbr:` guard keeps it
+        # live-only since the backtest caller does not pass that argument.
+        # Computed here so roster_context is available for
+        # compute_minutes_multiplier below.
+        _usage_mults = {}
+        _usage_ctx = None
+        if player_team_abbr:
+            try:
+                _usg = compute_usage_adjustment(
+                    player_id, player_team_abbr, season, as_of_date=as_of_date
+                )
+                if _usg.get("success") and _usg.get("absentTeammates"):
+                    _usage_mults = _usg.get("statMultipliers") or {}
+                    _usage_ctx = _usg
+            except Exception:
+                pass
+
         minutes_ctx = _project_minutes(logs, rolling, splits, is_home, is_b2b)
         base_projected_minutes = minutes_ctx["projectedMinutes"] or 0.0
 
         # --- Minutes model: enrich minutesProjection with confidence + reasoning ---
         _excluded = log_data.get("excludedGames") or []
         _mm = compute_minutes_multiplier(rolling, logs, is_b2b=is_b2b, splits=splits,
-                                         excluded_games=_excluded)
+                                         excluded_games=_excluded,
+                                         roster_context=_usage_ctx)
         minutes_ctx["minutesMultiplier"]  = _mm["multiplier"]
         minutes_ctx["minutesConfidence"]  = _mm["minutesConfidence"]
         minutes_ctx["minutesReasoning"]   = _mm["minutesReasoning"]
@@ -377,15 +449,8 @@ def compute_projection(
 
         # --- Pre-loop: derived context signals (computed once, used per-stat) ---
 
-        # Gap 8.15: Recent role change — last-3 min avg vs season min avg
-        # If the player's last 3 games avg minutes deviate >5 from season avg,
-        # their role has shifted (new starter, bench demotion, minutes restriction).
-        # In that case we bias the projection base toward the recent last-5 window.
-        _season_mins_base = float(rolling.get("min_avg_season", 0) or 0) or 1.0
-        _last3_mins = [max(0.0, float(logs[i].get("min", 0) or 0)) for i in range(min(3, len(logs)))]
-        _last3_min_avg = sum(_last3_mins) / len(_last3_mins) if _last3_mins else _season_mins_base
-        _role_change_delta = _last3_min_avg - _season_mins_base
-        _role_change_detected = abs(_role_change_delta) > 5.0 and len(logs) >= 3
+        # Gap 8.15: Recent role change
+        _role_change_detected, _role_change_delta, _ = _detect_role_change(rolling, logs)
 
         # Gap 8.17: Post-blowout urgency — player plus/minus as blowout proxy
         # Player on court during a blowout will have a large +/-; this correlates
@@ -458,18 +523,6 @@ def compute_projection(
                 else:
                     break
         _road_trip_fatigue = _road_trip_len >= 3
-
-        # Feature 1: Usage rate integration — only in live mode to prevent backtest lookahead.
-        _usage_mults = {}
-        _usage_ctx = None
-        if player_team_abbr and as_of_date is None:
-            try:
-                _usg = compute_usage_adjustment(player_id, player_team_abbr, season)
-                if _usg.get("success") and _usg.get("absentTeammates"):
-                    _usage_mults = _usg.get("statMultipliers") or {}
-                    _usage_ctx = _usg
-            except Exception:
-                pass
 
         # Feature 2: Opponent-adaptive stdev — pace-based variance multiplier.
         # Fast-paced opponents (DEN) widen stat distributions; grinding defenses (CLE) narrow them.
@@ -635,14 +688,15 @@ def compute_projection(
                 if _l5_stdev > 1.5 * stdev_val:
                     _recent_high_variance = True
 
-            # --- #1: Post-regression stdev shrinkage ---
+            # --- #1: Post-regression stdev shrinkage (sample-size-dependent) ---
             # The weighted average already regresses toward the season mean,
             # resolving ~30-40% of raw outcome variance. proj_stdev should
-            # represent projection error, not raw outcome variance. 0.75× factor
-            # directly fixes the 70-80% bin over-confidence (predicted 73%,
-            # actual 40%) by narrowing the CDF and pushing probabilities toward
-            # calibrated confidence levels.
-            _proj_stdev = stdev_val * _get_stdev_shrink(stat)
+            # represent projection error, not raw outcome variance.
+            # Shrinkage scales with sample size: at n=5 → 0.15×, at n=25 → 0.75×.
+            # Env override (STDEV_SHRINK_<STAT>) sets the max factor at full sample.
+            _stdev_max_shrink = _get_stdev_shrink(stat)
+            _stdev_n_scale = min(1.0, n / _N_GAMES_REF) if n > 0 else 0.0
+            _proj_stdev = stdev_val * (_stdev_max_shrink * _stdev_n_scale)
 
             # Feature 2: Pace-based variance scaling.
             _pace_w = _POISSON_PACE_WEIGHT if stat in ("stl", "blk", "fg3m", "tov") else _NORMAL_PACE_WEIGHT
