@@ -286,6 +286,38 @@ def _handle_roster_sweep(argv):
             if BOOK_PRIO.get(book, 99) < BOOK_PRIO.get(existing.get("book", ""), 99):
                 best_per_player_stat[key2] = snap
 
+    # ---- Pulled-lines detection: skip players whose props were removed ----
+    # Group raw snapshots by collect_lines batch (10-min window).
+    # If a player appeared in an earlier FULL sweep but NOT in the latest
+    # full sweep, books likely pulled their lines (player ruled OUT).
+    _MIN_FULL_SWEEP = 50  # batch must have ≥50 unique players to count
+    _batch_players: dict[str, set] = {}
+    for snap in snaps:
+        if (snap.get("book") or "").lower() == "pinnacle":
+            continue
+        ts = snap.get("timestamp_utc", "")[:16]
+        _batch_players.setdefault(ts, set()).add(snap.get("player_name", ""))
+    # Keep only full-sweep batches
+    full_batches = {k: v for k, v in _batch_players.items() if len(v) >= _MIN_FULL_SWEEP}
+    pulled_lines_players: set = set()
+    if len(full_batches) >= 2:
+        sorted_batches = sorted(full_batches.keys())
+        latest_batch_key = sorted_batches[-1]
+        latest_batch_names = full_batches[latest_batch_key]
+        # Players in ANY earlier full batch but absent from the latest
+        earlier_names: set = set()
+        for bk in sorted_batches[:-1]:
+            earlier_names |= full_batches[bk]
+        pulled_lines_players = earlier_names - latest_batch_names
+        if pulled_lines_players:
+            _log.info("Pulled-lines filter: %d players absent from latest batch (%s): %s",
+                      len(pulled_lines_players), latest_batch_key,
+                      ", ".join(sorted(pulled_lines_players)[:10]))
+            for pname in pulled_lines_players:
+                keys_to_remove = [k for k in best_per_player_stat if k[0] == pname]
+                for k in keys_to_remove:
+                    del best_per_player_stat[k]
+
     import re as _re
 
     def _norm_name(n):
@@ -622,7 +654,7 @@ def _handle_roster_sweep(argv):
         snapshot_only=snapshot_only,
     )
 
-    return {
+    result = {
         "success": True,
         "date": date_str,
         "scanned": scanned,
@@ -635,6 +667,9 @@ def _handle_roster_sweep(argv):
         "projectionDataSource": projection_data_source,
         "top5": top5,
     }
+    if pulled_lines_players:
+        result["pulledLinesFiltered"] = sorted(pulled_lines_players)
+    return result
 
 
 def _handle_top_picks(argv):
