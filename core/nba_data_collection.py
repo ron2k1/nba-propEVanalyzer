@@ -359,7 +359,12 @@ def _get_odds_api_key():
         key = key[1:-1].strip()
     return key
 
-def _odds_api_get(path, params=None, timeout=30):
+_odds_session = requests.Session()
+
+
+def _odds_api_get(path, params=None, timeout=30, max_retries=3):
+    import random
+
     api_key = _get_odds_api_key()
     if not api_key:
         return {
@@ -371,33 +376,73 @@ def _odds_api_get(path, params=None, timeout=30):
     query["apiKey"] = api_key
 
     url = f"{ODDS_API_BASE_URL}/{path.lstrip('/')}"
-    try:
-        resp = requests.get(url, params=query, timeout=timeout)
-        if resp.status_code != 200:
+    _RETRYABLE_STATUS = {429, 502, 503, 504}
+    last_err = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            resp = _odds_session.get(url, params=query, timeout=timeout)
+
+            if resp.status_code == 200:
+                return {
+                    "success": True,
+                    "data": resp.json(),
+                    "quota": {
+                        "remaining": resp.headers.get("x-requests-remaining"),
+                        "used": resp.headers.get("x-requests-used"),
+                        "last": resp.headers.get("x-requests-last"),
+                    },
+                }
+
+            if resp.status_code in _RETRYABLE_STATUS and attempt < max_retries:
+                base = 2 ** attempt  # 1s, 2s, 4s
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            base = max(base, float(retry_after))
+                        except (TypeError, ValueError):
+                            pass
+                wait = base + random.uniform(0, base * 0.5)
+                _log.warning(
+                    "Odds API HTTP %d on attempt %d/%d — retrying in %.1fs (remaining=%s)",
+                    resp.status_code, attempt + 1, max_retries + 1, wait,
+                    resp.headers.get("x-requests-remaining", "?"),
+                )
+                time.sleep(wait)
+                continue
+
             text = (resp.text or "").strip()
             return {
                 "success": False,
                 "error": f"Odds API HTTP {resp.status_code}",
                 "details": text[:500],
             }
-        return {
-            "success": True,
-            "data": resp.json(),
-            "quota": {
-                "remaining": resp.headers.get("x-requests-remaining"),
-                "used": resp.headers.get("x-requests-used"),
-                "last": resp.headers.get("x-requests-last"),
-            },
-        }
-    except Exception as e:
-        msg = str(e)
-        if "WinError 10013" in msg:
-            msg = (
-                f"{msg} "
-                "Windows blocked the outbound socket. Allow python.exe in Windows Firewall "
-                "or run the UI launcher elevated (run_ui.ps1)."
-            )
-        return {"success": False, "error": msg}
+
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_err = str(e)
+            if attempt < max_retries:
+                base = 2 ** attempt
+                wait = base + random.uniform(0, base * 0.5)
+                _log.warning(
+                    "Odds API %s on attempt %d/%d — retrying in %.1fs",
+                    type(e).__name__, attempt + 1, max_retries + 1, wait,
+                )
+                time.sleep(wait)
+                continue
+            break
+
+        except Exception as e:
+            last_err = str(e)
+            if "WinError 10013" in last_err:
+                last_err = (
+                    f"{last_err} "
+                    "Windows blocked the outbound socket. Allow python.exe in Windows Firewall "
+                    "or run the UI launcher elevated (run_ui.ps1)."
+                )
+            return {"success": False, "error": last_err}
+
+    return {"success": False, "error": last_err or "max retries exceeded"}
 
 def _odds_price_to_decimal(price, odds_format):
     try:
