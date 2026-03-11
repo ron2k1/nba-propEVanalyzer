@@ -1172,6 +1172,7 @@ def get_todays_event_props_bulk(
     all_snapshots = []
     errors        = []
     _ptm          = get_player_team_map()
+    _fetch_log    = []  # per-request fetch timing
 
     for event in events:
         event_id      = event.get("id", "")
@@ -1184,6 +1185,7 @@ def get_todays_event_props_bulk(
         away_abbr = _abbr_from_team_name(away_name)
 
         for stat in stats:
+            _req_fetched_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             result = get_event_player_props_bulk(
                 event_id=event_id,
                 stat=stat,
@@ -1191,6 +1193,13 @@ def get_todays_event_props_bulk(
                 sport=sport,
                 odds_format=odds_format,
             )
+            _fetch_log.append({
+                "eventId": event_id, "stat": stat,
+                "matchup": f"{away_abbr} @ {home_abbr}" if away_abbr and home_abbr else event_id,
+                "fetchedAt": _req_fetched_at,
+                "success": bool(result.get("success")),
+                "snapshotCount": len(result.get("snapshots", [])),
+            })
             if not result.get("success"):
                 errors.append({"event_id": event_id, "stat": stat,
                                "error": result.get("error")})
@@ -1207,6 +1216,7 @@ def get_todays_event_props_bulk(
                 )
                 all_snapshots.append({
                     "timestamp_utc":    timestamp_utc,
+                    "fetched_at":       _req_fetched_at,
                     "game_id":          event_id,
                     "player_name":      snap["player_name"],
                     "player_team_abbr": _resolved_team,
@@ -1222,6 +1232,17 @@ def get_todays_event_props_bulk(
                     "away_team_abbr":   away_abbr,
                 })
 
+    # Build fetch summary for consumers (UI, progress)
+    _first_fetch = _fetch_log[0]["fetchedAt"] if _fetch_log else timestamp_utc
+    _last_fetch = _fetch_log[-1]["fetchedAt"] if _fetch_log else timestamp_utc
+    fetch_summary = {
+        "firstFetchAt": _first_fetch,
+        "lastFetchAt": _last_fetch,
+        "requestCount": len(_fetch_log),
+        "successCount": sum(1 for f in _fetch_log if f["success"]),
+        "errorCount": sum(1 for f in _fetch_log if not f["success"]),
+    }
+
     return {
         "success":     True,
         "timestamp":   timestamp_utc,
@@ -1231,6 +1252,8 @@ def get_todays_event_props_bulk(
         "snapshotCount": len(all_snapshots),
         "errors":      errors,
         "quota":       events_resp.get("quota"),
+        "fetchSummary": fetch_summary,
+        "fetchLog": _fetch_log,
     }
 
 

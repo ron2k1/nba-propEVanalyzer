@@ -180,6 +180,38 @@
               <article class="metric"><h4>Status</h4><p class="ok-text">Success</p></article>
               <article class="metric"><h4>Snapshots</h4><p x-text="collectResult.snapshotCount ?? collectResult.snapshots ?? '?'"></p></article>
             </div>
+            <template x-if="collectResult.fetchSummary">
+              <div>
+                <p class="fetch-timing">
+                  Fetched <span x-text="collectResult.fetchSummary.requestCount ?? '?'"></span> requests
+                  (<span x-text="collectResult.fetchSummary.successCount ?? 0"></span> OK,
+                  <span x-text="collectResult.fetchSummary.errorCount ?? 0"></span> errors)
+                  &mdash; <span x-text="utcToEastern(collectResult.fetchSummary.firstFetchAt)"></span>
+                  to <span x-text="utcToEastern(collectResult.fetchSummary.lastFetchAt)"></span>
+                </p>
+                <template x-if="collectResult.fetchLog && collectResult.fetchLog.length > 0">
+                  <details style="margin-top:8px">
+                    <summary class="fetch-timing" style="cursor:pointer">Per-request timing</summary>
+                    <div class="odds-table-wrap" style="margin-top:6px">
+                      <table class="odds-table" style="font-size:0.82rem">
+                        <thead><tr><th>Matchup</th><th>Stat</th><th>Snapshots</th><th>Status</th><th>Fetched At</th></tr></thead>
+                        <tbody>
+                          <template x-for="(f, i) in collectResult.fetchLog" :key="i">
+                            <tr>
+                              <td x-text="f.matchup || f.eventId || '?'"></td>
+                              <td x-text="(f.stat || '').toUpperCase()"></td>
+                              <td x-text="f.snapshotCount ?? 0"></td>
+                              <td x-text="f.success ? 'OK' : 'Error'" :style="f.success ? '' : 'color:var(--bad)'"></td>
+                              <td class="swept-cell" x-text="utcToEastern(f.fetchedAt)"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                </template>
+              </div>
+            </template>
           </div>
         </template>
         <template x-if="collectError">
@@ -262,6 +294,7 @@
                   <th class="sortable-th" @click="sortBy('recommendedEvPct')">EV%<span x-text="sortArrow('recommendedEvPct')"></span></th>
                   <th>Odds</th>
                   <th>Status</th>
+                  <th>Swept</th>
                 </tr></thead>
                 <tbody>
                   <template x-for="r in sortedBestRows()" :key="(r.playerId||'') + r.stat + r.line">
@@ -274,6 +307,7 @@
                       <td :class="evColorClass(r.recommendedEvPct)" x-text="fmt(r.recommendedEvPct, 2) + '%'"></td>
                       <td x-text="r.recommendedOdds ?? 'n/a'"></td>
                       <td x-html="statusPill(r.result || 'pending')"></td>
+                      <td :class="sweptDisplay(r).cssClass" x-text="sweptDisplay(r).text"></td>
                     </tr>
                   </template>
                 </tbody>
@@ -291,6 +325,7 @@
                   <div class="detail-item"><span class="detail-label">Team</span><span class="detail-value" x-text="r.playerTeamAbbr || r.teamAbbr || 'n/a'"></span></div>
                   <div class="detail-item"><span class="detail-label">Opponent</span><span class="detail-value" x-text="r.opponentAbbr || 'n/a'"></span></div>
                   <div class="detail-item"><span class="detail-label">EV%</span><span class="detail-value" x-text="fmt(r.recommendedEvPct, 2)"></span></div>
+                  <div class="detail-item" x-show="r.sweptAtUtc || r.sweptAtFallback"><span class="detail-label">Swept At</span><span class="detail-value" :class="sweptDisplay(r).cssClass" x-text="sweptDisplay(r).text"></span></div>
                 </div>
               </div>
             </template>
@@ -374,7 +409,7 @@
           <div class="result">
             <div class="odds-table-wrap">
               <table class="odds-table">
-                <thead><tr><th>Rank</th><th>Player</th><th>Stat</th><th>Side</th><th>Line</th><th>EV%</th><th>Projection</th><th>Odds</th><th>Book</th></tr></thead>
+                <thead><tr><th>Rank</th><th>Player</th><th>Stat</th><th>Side</th><th>Line</th><th>EV%</th><th>Projection</th><th>Odds</th><th>Book</th><th>Swept</th></tr></thead>
                 <tbody>
                   <template x-for="(r, i) in topRows()" :key="i">
                     <tr>
@@ -387,6 +422,7 @@
                       <td x-text="fmt(r.projection, 1)"></td>
                       <td x-text="r.odds || r.recommendedOdds || 'n/a'"></td>
                       <td x-text="r.book || r.bookmaker || 'n/a'"></td>
+                      <td :class="sweptDisplay(r).cssClass" x-text="sweptDisplay(r).text"></td>
                     </tr>
                   </template>
                 </tbody>

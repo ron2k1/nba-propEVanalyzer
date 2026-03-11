@@ -233,6 +233,14 @@ class DecisionJournal:
             except Exception:
                 pass  # column already exists
 
+        # Migrate signals + leans: add swept_at column for per-prop evaluation timing
+        for tbl in ("signals", "leans"):
+            try:
+                self._conn.execute(f"ALTER TABLE {tbl} ADD COLUMN swept_at TEXT")
+                self._conn.commit()
+            except Exception:
+                pass  # column already exists
+
     def _migrate_dedup_v2(self):
         """Dedup migration v4: key is ``(player_id, stat, game_date_ct)``.
 
@@ -336,8 +344,11 @@ class DecisionJournal:
         edge_over, edge_under, recommended_side, recommended_edge, confidence,
         used_real_line=False, action_taken=0, skip_reason=None,
         context=None, signal_version=CURRENT_SIGNAL_VERSION,
+        swept_at=None,
     ) -> dict:
-        """Log a qualifying signal. Returns {success, signalId|None, isDuplicate}."""
+        """Log a qualifying signal. Returns {success, signalId|None, isDuplicate}.
+        swept_at: optional ISO timestamp (UTC with Z suffix) of when this prop was
+                  actually evaluated (distinct from ts_utc which is journal write time)."""
         import json as _json
         signal_id = str(uuid.uuid4())
         ts_utc = _now_utc_iso()
@@ -352,8 +363,8 @@ class DecisionJournal:
                     projection, prob_over, prob_under,
                     edge_over, edge_under, recommended_side, recommended_edge, confidence,
                     used_real_line, action_taken, skip_reason, context_json,
-                    game_date_ct
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    game_date_ct, swept_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     signal_id, ts_utc, signal_version,
                     int(player_id) if player_id is not None else None,
@@ -378,6 +389,7 @@ class DecisionJournal:
                     str(skip_reason) if skip_reason else None,
                     context_json,
                     game_date_ct,
+                    str(swept_at) if swept_at else None,
                 ),
             )
             self._conn.commit()
@@ -398,8 +410,11 @@ class DecisionJournal:
         projection, prob_over, prob_under,
         edge_over, edge_under, recommended_side, recommended_edge, confidence,
         skip_reason=None, context=None,
+        swept_at=None,
     ) -> dict:
-        """Log a model lean (positive edge but didn't pass _qualifies). Returns {success, leanId, isDuplicate}."""
+        """Log a model lean (positive edge but didn't pass _qualifies). Returns {success, leanId, isDuplicate}.
+        swept_at: optional ISO timestamp (UTC with Z suffix) of when this prop was
+                  actually evaluated."""
         import json as _json
         lean_id = str(uuid.uuid4())
         ts_utc = _now_utc_iso()
@@ -414,8 +429,8 @@ class DecisionJournal:
                     projection, prob_over, prob_under,
                     edge_over, edge_under, recommended_side, recommended_edge, confidence,
                     skip_reason, context_json,
-                    game_date_ct
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    game_date_ct, swept_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (
                     lean_id, ts_utc,
                     int(player_id) if player_id is not None else None,
@@ -438,6 +453,7 @@ class DecisionJournal:
                     str(skip_reason) if skip_reason else None,
                     context_json,
                     game_date_ct,
+                    str(swept_at) if swept_at else None,
                 ),
             )
             self._conn.commit()

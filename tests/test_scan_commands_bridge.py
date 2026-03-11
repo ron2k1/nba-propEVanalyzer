@@ -96,3 +96,8 @@ def test_roster_sweep_duplicate_signal_still_backfills_prop_journal(monkeypatch)
     assert result["skipReasons"]["duplicate"] == 1
     assert captured["prop_result"]["commenceTime"] == "2026-03-08T00:00:00Z"
     assert captured["kwargs"]["player_id"] == 1631204
+    # swept_at must be a UTC ISO string with Z suffix (not ET or naive)
+    _sa = captured["kwargs"].get("swept_at")
+    assert _sa is not None, "roster_sweep must pass swept_at to log_prop_ev_entry"
+    assert _sa.endswith("Z"), f"swept_at must be UTC (Z suffix), got: {_sa}"
+    assert "ET" not in _sa, f"swept_at must not contain ET, got: {_sa}"

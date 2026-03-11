@@ -337,6 +337,7 @@ def log_prop_ev_entry(
     under_odds,
     is_b2b=False,
     source="cli",
+    swept_at=None,
 ):
     """
     Append a successful prop_ev evaluation into a local JSONL journal.
@@ -439,6 +440,11 @@ def log_prop_ev_entry(
         entry["minutesCapApplied"] = bool(minutes_cap_applied)
     if minutes_cap_reason is not None:
         entry["minutesCapReason"] = str(minutes_cap_reason)
+    # Per-prop sweep timestamp: when this evaluation actually occurred (UTC ISO)
+    # Fallback chain: explicit swept_at > sweepCompletedUtc from auto_sweep
+    _effective_swept = swept_at or (prop_result or {}).get("sweepCompletedUtc")
+    if _effective_swept:
+        entry["sweptAtUtc"] = str(_effective_swept)
 
     _validate_entry(entry)
 
@@ -939,7 +945,8 @@ def _sqlite_fallback_entries(target):
                 """SELECT player_id, player_name, team_abbr, opponent_abbr,
                           stat, line, book, over_odds, under_odds,
                           projection, prob_over, prob_under,
-                          edge_over, edge_under, recommended_side, recommended_edge
+                          edge_over, edge_under, recommended_side, recommended_edge,
+                          swept_at
                    FROM signals
                    WHERE ts_utc >= ? AND ts_utc < ?
                    ORDER BY ts_utc DESC
@@ -951,6 +958,7 @@ def _sqlite_fallback_entries(target):
                 "stat", "line", "book", "over_odds", "under_odds",
                 "projection", "prob_over", "prob_under",
                 "edge_over", "edge_under", "recommended_side", "recommended_edge",
+                "swept_at",
             ]
             entries = []
             for row in cur.fetchall():
@@ -980,6 +988,9 @@ def _sqlite_fallback_entries(target):
                     "settled": False,
                     "source": "sqlite_fallback",
                 })
+                _sa = sig.get("swept_at")
+                if _sa:
+                    entries[-1]["sweptAtUtc"] = _sa
             return entries
     except Exception:
         return []
@@ -1105,6 +1116,16 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
             row["minutesCapApplied"] = bool(e["minutesCapApplied"])
         if e.get("minutesCapReason") is not None:
             row["minutesCapReason"] = str(e["minutesCapReason"])
+        # Surface swept_at: only real UTC values go into sweptAtUtc
+        _swept_utc = e.get("sweptAtUtc")
+        if _swept_utc:
+            row["sweptAtUtc"] = _swept_utc
+        else:
+            # Legacy/fallback: not guaranteed UTC, kept separate so Phase 3
+            # can distinguish parseable UTC from ambiguous legacy strings
+            _fallback = e.get("sweptAtEst") or e.get("createdAtUtc")
+            if _fallback:
+                row["sweptAtFallback"] = _fallback
 
     # Enrich with line movement from today's collected snapshots
     line_history = _load_line_history(target)

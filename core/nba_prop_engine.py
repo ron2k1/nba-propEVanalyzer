@@ -403,6 +403,9 @@ def compute_auto_line_sweep(
     allow_book_fallback=False,
 ):
     try:
+        from datetime import datetime as _dt, timezone as _tz
+        _sweep_started = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
         requested_books = _clean_bookmaker_csv(bookmakers, default_csv=",".join(PREFERRED_BOOKMAKERS))
 
         def _fetch_offers(bookmakers_filter):
@@ -625,6 +628,7 @@ def compute_auto_line_sweep(
                     "underVerdict": (ev.get("under") or {}).get("verdict"),
                     "vigSpread": vig_spread,
                     "staleConsensus": stale_consensus,
+                    "sweptAtUtc": _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "ev": ev,
                 }
             )
@@ -652,6 +656,8 @@ def compute_auto_line_sweep(
         top_n_val = max(1, min(200, int(top_n or 15)))
         ranked_top = ranked[:top_n_val]
         best = ranked_top[0]
+
+        _sweep_completed = _dt.now(_tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         return {
             "success": True,
@@ -685,6 +691,9 @@ def compute_auto_line_sweep(
             "bookLineStdev": book_line_stdev,
             # Gap 8.16: books whose line deviates from median by > 0.4 (soft line signal)
             "softLineBooks": soft_line_books,
+            # Per-player sweep timing: when evaluation started and completed (UTC)
+            "sweepStartedUtc": _sweep_started,
+            "sweepCompletedUtc": _sweep_completed,
         }
     except Exception as e:
         return {"success": False, "error": str(e)}

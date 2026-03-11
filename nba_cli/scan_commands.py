@@ -438,6 +438,8 @@ def _handle_roster_sweep(argv):
             }))
 
             _log.debug("Evaluating %s/%s: line=%.1f book=%s opp=%s", pname, stat, float(line), book, opp_abbr)
+            from datetime import datetime as _dt_cls, timezone as _tz_cls
+            _swept_at = _dt_cls.now(_tz_cls.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
             _t0 = _time.monotonic()
             result = compute_prop_ev(
                 player_id=player_id,
@@ -521,6 +523,7 @@ def _handle_roster_sweep(argv):
                             "projectionDataSource": projection_data_source,
                             "fetchLiveContext": fetch_live_context,
                         },
+                        swept_at=_swept_at,
                     )
                     lean_count += 1
                 continue
@@ -564,6 +567,7 @@ def _handle_roster_sweep(argv):
                 ),
                 used_real_line=True, action_taken=0,
                 context=ctx,
+                swept_at=_swept_at,
             )
             if djr.get("isDuplicate"):
                 skipped_list.append({"player": pname, "stat": stat, "reason": "duplicate"})
@@ -584,6 +588,7 @@ def _handle_roster_sweep(argv):
                         under_odds=int(under_odds or -110),
                         is_b2b=False,
                         source="roster_sweep",
+                        swept_at=_swept_at,
                     )
                 except Exception as _bridge_ex:
                     _log.warning("JSONL bridge write failed for %s/%s duplicate: %s", pname, stat, _bridge_ex)
@@ -616,6 +621,7 @@ def _handle_roster_sweep(argv):
                         under_odds=int(under_odds or -110),
                         is_b2b=False,
                         source="roster_sweep",
+                        swept_at=_swept_at,
                     )
                 except Exception as _bridge_ex:
                     _log.warning("JSONL bridge write failed for %s/%s: %s", pname, stat, _bridge_ex)
@@ -712,7 +718,7 @@ def _handle_top_picks(argv):
         pid = r.get("playerId")
         stat = str(r.get("stat", "")).lower()
         je = journal_by_key.get((pid, stat, r.get("line"))) or {}
-        top_picks.append({
+        _pick = {
             "rank": i,
             "playerName": r.get("playerName"),
             "stat": r.get("stat"),
@@ -724,7 +730,13 @@ def _handle_top_picks(argv):
             "probOver": je.get("probOver"),
             "book": je.get("bestOverBook") or je.get("bestUnderBook") or "",
             "opponentAbbr": r.get("opponentAbbr"),
-        })
+        }
+        # Thread sweep timing from best_plays_for_date output
+        if r.get("sweptAtUtc"):
+            _pick["sweptAtUtc"] = r["sweptAtUtc"]
+        elif r.get("sweptAtFallback"):
+            _pick["sweptAtFallback"] = r["sweptAtFallback"]
+        top_picks.append(_pick)
 
     # --- Best 2-leg parlay from top picks ---
     best_parlay = None

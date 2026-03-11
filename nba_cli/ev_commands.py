@@ -87,7 +87,7 @@ def _build_signal_context(source, result, stat, stat_proj, intraday_clv=None):
 
 def _log_dj_signal(result, player_id, player_name, team_abbr, opponent_abbr,
                    stat, line, over_odds, under_odds, book, stat_proj,
-                   ev_data, used_real_line, context):
+                   ev_data, used_real_line, context, swept_at=None):
     """
     Log a qualifying signal to the DecisionJournal and annotate result with
     journalSignalId / journalDuplicateSignal / journalSignalError.
@@ -112,6 +112,7 @@ def _log_dj_signal(result, player_id, player_name, team_abbr, opponent_abbr,
         ),
         used_real_line=used_real_line, action_taken=0,
         context=context,
+        swept_at=swept_at,
     )
     dj.close()
     if djr.get("isDuplicate"):
@@ -347,11 +348,14 @@ def _handle_auto_sweep(argv):
         result["resolvedPlayerId"] = player_id
         best = result.get("bestRecommendation") or {}
         best_ev = best.get("ev")
+        _sweep_completed = result.get("sweepCompletedUtc")
         if best_ev:
             journal_like = {
                 "success": True,
                 "projection": result.get("projection"),
                 "ev": best_ev,
+                "commenceTime": result.get("commenceTime"),
+                "minutesProjection": result.get("minutesProjection"),
             }
             journal_res = log_prop_ev_entry(
                 journal_like,
@@ -366,6 +370,7 @@ def _handle_auto_sweep(argv):
                 under_odds=best.get("underOdds"),
                 is_b2b=is_b2b,
                 source="auto_sweep",
+                swept_at=_sweep_completed,
             )
             if journal_res.get("success"):
                 result["journalEntryId"] = journal_res.get("entryId")
@@ -420,6 +425,7 @@ def _handle_auto_sweep(argv):
                 stat_proj=stat_proj, ev_data=best_ev_data,
                 used_real_line=True,  # auto_sweep always uses live Odds API lines
                 context=ctx,
+                swept_at=_sweep_completed,
             )
     return result
 

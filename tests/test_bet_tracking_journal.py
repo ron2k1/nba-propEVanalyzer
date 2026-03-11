@@ -206,3 +206,118 @@ def test_best_plays_for_date_merges_jsonl_and_sqlite_entries(monkeypatch):
         "Daniss Jenkins",
     ]
     assert result["topOffers"][0]["entryId"] == "jsonl-1"
+
+
+def test_jsonl_entry_preserves_swept_at_utc(monkeypatch):
+    """sweptAtUtc written to JSONL must surface in best_plays_for_date output."""
+    entry = {
+        "entryId": "swept-1",
+        "createdAtUtc": "2026-03-09T20:00:00Z",
+        "createdAtLocal": "2026-03-09T14:00:00",
+        "pickDate": "2026-03-09",
+        "playerId": 1631204,
+        "playerName": "Marcus Sasser",
+        "playerTeamAbbr": "DET",
+        "opponentAbbr": "BKN",
+        "isHome": True,
+        "isB2B": False,
+        "stat": "pts",
+        "line": 10.5,
+        "overOdds": -110,
+        "underOdds": -110,
+        "recommendedSide": "over",
+        "recommendedEvPct": 12.5,
+        "recommendedOdds": -110,
+        "probOver": 0.62,
+        "probUnder": 0.38,
+        "projection": 12.0,
+        "settled": False,
+        "result": None,
+        "sweptAtUtc": "2026-03-09T19:58:30Z",
+    }
+    monkeypatch.setattr(bt, "_load_journal_entries", lambda: [entry])
+    monkeypatch.setattr(bt, "_sqlite_fallback_entries", lambda target: [])
+    monkeypatch.setattr(bt, "_get_playing_teams_today", lambda target_date=None: {"DET", "BKN"})
+    monkeypatch.setattr(bt, "_load_line_history", lambda target: {})
+    monkeypatch.setattr(bt, "_get_pulled_players", lambda target_date: set())
+
+    result = bt.best_plays_for_date("2026-03-09", limit=5)
+    assert result["success"] is True
+    row = result["topOffers"][0]
+    assert row["sweptAtUtc"] == "2026-03-09T19:58:30Z"
+
+
+def test_sqlite_fallback_surfaces_swept_at_utc(monkeypatch):
+    """sweptAtUtc from SQLite fallback must appear in best_plays_for_date output."""
+    sqlite_entry = {
+        "pickDate": "2026-03-09",
+        "playerId": 1631204,
+        "playerName": "Marcus Sasser",
+        "playerTeamAbbr": "DET",
+        "opponentAbbr": "BKN",
+        "stat": "pts",
+        "line": 10.5,
+        "overOdds": -110,
+        "underOdds": -110,
+        "recommendedSide": "over",
+        "recommendedEvPct": 12.5,
+        "recommendedOdds": -110,
+        "probOver": 0.62,
+        "probUnder": 0.38,
+        "projection": 12.0,
+        "settled": False,
+        "source": "sqlite_fallback",
+        "sweptAtUtc": "2026-03-09T19:55:00Z",
+    }
+    monkeypatch.setattr(bt, "_load_journal_entries", lambda: [])
+    monkeypatch.setattr(bt, "_sqlite_fallback_entries", lambda target: [sqlite_entry])
+    monkeypatch.setattr(bt, "_get_playing_teams_today", lambda target_date=None: {"DET", "BKN"})
+    monkeypatch.setattr(bt, "_load_line_history", lambda target: {})
+    monkeypatch.setattr(bt, "_get_pulled_players", lambda target_date: set())
+
+    result = bt.best_plays_for_date("2026-03-09", limit=5)
+    assert result["success"] is True
+    row = result["topOffers"][0]
+    assert row["sweptAtUtc"] == "2026-03-09T19:55:00Z"
+
+
+def test_legacy_swept_at_est_falls_back_correctly(monkeypatch):
+    """Rows with old sweptAtEst field should still surface via the fallback chain."""
+    entry = {
+        "entryId": "legacy-1",
+        "createdAtUtc": "2026-03-09T20:00:00Z",
+        "createdAtLocal": "2026-03-09T14:00:00",
+        "pickDate": "2026-03-09",
+        "playerId": 1631204,
+        "playerName": "Marcus Sasser",
+        "playerTeamAbbr": "DET",
+        "opponentAbbr": "BKN",
+        "isHome": True,
+        "isB2B": False,
+        "stat": "pts",
+        "line": 10.5,
+        "overOdds": -110,
+        "underOdds": -110,
+        "recommendedSide": "over",
+        "recommendedEvPct": 12.5,
+        "recommendedOdds": -110,
+        "probOver": 0.62,
+        "probUnder": 0.38,
+        "projection": 12.0,
+        "settled": False,
+        "result": None,
+        # Legacy field name from the ET era
+        "sweptAtEst": "2026-03-09T15:58:30 ET",
+    }
+    monkeypatch.setattr(bt, "_load_journal_entries", lambda: [entry])
+    monkeypatch.setattr(bt, "_sqlite_fallback_entries", lambda target: [])
+    monkeypatch.setattr(bt, "_get_playing_teams_today", lambda target_date=None: {"DET", "BKN"})
+    monkeypatch.setattr(bt, "_load_line_history", lambda target: {})
+    monkeypatch.setattr(bt, "_get_pulled_players", lambda target_date: set())
+
+    result = bt.best_plays_for_date("2026-03-09", limit=5)
+    assert result["success"] is True
+    row = result["topOffers"][0]
+    # Legacy ET string must NOT pollute sweptAtUtc — goes to sweptAtFallback instead
+    assert "sweptAtUtc" not in row
+    assert row["sweptAtFallback"] == "2026-03-09T15:58:30 ET"

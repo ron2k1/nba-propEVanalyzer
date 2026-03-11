@@ -104,6 +104,31 @@ export function evColorClass(val) {
   return '';
 }
 
+// UTC ISO string → Eastern display string (e.g. "3:42 PM ET")
+export function utcToEastern(isoStr) {
+  if (!isoStr) return '';
+  try {
+    const d = new Date(isoStr);
+    if (isNaN(d.getTime())) return isoStr;
+    return d.toLocaleTimeString('en-US', {
+      timeZone: 'America/New_York',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+    }) + ' ET';
+  } catch { return isoStr; }
+}
+
+// Minutes since a UTC ISO timestamp (for staleness checks)
+export function minutesAgo(isoStr) {
+  if (!isoStr) return null;
+  try {
+    const d = new Date(isoStr);
+    if (isNaN(d.getTime())) return null;
+    return Math.round((Date.now() - d.getTime()) / 60000);
+  } catch { return null; }
+}
+
 // CSV export utility
 export function exportCsv(rows, columns, filename) {
   if (!rows || !rows.length) return;
