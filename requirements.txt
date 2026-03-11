@@ -15,5 +15,6 @@ requests==2.32.5
 six==1.17.0
 tzdata==2025.3
 urllib3==2.6.3
+discord.py>=2.3.0
 lightrag-hku[api]>=1.0.0
 lightrag-mcp>=0.1.0
