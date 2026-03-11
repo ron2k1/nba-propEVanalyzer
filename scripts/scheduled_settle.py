@@ -133,6 +133,22 @@ def main() -> int:
         })
 
     print(json.dumps(payload, indent=2))
+
+    # Discord notifications
+    try:
+        from scripts.discord_notify import notify_morning_summary, notify_failure
+        if ok:
+            notify_morning_summary(payload)
+        else:
+            failed_step = next((s for s in step_results if not s["success"]), {})
+            notify_failure(
+                RUN_TYPE,
+                failed_step.get("error", "unknown error"),
+                failed_step.get("errorClass", "unknown"),
+            )
+    except Exception as exc:
+        print(f"Discord notify failed (non-fatal): {exc}", file=sys.stderr)
+
     return 0 if ok else 1
 
 

@@ -405,6 +405,17 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                 from scripts.ops_events import read_ops_health
                 return self._send_json(200, {"success": True, **read_ops_health()})
 
+            if path == "/api/discord_test":
+                from scripts.discord_notify import send_test
+                return self._send_json(200, send_test())
+
+            if path == "/api/discord_deadman":
+                from scripts.ops_events import read_ops_health as _read_health
+                from scripts.discord_notify import notify_deadman
+                health = _read_health()
+                result = notify_deadman(health)
+                return self._send_json(200, result)
+
             if path == "/api/games":
                 return self._send_json(200, _run_nba_command(["games"]))
 
