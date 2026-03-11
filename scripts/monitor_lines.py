@@ -180,8 +180,11 @@ def main() -> int:
     # Load previous state
     prev_state = _load_prev_state()
     prev_lines = prev_state.get("lines", {})
+    prev_date = prev_state.get("date", "")
 
     # Get current lines
+    # Use local time (ET) — scheduler runs 10AM-10PM ET; UTC would roll at 8PM ET
+    today_str = datetime.now().strftime("%Y-%m-%d")
     current_lines = _get_current_lines()
     if not current_lines:
         result = {"success": True, "signals": 0, "movements": [], "message": "No signals to monitor"}
@@ -189,16 +192,20 @@ def main() -> int:
         print(json.dumps(result))
         return 0
 
-    # Detect movements
-    movements = _detect_movements(
-        prev_lines, current_lines,
-        line_threshold=args.threshold,
-        odds_threshold=args.odds_threshold,
-    )
+    # Detect movements (skip if date changed — avoids cross-day false positives)
+    if prev_date and prev_date != today_str:
+        _log.info("New slate date (%s vs prev %s) — skipping movement comparison", today_str, prev_date)
+        movements = []
+    else:
+        movements = _detect_movements(
+            prev_lines, current_lines,
+            line_threshold=args.threshold,
+            odds_threshold=args.odds_threshold,
+        )
 
     # Save current state for next run
     if not args.dry_run:
-        _save_state({"lines": current_lines, "ts": _utc_now_iso()})
+        _save_state({"lines": current_lines, "date": today_str, "ts": _utc_now_iso()})
 
     if args.dry_run:
         result = {

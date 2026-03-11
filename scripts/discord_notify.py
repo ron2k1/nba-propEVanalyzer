@@ -479,7 +479,7 @@ def notify_injury_alert(signals: list[dict]) -> dict:
 
     lines = []
     for sig in signals[:12]:
-        player = sig.get("player", "?")
+        player = sig.get("playerName", "?")
         status = sig.get("status", "?")
         team = sig.get("team", "?")
         confidence = sig.get("confidence", 0)

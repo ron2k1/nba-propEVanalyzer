@@ -57,11 +57,19 @@ def _save_state(state: dict):
 
 
 def _get_todays_teams() -> list[str]:
-    """Get team abbreviations for today's games."""
+    """Get team abbreviations for today's games (skip stale/fallback data)."""
     try:
         from core.nba_data_collection import get_todays_games
+        today_local = datetime.now().strftime("%Y-%m-%d")
         result = get_todays_games()
         if not result.get("success"):
+            return []
+        # Guard: if get_todays_games fell back to tomorrow or yesterday, skip.
+        # Tomorrow fallback returns isStale=False but a different date.
+        returned_date = result.get("date", "")
+        if returned_date != today_local:
+            _log.info("Games data is for %s, not today (%s) — skipping injury check",
+                       returned_date, today_local)
             return []
         teams = []
         for game in result.get("games", []):
@@ -106,7 +114,7 @@ def _filter_new_signals(
     new_signals = []
     for sig in signals:
         # Build a dedup key from player + status
-        player = sig.get("player", "")
+        player = sig.get("playerName", "")
         status = sig.get("status", "")
         key = f"{player}|{status}"
 
@@ -153,7 +161,7 @@ def main() -> int:
     # Build current signal keys for state persistence
     current_keys = set()
     for sig in all_signals:
-        player = sig.get("player", "")
+        player = sig.get("playerName", "")
         status = sig.get("status", "")
         current_keys.add(f"{player}|{status}")
 

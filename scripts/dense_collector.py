@@ -430,90 +430,98 @@ def main():
               args.books, stats, offsets, args.max_requests)
 
     # Discover events
-    events = _discover_events(sport=args.sport, books=args.books)
-    if not events:
-        _log.warning("No events found. Exiting.")
-        result = {"success": True, "events": 0, "message": "No events today"}
-        print(json.dumps(result))
-        return 0
+    result = None
+    try:
+        events = _discover_events(sport=args.sport, books=args.books)
+        if not events:
+            _log.warning("No events found. Exiting.")
+            result = {"success": True, "events": 0, "message": "No events today"}
+            print(json.dumps(result))
+            return 0
 
-    events_map = {ev["event_id"]: ev for ev in events}
+        events_map = {ev["event_id"]: ev for ev in events}
 
-    # Build schedule
-    schedule = _build_schedule(events, offsets_min=offsets)
-    if not schedule:
-        _log.warning("No collection windows in the future. All games may have started.")
-        result = {"success": True, "events": len(events), "windows": 0, "message": "No future windows"}
-        print(json.dumps(result))
-        return 0
+        # Build schedule
+        schedule = _build_schedule(events, offsets_min=offsets)
+        if not schedule:
+            _log.warning("No collection windows in the future. All games may have started.")
+            result = {"success": True, "events": len(events), "windows": 0, "message": "No future windows"}
+            print(json.dumps(result))
+            return 0
 
-    # Print schedule summary
-    for i, (ct, eids) in enumerate(schedule):
-        et = ct.astimezone(timezone(timedelta(hours=-4)))
-        _log.info("  Window %d: %s ET — %d events", i + 1, et.strftime("%H:%M:%S"), len(eids))
+        # Print schedule summary
+        for i, (ct, eids) in enumerate(schedule):
+            et = ct.astimezone(timezone(timedelta(hours=-4)))
+            _log.info("  Window %d: %s ET — %d events", i + 1, et.strftime("%H:%M:%S"), len(eids))
 
-    # Open LineStore
-    store = LineStore()
+        # Open LineStore
+        store = LineStore()
 
-    # Run schedule
-    summary = _run_schedule_loop(
-        schedule=schedule,
-        all_events=events_map,
-        books=args.books,
-        stats=stats,
-        store=store,
-        max_requests=args.max_requests,
-        dry_run=args.dry_run,
-        workers=args.workers,
-    )
+        # Run schedule
+        summary = _run_schedule_loop(
+            schedule=schedule,
+            all_events=events_map,
+            books=args.books,
+            stats=stats,
+            store=store,
+            max_requests=args.max_requests,
+            dry_run=args.dry_run,
+            workers=args.workers,
+        )
 
-    _log.info("Collection complete: %d/%d windows, %d API calls, %d snapshots",
-              summary["windows_completed"], summary["total_windows"],
-              summary["total_api_calls"], summary["total_snapshots"])
+        _log.info("Collection complete: %d/%d windows, %d API calls, %d snapshots",
+                  summary["windows_completed"], summary["total_windows"],
+                  summary["total_api_calls"], summary["total_snapshots"])
 
-    # End-of-day bridge + build
-    bridge_result = None
-    if not args.skip_bridge and not args.dry_run:
-        try:
-            event_dates = sorted({
-                d for d in (_nba_date_from_commence(ev.get("commence_time", "")) for ev in events) if d
-            })
-            bridge_result = _run_bridge_and_build(
-                date_from=event_dates[0] if event_dates else None,
-                date_to=event_dates[-1] if event_dates else None,
-            )
-        except Exception as e:
-            _log.error("Bridge+build failed: %s", e)
-            bridge_result = {"error": str(e)}
+        # End-of-day bridge + build
+        bridge_result = None
+        if not args.skip_bridge and not args.dry_run:
+            try:
+                event_dates = sorted({
+                    d for d in (_nba_date_from_commence(ev.get("commence_time", "")) for ev in events) if d
+                })
+                bridge_result = _run_bridge_and_build(
+                    date_from=event_dates[0] if event_dates else None,
+                    date_to=event_dates[-1] if event_dates else None,
+                )
+            except Exception as e:
+                _log.error("Bridge+build failed: %s", e)
+                bridge_result = {"error": str(e)}
 
-    # Final output
-    result = {
-        "success": True,
-        "events": len(events),
-        **summary,
-        "bridge_and_build": bridge_result,
-    }
+        # Final output
+        result = {
+            "success": True,
+            "events": len(events),
+            **summary,
+            "bridge_and_build": bridge_result,
+        }
 
-    # Log run
-    _append_jsonl(LOG_PATH, {"ts": _utc_now_iso(), "type": "run_complete", **result})
+        # Log run
+        _append_jsonl(LOG_PATH, {"ts": _utc_now_iso(), "type": "run_complete", **result})
 
-    # Clean up state file on successful completion
-    if STATE_PATH.exists():
-        STATE_PATH.unlink()
+        # Clean up state file on successful completion
+        if STATE_PATH.exists():
+            STATE_PATH.unlink()
 
-    print(json.dumps(result, default=str))
+        print(json.dumps(result, default=str))
+
+    except Exception as exc:
+        _log.error("Dense collector failed: %s", exc)
+        result = {"success": False, "error": str(exc)}
+        print(json.dumps(result, default=str))
 
     # Discord notification (non-fatal)
-    try:
-        from scripts.discord_notify import notify_dense_collector, notify_failure
-        if result.get("success"):
-            notify_dense_collector(result)
-        else:
-            notify_failure("dense_collector", result.get("error", "unknown"), "unknown")
-    except Exception as exc:
-        print(f"Discord notify failed (non-fatal): {exc}", file=sys.stderr)
+    if result is not None:
+        try:
+            from scripts.discord_notify import notify_dense_collector, notify_failure
+            if result.get("success"):
+                notify_dense_collector(result)
+            else:
+                notify_failure("dense_collector", result.get("error", "unknown"), "unknown")
+        except Exception as exc:
+            print(f"Discord notify failed (non-fatal): {exc}", file=sys.stderr)
 
-    return 0
+    return 1 if (result and not result.get("success")) else 0
 
 
 if __name__ == "__main__":

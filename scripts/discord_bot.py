@@ -569,7 +569,7 @@ def main() -> int:
 
             lines = []
             for sig in notable[:15]:
-                player = sig.get("player", "?")
+                player = sig.get("playerName", "?")
                 status = sig.get("status", "?")
                 team = sig.get("team", "?")
                 conf = sig.get("confidence", 0)
