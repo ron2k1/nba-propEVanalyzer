@@ -1214,6 +1214,14 @@ def get_todays_event_props_bulk(
                 _is_home = True if _resolved_team == home_abbr else (
                     False if _resolved_team == away_abbr else None
                 )
+                # Classify line phase: pregame vs live
+                _ct_dt = _parse_iso_datetime(commence_time)
+                _fetched_dt = _parse_iso_datetime(_req_fetched_at)
+                if _ct_dt and _fetched_dt:
+                    _phase = "pregame" if _fetched_dt < _ct_dt else "live"
+                else:
+                    _phase = "unknown"
+
                 all_snapshots.append({
                     "timestamp_utc":    timestamp_utc,
                     "fetched_at":       _req_fetched_at,
@@ -1230,6 +1238,7 @@ def get_todays_event_props_bulk(
                     "commence_time":    commence_time,
                     "home_team_abbr":   home_abbr,
                     "away_team_abbr":   away_abbr,
+                    "line_phase":       _phase,
                 })
 
     # Build fetch summary for consumers (UI, progress)

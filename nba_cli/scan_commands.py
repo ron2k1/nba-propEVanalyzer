@@ -239,6 +239,9 @@ def _handle_roster_sweep(argv):
 
     ls = LineStore()
     snaps = _filter_snapshots_to_local_game_day(ls.get_snapshots(date_str), date_str)
+    # Filter to pregame snapshots only — live-shifted lines should not drive signals.
+    # Default "pregame" for legacy snapshots missing the field.
+    snaps = [s for s in snaps if s.get("line_phase", "pregame") == "pregame"]
     if not snaps:
         _update_roster_sweep_progress(
             progress_file,

@@ -142,6 +142,7 @@ class LineStore:
         book: str = None,
         stat: str = None,
         player_name: str = None,
+        phase: str = None,
     ) -> list:
         path = self._path_for_date(date_str)
         if not os.path.exists(path):
@@ -162,23 +163,25 @@ class LineStore:
                     continue
                 if player_name and not _names_match(player_name, row.get("player_name", "")):
                     continue
+                if phase and row.get("line_phase", "pregame") != phase:
+                    continue
                 rows.append(row)
         return rows
 
-    def get_opening_line(self, date_str: str, player_name: str, stat: str, book: str = None) -> dict:
-        snaps = self.get_snapshots(date_str, book=book, stat=stat, player_name=player_name)
+    def get_opening_line(self, date_str: str, player_name: str, stat: str, book: str = None, phase: str = None) -> dict:
+        snaps = self.get_snapshots(date_str, book=book, stat=stat, player_name=player_name, phase=phase)
         if not snaps:
             return None
         return min(snaps, key=lambda x: x.get("timestamp_utc", ""))
 
-    def get_closing_line(self, date_str: str, player_name: str, stat: str, book: str = None) -> dict:
-        snaps = self.get_snapshots(date_str, book=book, stat=stat, player_name=player_name)
+    def get_closing_line(self, date_str: str, player_name: str, stat: str, book: str = None, phase: str = None) -> dict:
+        snaps = self.get_snapshots(date_str, book=book, stat=stat, player_name=player_name, phase=phase)
         if not snaps:
             return None
         return max(snaps, key=lambda x: x.get("timestamp_utc", ""))
 
-    def get_line_movement(self, date_str: str, player_name: str, stat: str, book: str = None) -> list:
-        snaps = self.get_snapshots(date_str, book=book, stat=stat, player_name=player_name)
+    def get_line_movement(self, date_str: str, player_name: str, stat: str, book: str = None, phase: str = None) -> list:
+        snaps = self.get_snapshots(date_str, book=book, stat=stat, player_name=player_name, phase=phase)
         return sorted(snaps, key=lambda x: x.get("timestamp_utc", ""))
 
     def snapshot_count(self, date_str: str) -> int:
@@ -214,8 +217,8 @@ class LineStore:
             return {"success": False, "error": "missing player or stat in journal entry"}
 
         closing = (
-            self.get_closing_line(date_str, player_name, stat, book_hint)
-            or self.get_closing_line(date_str, player_name, stat)
+            self.get_closing_line(date_str, player_name, stat, book_hint, phase="pregame")
+            or self.get_closing_line(date_str, player_name, stat, phase="pregame")
         )
         if not closing:
             return {
@@ -329,7 +332,7 @@ class LineStore:
         direction='low'  → that book's line is lower than consensus → value on OVER
         direction='high' → that book's line is higher than consensus → value on UNDER
         """
-        all_snaps = self.get_snapshots(date_str)
+        all_snaps = self.get_snapshots(date_str, phase="pregame")
         if not all_snaps:
             return []
 
