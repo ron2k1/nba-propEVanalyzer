@@ -846,6 +846,53 @@ def _load_line_history(date_str):
     return lookup
 
 
+def _norm_pulled_name(n: str) -> str:
+    """Normalize player name for pulled-lines matching (strip periods, Jr/Sr suffixes, lowercase)."""
+    import re
+    return re.sub(r"[.\-'']", "", str(n)).lower().strip()
+
+
+def _get_pulled_players(target_date: str) -> set:
+    """
+    Return set of normalized player names whose lines were pulled today.
+
+    Reads LineStore snapshots, groups by 10-min batch, and identifies
+    players present in earlier full-sweep batches but absent from the
+    latest one (same logic as roster_sweep pulled-lines detection).
+    """
+    try:
+        from .nba_line_store import LineStore
+        store = LineStore()
+        snaps = store.get_snapshots(target_date)
+        if not snaps:
+            return set()
+
+        _MIN_FULL_SWEEP = 50
+        batch_players: dict[str, set] = {}
+        for snap in snaps:
+            if (snap.get("book") or "").lower() == "pinnacle":
+                continue
+            ts = (snap.get("timestamp_utc") or "")[:16]
+            name = _norm_pulled_name(snap.get("player_name") or "")
+            if ts and name:
+                batch_players.setdefault(ts, set()).add(name)
+
+        full_batches = {k: v for k, v in batch_players.items() if len(v) >= _MIN_FULL_SWEEP}
+        if len(full_batches) < 2:
+            return set()
+
+        sorted_keys = sorted(full_batches.keys())
+        latest = full_batches[sorted_keys[-1]]
+        earlier: set = set()
+        for bk in sorted_keys[:-1]:
+            earlier |= full_batches[bk]
+
+        return earlier - latest
+    except Exception as exc:
+        _log.debug("Pulled-lines check skipped: %s", exc)
+        return set()
+
+
 def _get_playing_teams_today(target_date=None):
     """Return set of uppercase team abbreviations with a game on target_date (default today)."""
     target = str(target_date or _today_local_str())
@@ -960,6 +1007,21 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
                 valid.append(e)
             # else: phantom signal — team not playing today, skip
         deduped = valid
+
+    # Filter out players whose lines were pulled (injury/OUT)
+    # Same logic as roster_sweep: if a player appeared in an earlier
+    # full-sweep batch but is absent from the latest batch, they're OUT.
+    pulled_names = _get_pulled_players(target)
+    if pulled_names:
+        before = len(deduped)
+        deduped = [
+            e for e in deduped
+            if _norm_pulled_name(e.get("playerName") or "") not in pulled_names
+        ]
+        if len(deduped) < before:
+            _log.info("Pulled-lines filter removed %d entries (%s)",
+                       before - len(deduped),
+                       ", ".join(sorted(pulled_names)[:5]))
 
     ranked = []
     for e in deduped:
