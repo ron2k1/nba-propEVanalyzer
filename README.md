@@ -1,286 +1,136 @@
-# NBA Player Prop Betting Analyzer
+# NBA Player Prop Analyzer
 
-Local NBA prop analysis app with:
+A local-first NBA player prop expected value engine with projection modeling, multi-book line scanning, historical backtesting, paper trading, and LLM-powered analysis.
 
-- Python backend (`server.py`) on `http://127.0.0.1:8787`
-- Vanilla JS/HTML/CSS frontend in `web/`
-- CLI entrypoint `nba_mod.py`
-- EV analysis, auto line sweep, live projections, tracking/settlement, starter accuracy, and LLM reasoning
+## Highlights
 
-## What Is In This Repo
+- **Projection engine** with calibrated probability models and per-stat temperature scaling
+- **Multi-sportsbook scanning** across BetMGM, DraftKings, and FanDuel
+- **Expected value analysis** with confidence-gated picks and closing line value (CLV) tracking
+- **Paper trading journal** with forward validation, settlement, and GO-LIVE gate metrics
+- **Historical backtesting** against NBA API, Basketball-Reference, and local Kaggle datasets
+- **LLM reasoning layer** (local Ollama-first, Claude fallback) for narrative analysis
+- **Browser UI** with 7-tab workflow: Dashboard, Lines, Picks, Analyze, Live, Results, Reference
+- **CLI + HTTP API** for scripting and integration
+
+## Project Structure
 
 ```
-server.py          ← HTTP server entrypoint (port 8787)
-nba_mod.py         ← CLI entrypoint
-run_ui.ps1         ← Windows elevated launcher
-requirements.txt
-.env / .env.example
-CLAUDE.md          ← authoritative architecture reference
-
-core/              ← all 19 engine modules (data, projection, EV, ML, tracking…)
-  __init__.py
-  nba_data_collection.py   NBA Stats API + Odds API + caching
-  nba_data_prep.py         facade → nba_prep_projection + nba_prep_usage
-  nba_prep_projection.py   projection logic
-  nba_prep_usage.py        usage-adjustment math
-  nba_ev_engine.py         EV / distribution math (Normal / Poisson / reference)
-  nba_prop_engine.py       prop EV, auto sweep, live projection
-  nba_parlay_engine.py     parlay EV
-  nba_model_training.py    facade → ev / prop / parlay / ML
-  nba_model_ml_training.py ridge calibrator + ML pipeline
-  nba_backtest.py          historical backtesting (nba / bref / local sources)
-  nba_bet_tracking.py      JSONL journal, settlement, CLV tracking
-  nba_bref_data.py         Basketball-Reference curated JSONL reader
-  nba_local_stats.py       Kaggle pickle index reader (zero API calls)
-  nba_minutes_model.py     minutes multiplier model
-  nba_line_store.py        line snapshots, CLV, stale detection, alerts
-  nba_llm_engine.py        LLM reasoning (Ollama-first, Claude fallback)
-  nba_injury_news.py       injury signal ingestion + usage overlay
-  nba_starter_accuracy.py  historical starter prop accuracy eval
-  nba_odds_store.py        SQLite store for historical Odds API snapshots + closing lines
-  nba_decision_journal.py  SQLite signal logger + paper-trading forward validator
-
-nba_cli/           ← CLI command handlers (import from core.*)
-  router.py, ev_commands.py, core_commands.py, tracking_commands.py
-  ml_commands.py, llm_commands.py, line_commands.py, journal_commands.py, shared.py
-
-scripts/           ← standalone workflow scripts (import from core.*)
-  betmgm_scan.py, collect_lines.py, injury_monitor.py
-  bref_ingest.py, index_local_data.py, quality_gate.py
-
-scratch/           ← exploratory / daily-briefing scripts
-web/               ← browser UI (index.html, app.js, styles.css)
-docs/              ← architecture.md (points to CLAUDE.md)
-tests/             ← placeholder for future test suite
+server.py        HTTP server (port 8787)
+nba_mod.py       CLI entrypoint
+core/            Engine modules (projection, EV, odds, tracking, backtesting)
+nba_cli/         CLI command handlers
+scripts/         Standalone utilities (collection, backfill, quality gate)
+web/             Alpine.js browser UI
+models/          Calibration configs
+data/            Runtime data (gitignored)
+docs/            Runbooks and architecture guides
 ```
 
-**Import policy:** all engine logic lives in `core/`. External callers (`nba_cli/`, `scripts/`, `scratch/`) use `from core.nba_X import Y`. Modules within `core/` use relative imports (`from .nba_X import Y`).
+## Setup
 
-## Requirements
-
-- Python 3.10+
-- Windows PowerShell commands below (works cross-platform with equivalent Python commands)
-
-Install dependencies:
+**Requirements:** Python 3.10+
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
-.\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-## Environment Variables
-
-Copy template:
+Copy and fill in your API keys:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Optional keys:
-
-- `ODDS_API_KEY`: enables sportsbook odds, auto sweep, starter accuracy
-- `SPORTSDATA_API_KEY`: enables SportsDataIO NBA backfill into local files
-- `NEWS_API_KEY`: enables injury/news features
-- `ANTHROPIC_API_KEY`: optional Claude access
-- `LLM_PROVIDER_ORDER`: `ollama_first` (default) or `claude_first`
-
-Shell note:
-- PowerShell: `$env:LLM_PROVIDER_ORDER="ollama_first"`
-- `cmd.exe`: `set LLM_PROVIDER_ORDER=ollama_first`
-
-`core/nba_llm_engine.py` defaults to local Ollama first (`http://localhost:11434`, model `gpt-oss:20b`), then Claude fallback.
-
-If you see `WinError 10013` on Odds API calls in Windows CLI, allow Python through Windows Firewall
-or launch with `run_ui.ps1` (it relaunches elevated).
-
-Note: runtime LLM calls only generate analysis output; they do not modify source code files.
+| Key | Enables |
+|-----|---------|
+| `ODDS_API_KEY` | Sportsbook odds, auto sweep, line collection |
+| `NEWS_API_KEY` | Injury and news signal features |
+| `ANTHROPIC_API_KEY` | Claude LLM fallback (optional) |
+| `LLM_PROVIDER_ORDER` | `ollama_first` (default) or `claude_first` |
 
 ## Run
 
-Run server directly:
+**Web UI:**
 
 ```powershell
-.\.venv\Scripts\python.exe .\server.py
+.\.venv\Scripts\python.exe server.py
+# Open http://127.0.0.1:8787
 ```
 
-Open:
-
-- `http://127.0.0.1:8787`
-
-Windows helper launcher:
+Windows elevated launcher (resolves firewall issues):
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File ".\run_ui.ps1"
 ```
 
-## Quick CLI Smoke Checks
+**CLI examples:**
 
 ```powershell
-.\.venv\Scripts\python.exe .\nba_mod.py games
-.\.venv\Scripts\python.exe .\nba_mod.py player_lookup "anthony edwards" 10
-.\.venv\Scripts\python.exe .\nba_mod.py prop_ev "Anthony Edwards" ORL 1 pts 25.5 -110 -110 0 MIN
-.\.venv\Scripts\python.exe .\nba_mod.py auto_sweep "Anthony Edwards" MIN ORL 1 pts 0 us "draftkings,fanduel" basketball_nba 15
-.\.venv\Scripts\python.exe .\nba_mod.py live_projection "Anthony Edwards" MIN ORL 1 pts
-.\.venv\Scripts\python.exe .\nba_mod.py starter_accuracy
-.\.venv\Scripts\python.exe .\scripts\betmgm_scan.py --games 6 --top 10 --min-edge 0.03
+# Today's games
+.\.venv\Scripts\python.exe nba_mod.py games
+
+# Single prop EV
+.\.venv\Scripts\python.exe nba_mod.py prop_ev "Anthony Edwards" ORL 1 pts 25.5 -110 -110 0 MIN
+
+# Auto sweep across books
+.\.venv\Scripts\python.exe nba_mod.py auto_sweep "Anthony Edwards" MIN ORL 1 pts 0 us "betmgm,draftkings,fanduel" basketball_nba 15
+
+# Best picks today
+.\.venv\Scripts\python.exe nba_mod.py best_today 15
+
+# Paper trading
+.\.venv\Scripts\python.exe nba_mod.py collect_lines --books betmgm,draftkings,fanduel --stats pts,reb,ast
+.\.venv\Scripts\python.exe nba_mod.py paper_settle 2026-03-01
+.\.venv\Scripts\python.exe nba_mod.py paper_summary --window-days 14
 ```
 
-## Historical Dataset Ingest (Basketball-Reference)
+## Backtesting
 
-Download and curate local game/boxscore files:
+Run against local historical data for fast, offline evaluation:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\bref_ingest.py --date-from 2026-02-01 --date-to 2026-02-25
+# Build local index from Kaggle dataset
+.\.venv\Scripts\python.exe scripts\index_local_data.py --input-dir "NBA Database (1947 - Present)" --output "data\reference\kaggle_nba\index.pkl"
+
+# Run backtest
+.\.venv\Scripts\python.exe nba_mod.py backtest 2022-01-01 2022-12-31 --model full --local --save
 ```
 
-Strict mode (fails if zero games/rows are ingested):
+Also supports Basketball-Reference ingestion and SportsDataIO backfill. See `docs/runbooks/backtest.md` for details.
+
+## Quality Gate
+
+A pre-commit hook runs automated checks before every commit. Install it once:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\bref_ingest.py --date-from 2026-02-01 --date-to 2026-02-25 --fail-on-empty
+# Bash (Git Bash / Linux / macOS)
+bash scripts/install-hooks.sh
+
+# PowerShell (Windows)
+powershell scripts/install-hooks.ps1
 ```
 
-Or ingest a full season window:
+Run manually at any time:
 
 ```powershell
-.\.venv\Scripts\python.exe .\scripts\bref_ingest.py --season 2026
+.\.venv\Scripts\python.exe scripts\quality_gate.py
 ```
 
-Then run backtest against local curated files:
+## LLM Analysis
+
+Optional LLM-powered narrative reasoning for individual props. Defaults to local Ollama, falls back to Claude API if configured.
 
 ```powershell
-.\.venv\Scripts\python.exe .\nba_mod.py backtest 2026-02-19 2026-02-25 --model full --save --data-source bref
+.\.venv\Scripts\python.exe nba_mod.py llm_analyze "Anthony Edwards" MIN ORL 1 pts 25.5 -110 -110
 ```
 
-Optional custom curated folder:
+Runtime LLM calls generate analysis output only — they never modify source code.
 
-```powershell
-.\.venv\Scripts\python.exe .\nba_mod.py backtest 2026-02-19 2026-02-25 --model full --data-source bref --bref-dir "C:\path\to\data\bref\curated"
-```
+## Notes
 
-## Local Historical Backtests (Kaggle)
-
-Supported dataset:
-- https://www.kaggle.com/datasets/eoinamoore/historical-nba-data-and-player-box-scores
-
-Build local index:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\index_local_data.py --input-dir "NBA Database (1947 - Present)" --output "data\reference\kaggle_nba\index.pkl"
-```
-
-Run local-mode backtest:
-
-```powershell
-.\.venv\Scripts\python.exe .\nba_mod.py backtest 2022-01-01 2022-12-31 --model full --local --save
-```
-
-Use an explicit local index path (recommended for reproducible runs):
-
-```powershell
-.\.venv\Scripts\python.exe .\nba_mod.py backtest 2022-01-01 2022-12-31 --model full --local --local-index "data\reference\kaggle_nba\index.pkl" --save
-.\.venv\Scripts\python.exe .\nba_mod.py minutes_eval 2022-01-01 2022-01-07 --local --local-index "data\reference\kaggle_nba\index.pkl"
-```
-
-If the requested date range exceeds local index coverage, backtest falls back to NBA API and prints a warning.
-
-## External Parquet Staging (Controlled Integration)
-
-If you have a parquet dataset outside the repo (for example in `Downloads`), stage it into the project first:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\stage_local_parquet.py "C:\Users\thegr\Downloads\full_dataset_clean.parquet"
-```
-
-This copies it under `data\reference\local_parquet\raw\` and writes a manifest:
-- `data\reference\local_parquet\manifest.json`
-- `data\reference\local_parquet\latest.json`
-
-Then run your existing local index build against your canonical CSV source, and use `--local-index` in backtests.
-
-Before trusting a new local build, run a small parity check:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\parity_local_vs_nba.py 2022-01-01 2022-01-02 --model simple --local-index "data\reference\kaggle_nba\index.pkl" --save
-```
-
-This compares local vs NBA API outputs on the same date window and writes a JSON report in `data\backtest_results\`.
-
-## SportsDataIO Local Backfill
-
-If you have SportsDataIO NBA feed access, pull supported feeds into local files:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\backfill_sportsdataio.py --date-from 2026-02-01 --date-to 2026-02-28 --seasons 2023,2024,2025,2026 --max-requests 100 --resume
-```
-
-Or run through the main CLI:
-
-```powershell
-.\.venv\Scripts\python.exe .\nba_mod.py sportsdata_backfill 2026-02-01 2026-02-28 --seasons 2023,2024,2025,2026 --max-requests 100
-```
-
-Local output root:
-- `data\reference\sportsdataio\raw\`
-- Run manifests: `data\reference\sportsdataio\raw\manifests\`
-
-## Quality Gate (Recommended)
-
-Run automated checks to catch regressions and common AI-scaffold artifacts:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\quality_gate.py
-```
-
-Include slower LLM smoke tests:
-
-```powershell
-.\.venv\Scripts\python.exe .\scripts\quality_gate.py --full
-```
-
-This does:
-- Python compile checks
-- JS syntax check (`web/app.js`) if Node is installed
-- Pattern scan for known hallucination/stub anti-patterns
-- Optional end-to-end LLM CLI smoke tests (`--full`)
-
-Automation:
-- GitHub Action quick gate runs on push/PR: [.github/workflows/quality-gate.yml](.github/workflows/quality-gate.yml)
-- Repo skill definition for repeated use: [skills/quality-gate/SKILL.md](skills/quality-gate/SKILL.md)
-
-LLM commands:
-
-```powershell
-.\.venv\Scripts\python.exe .\nba_mod.py llm_analyze "Anthony Edwards" MIN ORL 1 pts 25.5 -110 -110
-.\.venv\Scripts\python.exe .\nba_mod.py llm_injury MIN 24
-.\.venv\Scripts\python.exe .\nba_mod.py llm_line "Anthony Edwards" pts 25.5 27.2
-```
-
-## API Endpoints (Primary)
-
-- `GET /api/health`
-- `GET /api/games`
-- `GET /api/teams`
-- `GET /api/players`
-- `GET /api/player_lookup?q=<name>&limit=<n>`
-- `GET /api/team_players?teamIds=<comma_csv>`
-- `GET /api/odds?...`
-- `GET /api/odds_live?...`
-- `GET /api/best_today?limit=<n>&date=<yyyy-mm-dd_optional>`
-- `GET /api/results_yesterday?limit=<n>&date=<yyyy-mm-dd_optional>`
-- `GET /api/settle_yesterday?date=<yyyy-mm-dd_optional>`
-- `GET /api/starter_accuracy?date=<yyyy-mm-dd_optional>&bookmakers=<csv>&regions=us&sport=basketball_nba&modelVariant=full|simple`
-- `POST /api/prop_ev`
-- `POST /api/prop_ev_ml`
-- `POST /api/auto_sweep`
-- `POST /api/live_projection`
-- `POST /api/parlay_ev`
-- `POST /api/llm_analyze`
-
-## Notes For Cloning/Sharing
-
-- The repo is safe to keep private on GitHub.
-- Do not commit `.env` or API keys.
-- Runtime data/cache folders are git-ignored (`data/`, `.nba_cache/`, `.tmp/`).
-- If you later make access broader, users only need this repo + dependencies + optional API keys.
-- Runtime LLM analysis does not modify source code files. Code changes remain a developer workflow task.
+- **Private repo.** Do not commit `.env` or API keys.
+- Runtime data (`data/`, `.nba_cache/`) is gitignored.
+- All CLI commands output parseable JSON on the last stdout line.
+- See `docs/` for architecture guides, runbooks, and operational procedures.
