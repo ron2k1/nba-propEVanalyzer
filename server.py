@@ -401,6 +401,10 @@ class NbaRequestHandler(BaseHTTPRequestHandler):
                     },
                 )
 
+            if path == "/api/ops_health":
+                from scripts.ops_events import read_ops_health
+                return self._send_json(200, {"success": True, **read_ops_health()})
+
             if path == "/api/games":
                 return self._send_json(200, _run_nba_command(["games"]))
 

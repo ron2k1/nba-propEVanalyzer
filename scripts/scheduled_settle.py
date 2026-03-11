@@ -14,8 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from nba_cli.journal_commands import _COMMANDS as JOURNAL_COMMANDS
+from scripts.ops_events import emit, retry_transient, classify_error
 
 DEFAULT_LOG_PATH = ROOT / "data" / "logs" / "scheduled_runs.jsonl"
+
+RUN_TYPE = "morning_settle"
 
 
 def _utc_now_iso() -> str:
@@ -35,15 +38,36 @@ def _append_jsonl(path: Path, payload: dict) -> None:
 
 def _run_step(name: str, argv: list[str]) -> dict:
     started = time.perf_counter()
-    result = JOURNAL_COMMANDS[name](argv)
+    try:
+        result = retry_transient(
+            lambda: JOURNAL_COMMANDS[name](argv),
+            max_retries=2,
+            base_delay=5.0,
+            task_name=RUN_TYPE,
+            step_name=name,
+        )
+    except Exception as exc:
+        elapsed = round(time.perf_counter() - started, 3)
+        return {
+            "name": name,
+            "argv": argv[1:],
+            "success": False,
+            "durationSec": elapsed,
+            "error": str(exc),
+            "errorClass": classify_error(exc),
+            "result": {"success": False, "error": str(exc)},
+        }
     elapsed = round(time.perf_counter() - started, 3)
-    return {
+    step_result = {
         "name": name,
         "argv": argv[1:],
         "success": bool((result or {}).get("success", False)),
         "durationSec": elapsed,
         "result": result,
     }
+    if step_result["success"]:
+        emit(RUN_TYPE, "step_completed", {"step": name, "durationSec": elapsed})
+    return step_result
 
 
 def main() -> int:
@@ -62,7 +86,7 @@ def main() -> int:
         payload = {
             "success": True,
             "dryRun": True,
-            "runType": "morning_settle",
+            "runType": RUN_TYPE,
             "createdAtUtc": _utc_now_iso(),
             "steps": [
                 {"name": "paper_settle", "argv": steps[0][1:]},
@@ -75,21 +99,39 @@ def main() -> int:
     log_path = Path(args.log_path).expanduser().resolve()
     started_at = _utc_now_iso()
     run_started = time.perf_counter()
+
+    emit(RUN_TYPE, "run_started", {"steps": ["paper_settle", "paper_summary"]})
+
     step_results = [
         _run_step("paper_settle", steps[0]),
         _run_step("paper_summary", steps[1]),
     ]
     ok = all(step["success"] for step in step_results)
+    duration = round(time.perf_counter() - run_started, 3)
     payload = {
         "success": ok,
         "dryRun": False,
-        "runType": "morning_settle",
+        "runType": RUN_TYPE,
         "createdAtUtc": started_at,
         "finishedAtUtc": _utc_now_iso(),
-        "durationSec": round(time.perf_counter() - run_started, 3),
+        "durationSec": duration,
         "steps": step_results,
     }
     _append_jsonl(log_path, payload)
+
+    if ok:
+        emit(RUN_TYPE, "run_succeeded", {"durationSec": duration})
+    else:
+        failed_step = next((s for s in step_results if not s["success"]), {})
+        emit(RUN_TYPE, "run_failed", {
+            "durationSec": duration,
+            "failedStep": failed_step.get("name", ""),
+            "error": failed_step.get("error", ""),
+            "errorClass": failed_step.get("errorClass", classify_error(
+                failed_step.get("error", "")
+            )),
+        })
+
     print(json.dumps(payload, indent=2))
     return 0 if ok else 1
 

@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 from nba_cli.line_commands import _COMMANDS as LINE_COMMANDS
 from nba_cli.scan_commands import _COMMANDS as SCAN_COMMANDS
 from nba_cli.tracking_commands import _COMMANDS as TRACKING_COMMANDS
+from scripts.ops_events import emit, retry_transient, classify_error
 
 DEFAULT_LOG_PATH = ROOT / "data" / "logs" / "scheduled_runs.jsonl"
 
@@ -32,17 +33,38 @@ def _append_jsonl(path: Path, payload: dict) -> None:
         handle.write("\n")
 
 
-def _run_step(name: str, handler, argv: list[str]) -> dict:
+def _run_step(name: str, handler, argv: list[str], run_type: str = "") -> dict:
     started = time.perf_counter()
-    result = handler(argv)
+    try:
+        result = retry_transient(
+            lambda: handler(argv),
+            max_retries=2,
+            base_delay=5.0,
+            task_name=run_type,
+            step_name=name,
+        )
+    except Exception as exc:
+        elapsed = round(time.perf_counter() - started, 3)
+        return {
+            "name": name,
+            "argv": argv[1:],
+            "success": False,
+            "durationSec": elapsed,
+            "error": str(exc),
+            "errorClass": classify_error(exc),
+            "result": {"success": False, "error": str(exc)},
+        }
     elapsed = round(time.perf_counter() - started, 3)
-    return {
+    step_result = {
         "name": name,
         "argv": argv[1:],
         "success": bool((result or {}).get("success", False)),
         "durationSec": elapsed,
         "result": result,
     }
+    if step_result["success"]:
+        emit(run_type, "step_completed", {"step": name, "durationSec": elapsed})
+    return step_result
 
 
 def _build_pipeline_plan(args) -> list[dict]:
@@ -113,23 +135,42 @@ def main() -> int:
     step_results = []
     ok = True
 
+    emit(run_type, "run_started", {
+        "steps": [step["name"] for step in planned_steps],
+    })
+
     for step in planned_steps:
-        step_result = _run_step(step["name"], step["handler"], step["argv"])
+        step_result = _run_step(step["name"], step["handler"], step["argv"], run_type=run_type)
         step_results.append(step_result)
         if not step_result["success"]:
             ok = False
             break
 
+    duration = round(time.perf_counter() - run_started, 3)
     payload = {
         "success": ok,
         "dryRun": False,
         "runType": run_type,
         "createdAtUtc": started_at,
         "finishedAtUtc": _utc_now_iso(),
-        "durationSec": round(time.perf_counter() - run_started, 3),
+        "durationSec": duration,
         "steps": step_results,
     }
     _append_jsonl(log_path, payload)
+
+    if ok:
+        emit(run_type, "run_succeeded", {"durationSec": duration})
+    else:
+        failed_step = next((s for s in step_results if not s["success"]), {})
+        emit(run_type, "run_failed", {
+            "durationSec": duration,
+            "failedStep": failed_step.get("name", ""),
+            "error": failed_step.get("error", ""),
+            "errorClass": failed_step.get("errorClass", classify_error(
+                failed_step.get("error", "")
+            )),
+        })
+
     print(json.dumps(payload, indent=2))
     return 0 if ok else 1
 
