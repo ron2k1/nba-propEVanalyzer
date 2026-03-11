@@ -43,6 +43,7 @@ BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
 CHANNEL_ID = os.getenv("DISCORD_CHANNEL_ID", "")  # optional restriction
 GUILD_ID = os.getenv("DISCORD_GUILD_ID", "")  # set for instant slash command sync
 LEANS_CHANNEL_ID = os.getenv("DISCORD_LEANS_CHANNEL_ID", "")  # auto-post model leans here
+PICKS_CHANNEL_ID = os.getenv("DISCORD_PICKS_CHANNEL_ID", "")  # send picks to this channel
 OWNER_ID = os.getenv("DISCORD_OWNER_ID", "")  # restrict commands to this user
 
 logging.basicConfig(
@@ -394,20 +395,46 @@ def main() -> int:
                 "This command is restricted to a specific channel.", ephemeral=True
             )
             return
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         data = _api_get("/api/best_today?limit=15")
-        embed = build_picks_embed(data)
-        await interaction.followup.send(embed=embed)
 
-        # Auto-post model leans to the leans channel
-        if LEANS_CHANNEL_ID and data.get("success") and data.get("modelLeans"):
+        if not data.get("success"):
+            await interaction.followup.send(
+                f"API error: {data.get('error', 'unknown')}", ephemeral=True
+            )
+            return
+
+        posted = []
+
+        # Send picks to the picks channel
+        if PICKS_CHANNEL_ID:
+            try:
+                picks_ch = client.get_channel(int(PICKS_CHANNEL_ID))
+                if picks_ch:
+                    picks_embed = build_picks_embed(data)
+                    await picks_ch.send(embed=picks_embed)
+                    posted.append(f"<#{PICKS_CHANNEL_ID}>")
+            except Exception as exc:
+                _log.warning(f"Failed to post picks: {exc}")
+
+        # Send model leans to the leans channel
+        if LEANS_CHANNEL_ID and data.get("modelLeans"):
             try:
                 leans_ch = client.get_channel(int(LEANS_CHANNEL_ID))
                 if leans_ch:
                     leans_embed = build_leans_embed(data)
                     await leans_ch.send(embed=leans_embed)
+                    posted.append(f"<#{LEANS_CHANNEL_ID}>")
             except Exception as exc:
                 _log.warning(f"Failed to post leans: {exc}")
+
+        qualified = data.get("policyQualified", [])
+        leans = data.get("modelLeans", [])
+        where = ", ".join(posted) if posted else "nowhere (no channel IDs set)"
+        await interaction.followup.send(
+            f"Posted {len(qualified)} picks + {len(leans)} leans to {where}",
+            ephemeral=True,
+        )
 
     # -- /gate ----------------------------------------------------------------
     @tree.command(name="gate", description="Current GO-LIVE gate status")
@@ -453,9 +480,12 @@ def main() -> int:
     async def on_ready():
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
+            # Copy commands to guild first, then clear global duplicates
             tree.copy_global_to(guild=guild)
-            await tree.sync(guild=guild)
-            _log.info(f"Bot ready as {client.user} — synced {len(tree.get_commands())} commands to guild {GUILD_ID}")
+            synced = await tree.sync(guild=guild)
+            tree.clear_commands(guild=None)
+            await tree.sync()  # pushes empty global list to remove duplicates
+            _log.info(f"Bot ready as {client.user} — synced {len(synced)} commands to guild {GUILD_ID} (global cleared)")
         else:
             await tree.sync()
             _log.info(f"Bot ready as {client.user} — synced {len(tree.get_commands())} commands globally (may take up to 1h)")
