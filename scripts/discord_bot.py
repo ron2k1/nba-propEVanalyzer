@@ -2,11 +2,13 @@
 """
 Discord bot with slash commands for the NBA prop pipeline.
 
-Exposes four slash commands that query the local API server:
-  /picks   — today's top policy-qualified plays
-  /gate    — current GO-LIVE gate status
-  /summary — paper trading summary (14d window)
-  /health  — ops health / task staleness
+Exposes six slash commands that query the local API server:
+  /picks    — today's top policy-qualified plays
+  /gate     — current GO-LIVE gate status
+  /summary  — paper trading summary (14d window)
+  /health   — ops health / task staleness
+  /lines    — run line movement monitor on demand
+  /injuries — check injury news for today's teams
 
 Requires:
   pip install discord.py
@@ -474,6 +476,122 @@ def main() -> int:
         data = _api_get("/api/ops_health")
         embed = build_health_embed(data)
         await interaction.followup.send(embed=embed)
+
+    # -- /lines ---------------------------------------------------------------
+    @tree.command(name="lines", description="Check for significant line movements")
+    async def cmd_lines(interaction: discord.Interaction):
+        if not _access_check(interaction):
+            await interaction.response.send_message(
+                "This command is restricted.", ephemeral=True
+            )
+            return
+        await interaction.response.defer()
+
+        # Run line monitor inline (import and call directly)
+        try:
+            from scripts.monitor_lines import _load_prev_state, _get_current_lines, _detect_movements
+            prev_state = _load_prev_state()
+            prev_lines = prev_state.get("lines", {})
+            current_lines = _get_current_lines()
+
+            if not current_lines:
+                embed = discord.Embed(
+                    title="Line Monitor — No Signals",
+                    description="No active signals to monitor right now.",
+                    color=COLOR_ORANGE,
+                    timestamp=datetime.now(UTC),
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+            movements = _detect_movements(prev_lines, current_lines)
+            line_moves = [m for m in movements if m["type"] == "line_move"]
+            odds_shifts = [m for m in movements if m["type"] == "odds_shift"]
+
+            lines = []
+            for m in line_moves[:12]:
+                lines.append(
+                    f"**{m['player']}** {m['stat'].upper()} "
+                    f"{m['prevLine']} -> {m['curLine']} ({m['direction']} {abs(m['delta'])})"
+                )
+            for m in odds_shifts[:6]:
+                lines.append(
+                    f"**{m['player']}** {m['stat'].upper()} {m['side']} odds "
+                    f"{m['prevOdds']} -> {m['curOdds']}"
+                )
+
+            if not lines:
+                lines.append("No significant movements since last check.")
+
+            embed = discord.Embed(
+                title=f"Line Monitor — {len(line_moves)} Move(s), {len(odds_shifts)} Odds Shift(s)",
+                description="\n".join(lines)[:4096],
+                color=0x9B59B6 if movements else COLOR_GREEN,
+                timestamp=datetime.now(UTC),
+            )
+            embed.add_field(name="Signals Tracked", value=str(len(current_lines)), inline=True)
+            embed.set_footer(text="Source: monitor_lines (live)")
+            await interaction.followup.send(embed=embed)
+
+        except Exception as exc:
+            _log.warning(f"Line monitor error: {exc}")
+            embed = _error_embed("Line Monitor — Error", str(exc))
+            await interaction.followup.send(embed=embed)
+
+    # -- /injuries ------------------------------------------------------------
+    @tree.command(name="injuries", description="Check injury news for today's teams")
+    async def cmd_injuries(interaction: discord.Interaction):
+        if not _access_check(interaction):
+            await interaction.response.send_message(
+                "This command is restricted.", ephemeral=True
+            )
+            return
+        await interaction.response.defer()
+
+        try:
+            from scripts.monitor_injuries import _get_todays_teams, _fetch_injuries_for_teams
+
+            teams = _get_todays_teams()
+            if not teams:
+                embed = discord.Embed(
+                    title="Injury Monitor — No Games Today",
+                    description="No games scheduled for today.",
+                    color=COLOR_ORANGE,
+                    timestamp=datetime.now(UTC),
+                )
+                await interaction.followup.send(embed=embed)
+                return
+
+            signals = _fetch_injuries_for_teams(teams, lookback_hours=12)
+
+            # Filter to meaningful signals (confidence >= 0.5)
+            notable = [s for s in signals if s.get("confidence", 0) >= 0.50]
+
+            lines = []
+            for sig in notable[:15]:
+                player = sig.get("player", "?")
+                status = sig.get("status", "?")
+                team = sig.get("team", "?")
+                conf = sig.get("confidence", 0)
+                lines.append(f"**{player}** ({team}) — {status} [{conf:.0%}]")
+
+            if not lines:
+                lines.append("No notable injury signals for today's teams.")
+
+            embed = discord.Embed(
+                title=f"Injury Monitor — {len(notable)} Signal(s)",
+                description="\n".join(lines)[:4096],
+                color=0xF1C40F if notable else COLOR_GREEN,
+                timestamp=datetime.now(UTC),
+            )
+            embed.add_field(name="Teams Checked", value=", ".join(teams), inline=False)
+            embed.set_footer(text=f"Total raw signals: {len(signals)} | Source: monitor_injuries (live)")
+            await interaction.followup.send(embed=embed)
+
+        except Exception as exc:
+            _log.warning(f"Injury monitor error: {exc}")
+            embed = _error_embed("Injury Monitor — Error", str(exc))
+            await interaction.followup.send(embed=embed)
 
     # -- Events ---------------------------------------------------------------
     @client.event

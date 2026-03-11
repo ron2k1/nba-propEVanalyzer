@@ -179,6 +179,9 @@ TASK_INTERVALS = {
     "morning_settle": 24,
     "dense_collector": 24,
     "bridge_and_build": 24,
+    "deadman_check": 4,
+    "line_monitor": 2,
+    "injury_monitor": 2,
 }
 
 # Dead-man threshold multiplier (interval * this = stale)

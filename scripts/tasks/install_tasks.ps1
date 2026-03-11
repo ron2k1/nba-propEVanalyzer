@@ -4,12 +4,15 @@
   Register NBA prop engine scheduled tasks in Windows Task Scheduler.
 
 .DESCRIPTION
-  Creates five canonical tasks:
+  Creates eight canonical tasks:
     1. NBASnapshotCollection  - collect odds every 2h (10AM-10PM)
     2. NBAFullPipeline        - collect + sweep + best daily at 5PM
     3. NBAMorningSettle       - paper_settle + paper_summary daily at 10AM
     4. NBADenseCollector      - dense near-tipoff collection daily at 3PM ET
     5. NBABridgeAndBuild      - nightly JSONL-to-SQLite bridge + closing lines at 11PM ET
+    6. NBADeadmanCheck        - dead-man health check every 4h
+    7. NBALineMonitor         - line movement detection every 2h (10AM-10PM)
+    8. NBAInjuryMonitor       - injury news polling every 2h (10AM-10PM)
 
   Run this script once as Administrator:
     powershell -ExecutionPolicy Bypass -File .\scripts\tasks\install_tasks.ps1
@@ -38,7 +41,10 @@ $tasks = @(
     @{ Name = "NBAFullPipeline";       Xml = "$taskDir\task_pipeline.xml" },
     @{ Name = "NBAMorningSettle";      Xml = "$taskDir\task_settle.xml" },
     @{ Name = "NBADenseCollector";     Xml = "$taskDir\task_dense_collect.xml" },
-    @{ Name = "NBABridgeAndBuild";     Xml = "$taskDir\task_bridge_build.xml" }
+    @{ Name = "NBABridgeAndBuild";     Xml = "$taskDir\task_bridge_build.xml" },
+    @{ Name = "NBADeadmanCheck";       Xml = "$taskDir\task_deadman.xml" },
+    @{ Name = "NBALineMonitor";        Xml = "$taskDir\task_monitor_lines.xml" },
+    @{ Name = "NBAInjuryMonitor";      Xml = "$taskDir\task_monitor_injuries.xml" }
 )
 
 # ── Legacy tasks to remove (superseded by canonical tasks) ────────────────────

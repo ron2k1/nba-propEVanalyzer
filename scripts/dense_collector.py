@@ -31,6 +31,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env", override=True)
+
 from core.nba_data_collection import (
     get_event_player_props_bulk,
     _odds_api_get,
@@ -499,6 +502,17 @@ def main():
         STATE_PATH.unlink()
 
     print(json.dumps(result, default=str))
+
+    # Discord notification (non-fatal)
+    try:
+        from scripts.discord_notify import notify_dense_collector, notify_failure
+        if result.get("success"):
+            notify_dense_collector(result)
+        else:
+            notify_failure("dense_collector", result.get("error", "unknown"), "unknown")
+    except Exception as exc:
+        print(f"Discord notify failed (non-fatal): {exc}", file=sys.stderr)
+
     return 0
 
 

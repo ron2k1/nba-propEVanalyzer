@@ -3,7 +3,8 @@
 Discord webhook notification module for scheduled NBA pipeline tasks.
 
 Sends structured rich embeds to a Discord channel via webhook URL.
-Supports: morning summary, evening picks, failure alerts, dead-man alerts.
+Supports: morning summary, evening picks, failure alerts, dead-man alerts,
+dense collector, line movement, injury alerts.
 
 Usage
 -----
@@ -12,6 +13,9 @@ Usage
         notify_evening_picks,
         notify_failure,
         notify_deadman,
+        notify_dense_collector,
+        notify_line_movement,
+        notify_injury_alert,
         send_test,
     )
 
@@ -371,6 +375,128 @@ def notify_deadman(health: dict) -> dict:
         color=COLOR_ORANGE,
         fields=fields,
         footer=f"Checked at {health.get('checkedAtUtc', '?')}",
+    )
+    return send_webhook({"embeds": [embed]})
+
+
+def notify_dense_collector(result: dict) -> dict:
+    """
+    Send dense collector completion/failure embed.
+
+    result: the final JSON output from dense_collector.py.
+    """
+    ok = result.get("success", False)
+    events = result.get("events", 0)
+    windows = result.get("windows_completed", 0)
+    total_windows = result.get("total_windows", 0)
+    api_calls = result.get("total_api_calls", 0)
+    snaps = result.get("total_snapshots", 0)
+    bridge = result.get("bridge_and_build")
+
+    fields = [
+        {"name": "Events", "value": str(events), "inline": True},
+        {"name": "Windows", "value": f"{windows}/{total_windows}", "inline": True},
+        {"name": "API Calls", "value": str(api_calls), "inline": True},
+        {"name": "Snapshots", "value": str(snaps), "inline": True},
+    ]
+
+    if bridge and isinstance(bridge, dict) and not bridge.get("error"):
+        b = bridge.get("bridge", {})
+        c = bridge.get("build_closes", {})
+        fields.append({
+            "name": "Bridge+Build",
+            "value": f"Inserted {b.get('inserted', 0)} | Closes {c.get('saved', 0)}",
+            "inline": False,
+        })
+    elif bridge and isinstance(bridge, dict) and bridge.get("error"):
+        fields.append({
+            "name": "Bridge+Build",
+            "value": f"Failed: {str(bridge['error'])[:100]}",
+            "inline": False,
+        })
+
+    color = COLOR_GREEN if ok else COLOR_RED
+    title = "Dense Collector — Complete" if ok else "Dense Collector — Failed"
+
+    embed = _build_embed(
+        title=title,
+        color=color,
+        fields=fields,
+        footer=f"Snapshots per window: {round(snaps / max(windows, 1))}",
+    )
+    return send_webhook({"embeds": [embed]})
+
+
+COLOR_PURPLE = 0x9B59B6
+
+
+def notify_line_movement(movements: list[dict]) -> dict:
+    """
+    Send line movement alert embed.
+
+    movements: list of detected line/odds changes from monitor_lines.py.
+    """
+    if not movements:
+        return {"success": True, "skipped": True, "reason": "no movements"}
+
+    line_moves = [m for m in movements if m["type"] == "line_move"]
+    odds_shifts = [m for m in movements if m["type"] == "odds_shift"]
+
+    lines = []
+    for m in line_moves[:10]:
+        arrow = "^" if m["delta"] > 0 else "v"
+        lines.append(
+            f"**{m['player']}** {m['stat'].upper()} "
+            f"{m['prevLine']} -> {m['curLine']} ({m['direction']} {abs(m['delta'])})"
+        )
+
+    for m in odds_shifts[:5]:
+        lines.append(
+            f"**{m['player']}** {m['stat'].upper()} {m['side']} odds "
+            f"{m['prevOdds']} -> {m['curOdds']}"
+        )
+
+    embed = _build_embed(
+        title=f"Line Movement — {len(line_moves)} Line(s), {len(odds_shifts)} Odds Shift(s)",
+        description="\n".join(lines) if lines else "No details",
+        color=COLOR_PURPLE,
+        footer=f"Total movements detected: {len(movements)}",
+    )
+    return send_webhook({"embeds": [embed]})
+
+
+COLOR_YELLOW = 0xF1C40F
+
+
+def notify_injury_alert(signals: list[dict]) -> dict:
+    """
+    Send injury alert embed for new high-confidence signals.
+
+    signals: list of new injury signals from monitor_injuries.py.
+    """
+    if not signals:
+        return {"success": True, "skipped": True, "reason": "no new signals"}
+
+    lines = []
+    for sig in signals[:12]:
+        player = sig.get("player", "?")
+        status = sig.get("status", "?")
+        team = sig.get("team", "?")
+        confidence = sig.get("confidence", 0)
+        source = sig.get("source", "")
+        lines.append(
+            f"**{player}** ({team}) — {status} "
+            f"[{confidence:.0%} conf{', ' + source if source else ''}]"
+        )
+
+    embed = _build_embed(
+        title=f"Injury Alert — {len(signals)} New Signal(s)",
+        description="\n".join(lines),
+        color=COLOR_YELLOW,
+        fields=[
+            {"name": "Impact", "value": "Check today's picks for affected players", "inline": False},
+        ],
+        footer=f"Signals above confidence threshold",
     )
     return send_webhook({"embeds": [embed]})
 
