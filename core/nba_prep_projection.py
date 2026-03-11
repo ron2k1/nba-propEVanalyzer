@@ -413,6 +413,7 @@ def compute_projection(
         # function handles that internally).
         _usage_mults = {}
         _usage_ctx = None
+        _star_replacement = False
         if player_team_abbr:
             try:
                 from .nba_injury_news import compute_usage_adjustment_with_news
@@ -422,8 +423,23 @@ def compute_projection(
                 if _usg.get("success") and _usg.get("absentTeammates"):
                     _usage_mults = _usg.get("statMultipliers") or {}
                     _usage_ctx = _usg
-            except Exception:
-                pass
+                    # Star replacement detection: cap was hit AND the biggest
+                    # absent teammate had >= 2x the target player's usage rate.
+                    if _usg.get("capHit") and \
+                       (_usg.get("maxAbsentUsg", 0) >= 2 * _usg.get("targetUsgPct", 100)):
+                        _star_replacement = True
+                elif not _usg.get("success"):
+                    import logging
+                    logging.getLogger("nba_engine.projection").warning(
+                        "USG adjustment returned success=False for %s/%s: %s",
+                        player_id, player_team_abbr, _usg.get("error", "unknown"),
+                    )
+            except Exception as _usg_err:
+                import logging
+                logging.getLogger("nba_engine.projection").warning(
+                    "USG adjustment failed for player_id=%s team=%s: %s",
+                    player_id, player_team_abbr, _usg_err,
+                )
 
         minutes_ctx = _project_minutes(logs, rolling, splits, is_home, is_b2b)
         base_projected_minutes = minutes_ctx["projectedMinutes"] or 0.0
@@ -832,6 +848,7 @@ def compute_projection(
             "asOfDate": str(as_of_date) if as_of_date is not None else None,
             "minutesProjection": minutes_ctx,
             "usageAdjustment": _usage_ctx,
+            "starReplacementFlag": _star_replacement,
         }
     except Exception as e:
         return {"success": False, "error": str(e), "traceback": traceback.format_exc()}

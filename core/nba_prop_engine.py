@@ -385,6 +385,7 @@ def compute_prop_ev(
         "modelMarketDelta": model_market_delta,
         "commenceTime": commence_time,
         "outcomeModelWinProb": outcome_model_prob,
+        "starReplacementFlag": proj_data.get("starReplacementFlag", False),
     }
 
 
@@ -670,6 +671,7 @@ def compute_auto_line_sweep(
             "stat": stat_key,
             "projection": proj,
             "projectionValue": projection_val,
+            "gamesPlayed": proj_data.get("gamesPlayed"),
             "minutesProjection": proj_data.get("minutesProjection"),
             "marketKey": offer_data.get("marketKey"),
             "eventId": offer_data.get("eventId"),
@@ -694,6 +696,7 @@ def compute_auto_line_sweep(
             # Per-player sweep timing: when evaluation started and completed (UTC)
             "sweepStartedUtc": _sweep_started,
             "sweepCompletedUtc": _sweep_completed,
+            "starReplacementFlag": proj_data.get("starReplacementFlag", False),
         }
     except Exception as e:
         return {"success": False, "error": str(e)}

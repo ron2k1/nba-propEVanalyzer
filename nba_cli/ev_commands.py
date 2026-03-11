@@ -356,6 +356,7 @@ def _handle_auto_sweep(argv):
                 "ev": best_ev,
                 "commenceTime": result.get("commenceTime"),
                 "minutesProjection": result.get("minutesProjection"),
+                "gamesPlayed": result.get("gamesPlayed"),
             }
             journal_res = log_prop_ev_entry(
                 journal_like,
@@ -408,6 +409,8 @@ def _handle_auto_sweep(argv):
             "projection": stat_proj,
             "minutesProjection": result.get("minutesProjection"),
             "nBooksOffering": result.get("nBooksOffering"),
+            "gamesPlayed": result.get("gamesPlayed"),
+            "starReplacementFlag": result.get("starReplacementFlag", False),
         }
         qualifies_ok, _ = _qualifies(sweep_qual_result, stat, used_real_line=True)
         if qualifies_ok and best_ev_data:

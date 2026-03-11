@@ -36,6 +36,8 @@ SIGNAL_SPEC = {
         # Gap 8.8: minimum number of books posting this prop for market validation.
         # A prop offered by only 1 book may be a pricing error or test line — not consensus.
         # Absent (backtest / older result dicts): gate is skipped for backward compat.
+        "min_games_played":       _pc.MIN_GAMES_PLAYED,
+        "min_season_avg_minutes": _pc.MIN_SEASON_AVG_MINUTES,
         "min_books_offering": 2,
         # Gap 8.12: maximum allowed cross-book line stdev (diagnostic, not a blocker yet).
         # bookLineStdev=0 means all books quote identical lines (stale consensus risk).
@@ -65,6 +67,22 @@ def _qualifies(prop_result: dict, stat: str, used_real_line=None) -> tuple:
     if stat_key in spec.get("real_line_required_stats", set()):
         if not used_real_line:
             return False, f"real_line_required:{stat_key}"
+    # Player quality filters (live pipeline only).
+    # gamesPlayed present in compute_prop_ev() but absent from backtest _ml_prop.
+    _gp_raw = (prop_result or {}).get("gamesPlayed")
+    if _gp_raw is not None:
+        _gp = int(_gp_raw)
+        _min_gp = int(spec.get("min_games_played", 10))
+        if 0 < _gp < _min_gp:
+            return False, f"insufficient_games:{_gp}"
+        _mins_proj_g = (prop_result or {}).get("minutesProjection") or {}
+        _season_avg_mins = float(_mins_proj_g.get("seasonMinutes") or 0)
+        _min_sam = float(spec.get("min_season_avg_minutes", 10.0))
+        if _season_avg_mins > 0 and _season_avg_mins < _min_sam:
+            return False, f"low_minutes_player:{_season_avg_mins:.1f}"
+    # Star replacement gate: block backups replacing a star (cap hit + absent USG >= 2x target)
+    if (prop_result or {}).get("starReplacementFlag"):
+        return False, "star_replacement_block"
     ev    = (prop_result or {}).get("ev") or {}
     eo    = float((ev.get("over")  or {}).get("edge") or 0.0)
     eu    = float((ev.get("under") or {}).get("edge") or 0.0)

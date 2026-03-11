@@ -122,6 +122,8 @@ def compute_usage_adjustment(player_id, team_abbr, season=None, as_of_date=None,
                 "absentTeammates": [],
                 "massAbsenceTier": tier_name,
                 "absentStarterCount": absent_starter_count,
+                "capHit": False,
+                "maxAbsentUsg": 0,
                 "note": "No high-usage teammates flagged as inactive.",
             }
 
@@ -178,6 +180,8 @@ def compute_usage_adjustment(player_id, team_abbr, season=None, as_of_date=None,
             ],
             "massAbsenceTier": tier_name,
             "absentStarterCount": absent_starter_count,
+            "capHit": effective_mult >= tier["cap"],
+            "maxAbsentUsg": max((p["usgPct"] for p in absent), default=0),
             "newsOverridden": _news_overridden,
         }
     except Exception as e:

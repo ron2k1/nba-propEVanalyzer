@@ -31,6 +31,8 @@ def _make_prop(
     reference_book: dict | None = None,
     recent_high_variance: bool = False,
     n_books_offering: int | None = None,
+    games_played: int | None = None,
+    season_minutes: float | None = None,
 ) -> dict:
     """
     Build a minimal prop_result dict that _qualifies() can consume.
@@ -62,6 +64,10 @@ def _make_prop(
         result["nBooksOffering"] = n_books_offering
     if recent_high_variance:
         result["projection"] = {"recentHighVariance": True}
+    if games_played is not None:
+        result["gamesPlayed"] = games_played
+    if season_minutes is not None:
+        result.setdefault("minutesProjection", {})["seasonMinutes"] = season_minutes
     return result
 
 
@@ -94,6 +100,12 @@ class TestSignalSpecInvariants:
 
     def test_real_line_required_stats(self):
         assert SIGNAL_SPEC["v1"]["real_line_required_stats"] == {"reb"}
+
+    def test_min_games_played(self):
+        assert SIGNAL_SPEC["v1"]["min_games_played"] == 10
+
+    def test_min_season_avg_minutes(self):
+        assert SIGNAL_SPEC["v1"]["min_season_avg_minutes"] == 10.0
 
     def test_min_books_offering(self):
         assert SIGNAL_SPEC["v1"]["min_books_offering"] == 2
@@ -207,6 +219,100 @@ class TestRealLineRequired:
         prop = _make_prop(over_edge=0.00)
         ok, reason = _qualifies(prop, stat="ast", used_real_line=False)
         assert not reason.startswith("real_line_required")
+
+
+# ---------------------------------------------------------------------------
+# Gate 2b — player quality (games played + season minutes)
+# ---------------------------------------------------------------------------
+
+class TestPlayerQualityGates:
+    """
+    Player quality gates fire only when gamesPlayed is present (live pipeline).
+    Absent gamesPlayed (backtest) → gate skipped entirely.
+    """
+
+    def test_games_played_absent_skips_gate(self):
+        prop = _make_prop(probOver=0.05, probUnder=0.95, over_edge=0.10)
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "insufficient_games" not in reason
+
+    def test_games_played_below_threshold_fails(self):
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            games_played=3,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert ok is False
+        assert "insufficient_games:3" in reason
+
+    def test_games_played_at_threshold_passes(self):
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            games_played=10,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "insufficient_games" not in reason
+
+    def test_games_played_above_threshold_passes(self):
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            games_played=50,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "insufficient_games" not in reason
+
+    def test_games_played_zero_skips_gate(self):
+        # gamesPlayed=0: condition is `0 < _gp` which is False → gate skipped
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            games_played=0,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "insufficient_games" not in reason
+
+    def test_season_minutes_below_threshold_fails(self):
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            games_played=20, season_minutes=5.5,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert ok is False
+        assert "low_minutes_player:5.5" in reason
+
+    def test_season_minutes_at_threshold_passes(self):
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            games_played=20, season_minutes=10.0,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "low_minutes_player" not in reason
+
+    def test_season_minutes_above_threshold_passes(self):
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            games_played=20, season_minutes=30.0,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "low_minutes_player" not in reason
+
+    def test_season_minutes_zero_skips_gate(self):
+        # seasonMinutes=0: condition `_sam > 0` is False → gate skipped
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            games_played=20, season_minutes=0.0,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "low_minutes_player" not in reason
+
+    def test_season_minutes_skipped_when_games_absent(self):
+        # gamesPlayed absent → entire quality block skipped, even with low minutes
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95, over_edge=0.10,
+            season_minutes=2.0,
+        )
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "low_minutes_player" not in reason
+        assert "insufficient_games" not in reason
 
 
 # ---------------------------------------------------------------------------
@@ -930,3 +1036,43 @@ class TestBinBoundaryMapping:
         assert is_blocked == blocked, (
             f"bin {computed_bin} blocked={is_blocked}, expected {blocked}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Gate 11 — star replacement block
+# ---------------------------------------------------------------------------
+
+class TestStarReplacementBlock:
+    """
+    When a backup player is replacing a star (cap hit + absent USG >= 2x target),
+    the signal should be blocked with 'star_replacement_block'.
+    """
+
+    def test_star_replacement_flag_true_blocks(self):
+        prop = _make_prop(probOver=0.05, probUnder=0.95, over_edge=0.10)
+        prop["starReplacementFlag"] = True
+        ok, reason = _qualifies(prop, stat="pts")
+        assert ok is False
+        assert reason == "star_replacement_block"
+
+    def test_star_replacement_flag_false_passes(self):
+        prop = _make_prop(probOver=0.05, probUnder=0.95, over_edge=0.10)
+        prop["starReplacementFlag"] = False
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "star_replacement_block" not in reason
+
+    def test_star_replacement_flag_absent_passes(self):
+        prop = _make_prop(probOver=0.05, probUnder=0.95, over_edge=0.10)
+        ok, reason = _qualifies(prop, stat="pts")
+        assert "star_replacement_block" not in reason
+
+    def test_star_replacement_blocks_before_other_gates(self):
+        """Star replacement should block even if all other gates would pass."""
+        prop = _make_prop(
+            probOver=0.05, probUnder=0.95,
+            over_edge=0.00, under_edge=0.12,
+        )
+        prop["starReplacementFlag"] = True
+        ok, reason = _qualifies(prop, stat="pts")
+        assert ok is False
+        assert reason == "star_replacement_block"
