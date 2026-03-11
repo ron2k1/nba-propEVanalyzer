@@ -98,6 +98,8 @@ Run against local historical data for fast, offline evaluation:
 .\.venv\Scripts\python.exe nba_mod.py backtest 2022-01-01 2022-12-31 --model full --local --save
 ```
 
+Rebuild the index after each season (or mid-season) to pick up trades, 10-day contracts, and roster changes. Stale roster data won't crash backtests but will silently degrade projection accuracy for traded players.
+
 Also supports Basketball-Reference ingestion and SportsDataIO backfill. See `docs/runbooks/backtest.md` for details.
 
 ## Quality Gate
