@@ -242,16 +242,15 @@ def _append_journal_entry(entry):
 
 
 def _entry_key(entry):
+    # Key aligned with SQLite UNIQUE INDEX (player_id, stat, game_date_ct) and
+    # _cleanup_entry_key (pickDate, playerKey, stat).  A player can only play
+    # one game per date, so opponent / isHome / isB2B are redundant for dedup.
+    # Line and odds excluded: movement between sweeps should update the existing
+    # entry (via _dedupe_latest) rather than create a duplicate.
     return (
         str(entry.get("pickDate", "")),
         _as_int(entry.get("playerId"), 0),
-        str(entry.get("opponentAbbr", "")).upper(),
-        bool(entry.get("isHome")),
-        bool(entry.get("isB2B")),
         str(entry.get("stat", "")).lower(),
-        safe_round(_as_float(entry.get("line"), 0.0), 3),
-        _as_int(entry.get("overOdds"), 0),
-        _as_int(entry.get("underOdds"), 0),
     )
 
 
@@ -280,7 +279,6 @@ def _cleanup_entry_key(entry):
         str(entry.get("pickDate", "")),
         player_key,
         str(entry.get("stat", "")).lower(),
-        safe_round(_as_float(entry.get("line", entry.get("lineAtBet")), 0.0), 3),
     )
 
 
@@ -359,6 +357,16 @@ def log_prop_ev_entry(
                      f"not in event {_home_t}@{_away_t}",
         }
     player_team_abbr = _actual_team or player_team_abbr
+
+    # Player quality gate: reject deep-bench / low-sample players before journaling
+    from .policy_config import MIN_GAMES_PLAYED, MIN_SEASON_AVG_MINUTES
+    _gp = (prop_result or {}).get("gamesPlayed")
+    if _gp is not None and 0 < int(_gp) < MIN_GAMES_PLAYED:
+        return {"success": False, "error": f"insufficient_games:{_gp}"}
+    _mins_ctx = (prop_result or {}).get("minutesProjection") or {}
+    _sam = float(_mins_ctx.get("seasonMinutes") or 0)
+    if _gp is not None and _sam > 0 and _sam < MIN_SEASON_AVG_MINUTES:
+        return {"success": False, "error": f"low_minutes_player:{_sam:.1f}"}
 
     projection = (prop_result or {}).get("projection") or {}
     ev = (prop_result or {}).get("ev") or {}
@@ -824,8 +832,12 @@ def auto_settle_today():
     }
 
 
-def _load_line_history(date_str):
-    """Load line-history JSONL for date_str → {(player_name_lower, stat_lower): [snapshots]}."""
+def _load_line_history(date_str, phase=None):
+    """Load line-history JSONL for date_str → {(player_name_lower, stat_lower): [snapshots]}.
+
+    phase: if set (e.g. "pregame"), only include snapshots with matching line_phase.
+           Legacy snapshots missing line_phase default to "pregame".
+    """
     import json as _json
     path = DATA_DIR / "line_history" / f"{date_str}.jsonl"
     if not path.exists():
@@ -840,6 +852,8 @@ def _load_line_history(date_str):
                 try:
                     row = _json.loads(raw)
                 except Exception:
+                    continue
+                if phase and row.get("line_phase", "pregame") != phase:
                     continue
                 name = str(row.get("player_name") or "").lower()
                 stat = str(row.get("stat") or "").lower()
@@ -1127,8 +1141,8 @@ def best_plays_for_date(date_str=None, limit=15, unique_props=True):
             if _fallback:
                 row["sweptAtFallback"] = _fallback
 
-    # Enrich with line movement from today's collected snapshots
-    line_history = _load_line_history(target)
+    # Enrich with line movement from today's collected snapshots (pregame only)
+    line_history = _load_line_history(target, phase="pregame")
     if line_history:
         for row in top_rows:
             p_name = str(row.get("playerName") or "").lower()
