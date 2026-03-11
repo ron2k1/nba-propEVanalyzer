@@ -1329,7 +1329,15 @@ def _load_leans_for_date(target_date: str, limit: int = 50, include_outcomes: bo
             entry["pnl"] = r["pnl_units"]
             entry["actual"] = r["actual_stat"]
         leans.append(entry)
-    return leans
+
+    # Deduplicate by (player, stat, line, side) — keep the entry with the highest edge
+    seen: dict[tuple, dict] = {}
+    for e in leans:
+        key = (e["playerId"], e["stat"], e["line"], e["recommendedSide"])
+        prev = seen.get(key)
+        if prev is None or (e.get("edge") or 0) > (prev.get("edge") or 0):
+            seen[key] = e
+    return list(seen.values())
 
 
 def leans_for_date(date_str=None, limit=50):
