@@ -1,5 +1,5 @@
 // Picks tab — best_today table + top_picks + best parlay + LLM rundown
-import { apiGet, escapeHtml, fmt, pct, statusPill, toast, evColorClass, exportCsv } from './api.js';
+import { apiGet, escapeHtml, fmt, pct, statusPill, toast, evColorClass, exportCsv, utcToEastern, minutesAgo } from './api.js';
 import { renderEdgeScatter } from './charts.js';
 
 export default function () {
@@ -31,8 +31,17 @@ export default function () {
     rundownResult: null,
     rundownError: '',
 
+    // Staleness tick — forces re-evaluation of sweptDisplay every 60s
+    _staleTick: 0,
+    _staleTimer: null,
+
     async init() {
       this.loadBestToday();
+      this._staleTimer = setInterval(() => { this._staleTick++; }, 60_000);
+    },
+
+    destroy() {
+      if (this._staleTimer) { clearInterval(this._staleTimer); this._staleTimer = null; }
     },
 
     async loadBestToday() {
@@ -191,6 +200,7 @@ export default function () {
         { label: 'Projection', key: 'projection' },
         { label: 'EV%', key: 'recommendedEvPct' },
         { label: 'Odds', key: r => r.recommendedOdds || '' },
+        { label: 'Swept', key: r => r.sweptAtUtc ? utcToEastern(r.sweptAtUtc) : r.sweptAtFallback || '' },
       ], 'picks_' + (this.bestResult?.date || 'today') + '.csv');
       toast('CSV exported', 'ok');
     },
@@ -213,7 +223,24 @@ export default function () {
       Alpine.store('tab').set('analyze');
     },
 
+    // Swept-at display: returns { text, cssClass } for the swept timestamp
+    // References _staleTick to force Alpine re-evaluation every 60s
+    sweptDisplay(r) {
+      void this._staleTick; // touch reactive prop to trigger recompute
+      const utc = r.sweptAtUtc;
+      const fallback = r.sweptAtFallback;
+      if (utc) {
+        const ago = minutesAgo(utc);
+        const et = utcToEastern(utc);
+        const stale = ago !== null && ago > 60;
+        const agoText = ago !== null ? ` (${ago}m ago)` : '';
+        return { text: et + agoText, cssClass: stale ? 'swept-cell stale' : 'swept-cell' };
+      }
+      if (fallback) return { text: fallback, cssClass: 'swept-cell' };
+      return { text: '', cssClass: 'swept-cell' };
+    },
+
     // Helpers exposed to template
-    fmt, pct, statusPill, escapeHtml, evColorClass,
+    fmt, pct, statusPill, escapeHtml, evColorClass, utcToEastern, minutesAgo,
   };
 }

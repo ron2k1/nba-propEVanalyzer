@@ -1,5 +1,5 @@
 // Lines tab - collect_lines, roster_sweep, daily_ops pipeline
-import { apiGet } from './api.js';
+import { apiGet, utcToEastern } from './api.js';
 
 const LONG_TIMEOUT_MS = 1_800_000;
 const STATUS_POLL_MS = 2_000;
@@ -165,6 +165,8 @@ export default function () {
         this.stopPollingIfIdle();
       }
     },
+
+    utcToEastern,
 
     async cancelPipeline() {
       try {
