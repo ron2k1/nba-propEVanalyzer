@@ -489,10 +489,12 @@ def main() -> int:
 
         # Run line monitor inline (import and call directly)
         try:
+            import asyncio
             from scripts.monitor_lines import _load_prev_state, _get_current_lines, _detect_movements
+            loop = asyncio.get_running_loop()
             prev_state = _load_prev_state()
             prev_lines = prev_state.get("lines", {})
-            current_lines = _get_current_lines()
+            current_lines = await loop.run_in_executor(None, _get_current_lines)
 
             if not current_lines:
                 embed = discord.Embed(
@@ -549,9 +551,11 @@ def main() -> int:
         await interaction.response.defer()
 
         try:
+            import asyncio
             from scripts.monitor_injuries import _get_todays_teams, _fetch_injuries_for_teams
 
-            teams = _get_todays_teams()
+            loop = asyncio.get_running_loop()
+            teams = await loop.run_in_executor(None, _get_todays_teams)
             if not teams:
                 embed = discord.Embed(
                     title="Injury Monitor — No Games Today",
@@ -562,7 +566,9 @@ def main() -> int:
                 await interaction.followup.send(embed=embed)
                 return
 
-            signals = _fetch_injuries_for_teams(teams, lookback_hours=12)
+            signals = await loop.run_in_executor(
+                None, lambda: _fetch_injuries_for_teams(teams, lookback_hours=12)
+            )
 
             # Filter to meaningful signals (confidence >= 0.5)
             notable = [s for s in signals if s.get("confidence", 0) >= 0.50]
