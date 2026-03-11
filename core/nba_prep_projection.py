@@ -405,12 +405,19 @@ def compute_projection(
         # live-only since the backtest caller does not pass that argument.
         # Computed here so roster_context is available for
         # compute_minutes_multiplier below.
+        #
+        # Uses compute_usage_adjustment_with_news() so that news-reported
+        # "Out" / "Doubtful" teammates are reclassified to "Likely Inactive"
+        # BEFORE the full USG redistribution runs.  Falls back to the base
+        # compute_usage_adjustment() if news fetch fails (the _with_news
+        # function handles that internally).
         _usage_mults = {}
         _usage_ctx = None
         if player_team_abbr:
             try:
-                _usg = compute_usage_adjustment(
-                    player_id, player_team_abbr, season, as_of_date=as_of_date
+                from .nba_injury_news import compute_usage_adjustment_with_news
+                _usg = compute_usage_adjustment_with_news(
+                    player_id, player_team_abbr, season
                 )
                 if _usg.get("success") and _usg.get("absentTeammates"):
                     _usage_mults = _usg.get("statMultipliers") or {}

@@ -9,7 +9,7 @@ import requests
 from nba_api.stats.static import teams as nba_teams_static
 
 from .nba_data_collection import cache_get, cache_set, get_team_roster_status, safe_round
-from .nba_data_prep import compute_usage_adjustment, _USG_STAT_ELASTICITY
+from .nba_data_prep import compute_usage_adjustment
 
 NEWS_API_BASE_URL = "https://newsapi.org/v2/everything"
 
@@ -185,66 +185,51 @@ def fetch_nba_injury_news(team_abbr, lookback_hours=24, max_articles=50):
 
 
 def compute_usage_adjustment_with_news(player_id, team_abbr, season=None, lookback_hours=24):
-    """
-    Layer injury/news signals onto existing usage adjustment logic.
-    """
-    base = compute_usage_adjustment(player_id, team_abbr, season=season)
-    if not base.get("success"):
-        return base
+    """Layer injury/news signals onto usage adjustment via status overrides.
 
+    Instead of applying a small post-hoc bump, this function builds a
+    ``status_overrides`` dict from news signals and passes it into
+    ``compute_usage_adjustment()`` so that players reported "Out" or
+    "Doubtful" by news are reclassified to "Likely Inactive" *before*
+    the full USG redistribution runs.  This means a backup PG whose
+    starting PG is news-reported as "Out" gets the complete usage
+    redistribution, not just a +3% bump.
+    """
     news = fetch_nba_injury_news(team_abbr, lookback_hours=lookback_hours)
-    if not news.get("success"):
-        return {
-            **base,
-            "newsSignals": [],
-            "newsStatus": "unavailable",
-            "newsError": news.get("error"),
-        }
 
+    # Build status_overrides from news signals
     target_pid = int(player_id)
+    status_overrides = {}
     impactful = []
-    bump = 0.0
-    for sig in news.get("signals", []) or []:
-        pid = int(sig.get("playerId") or 0)
-        if pid == target_pid:
-            continue
-        status = str(sig.get("status", ""))
-        conf = float(sig.get("confidence") or 0.0)
-        if status == "Out" and conf >= 0.70:
-            impactful.append(sig)
-            bump += 0.03
-        elif status == "Doubtful" and conf >= 0.70:
-            impactful.append(sig)
-            bump += 0.02
-        elif status == "Questionable" and conf >= 0.70:
-            impactful.append(sig)
-            bump += 0.01
+    if news.get("success"):
+        for sig in news.get("signals", []) or []:
+            pid = int(sig.get("playerId") or 0)
+            if pid == target_pid:
+                continue
+            status = str(sig.get("status", ""))
+            conf = float(sig.get("confidence") or 0.0)
+            if status == "Out" and conf >= 0.70:
+                status_overrides[pid] = "Likely Inactive"
+                impactful.append(sig)
+            elif status == "Doubtful" and conf >= 0.70:
+                status_overrides[pid] = "Likely Inactive"
+                impactful.append(sig)
 
-    bump = min(0.12, bump)
-    news_mult = 1.0 + bump
+    # Run usage adjustment with overrides baked in
+    result = compute_usage_adjustment(
+        player_id, team_abbr, season=season,
+        status_overrides=status_overrides or None,
+    )
+    if not result.get("success"):
+        return result
 
-    base_mults = dict(base.get("statMultipliers") or {})
-    boosted_mults = {}
-    for stat, base_mult in base_mults.items():
-        elasticity = float(_USG_STAT_ELASTICITY.get(stat, 0.5))
-        news_stat_mult = news_mult ** elasticity
-        boosted_mults[stat] = safe_round(float(base_mult) * news_stat_mult, 3)
+    # Attach news metadata
+    result["newsSignals"] = impactful
+    result["newsSignalCount"] = len(impactful)
+    result["newsLookbackHours"] = int(lookback_hours)
+    result["newsStatus"] = "ok" if news.get("success") else "unavailable"
+    if not news.get("success"):
+        result["newsError"] = news.get("error")
 
-    out = {
-        **base,
-        "statMultipliersBase": base_mults,
-        "statMultipliers": boosted_mults,
-        "newsSignals": impactful,
-        "newsSignalCount": len(impactful),
-        "newsLookbackHours": int(lookback_hours),
-        "newsUsageBump": safe_round(bump, 3),
-        "newsUsageMultiplier": safe_round(news_mult, 3),
-        "newsStatus": "ok",
-    }
-
-    if out.get("estimatedNewUsgPct") is not None:
-        out["estimatedNewUsgPctBase"] = out.get("estimatedNewUsgPct")
-        out["estimatedNewUsgPct"] = safe_round(float(out.get("estimatedNewUsgPct")) * news_mult, 2)
-
-    return out
+    return result
 

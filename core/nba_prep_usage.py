@@ -51,7 +51,19 @@ def _classify_absence_tier(players, player_id):
     return "normal", absent_starters
 
 
-def compute_usage_adjustment(player_id, team_abbr, season=None, as_of_date=None):
+def compute_usage_adjustment(player_id, team_abbr, season=None, as_of_date=None,
+                              status_overrides=None):
+    """Compute usage-rate adjustment for a player given teammate absences.
+
+    Parameters
+    ----------
+    status_overrides : dict[int, str] | None
+        Mapping of playerId → forced status (e.g. ``"Likely Inactive"``).
+        Used by the news layer to inject game-day "Out" signals into the
+        roster before redistribution runs.  Only overrides players whose
+        current status is ``"Active"`` to avoid demoting already-inactive
+        players.
+    """
     if season is None:
         season = CURRENT_SEASON
 
@@ -61,6 +73,20 @@ def compute_usage_adjustment(player_id, team_abbr, season=None, as_of_date=None)
             return {"success": False, "error": roster_data.get("error", "Roster fetch failed")}
 
         players = roster_data["players"]
+
+        # Apply news-driven status overrides — reclassify "Active" players
+        # that news reports as "Out" / "Doubtful" so the full usage
+        # redistribution runs for them (not just a small bump).
+        _news_overridden = []
+        if status_overrides:
+            for p in players:
+                pid = p["playerId"]
+                override = status_overrides.get(pid)
+                if override and p["status"] == "Active":
+                    p["status"] = override
+                    _news_overridden.append({"playerId": pid, "name": p.get("name"),
+                                             "overriddenTo": override})
+
         target = next((p for p in players if p["playerId"] == player_id), None)
         if not target:
             return {
@@ -152,6 +178,7 @@ def compute_usage_adjustment(player_id, team_abbr, season=None, as_of_date=None)
             ],
             "massAbsenceTier": tier_name,
             "absentStarterCount": absent_starter_count,
+            "newsOverridden": _news_overridden,
         }
     except Exception as e:
         return {"success": False, "error": str(e), "traceback": traceback.format_exc()}
