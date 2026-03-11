@@ -30,6 +30,10 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
+
+from dotenv import load_dotenv
+load_dotenv(ROOT / ".env", override=True)
+
 _log = logging.getLogger("discord_notify")
 
 # ---------------------------------------------------------------------------
