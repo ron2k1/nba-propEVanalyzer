@@ -5,6 +5,7 @@ import glob as _glob
 import json
 import math
 import os
+import warnings
 from statistics import NormalDist
 
 from .nba_data_collection import PROJECTION_CONFIG, safe_div, safe_round
@@ -130,6 +131,12 @@ def _sigmoid(x):
 
 def _apply_temp_scaling(p, T, eps=1e-9):
     """Shrink probability p toward 0.5 using temperature T > 1."""
+    if T <= 0:
+        warnings.warn(
+            f"_apply_temp_scaling called with invalid T={T}; returning raw p",
+            stacklevel=2,
+        )
+        return p  # invalid T — return uncalibrated probability
     p = max(eps, min(1.0 - eps, p))
     logit_p = math.log(p / (1.0 - p))
     return _sigmoid(logit_p / T)

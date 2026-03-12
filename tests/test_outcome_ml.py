@@ -284,7 +284,7 @@ def test_best_plays_for_date_adds_outcome_model_scores(monkeypatch):
     monkeypatch.setattr(bt, "_load_journal_entries", lambda: [base_entry])
     monkeypatch.setattr(bt, "_sqlite_fallback_entries", lambda target: [])
     monkeypatch.setattr(bt, "_get_playing_teams_today", lambda target_date=None: {"DET", "BKN"})
-    monkeypatch.setattr(bt, "_load_line_history", lambda target: {})
+    monkeypatch.setattr(bt, "_load_line_history", lambda target, phase=None: {})
 
     def _fake_score(rows, model_path=None):
         enriched = []
