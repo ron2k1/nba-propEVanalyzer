@@ -122,16 +122,16 @@ class TestCalEVGatesPipeline(unittest.TestCase):
         Compute EV for a pts prop with strong edge, then verify the output
         dict has every field that _qualifies() reads from prop_result["ev"].
 
-        Uses projection=40 vs line=24.5 to ensure the calibrated probOver
-        (after temperature scaling with T=1.81) still lands in bin 9.
+        Uses projection=50 vs line=24.5 to ensure the calibrated probOver
+        (after temperature scaling with pts T up to ~3.3) still lands in bin 9.
 
         Fields consumed by _qualifies():
           ev.over.edge, ev.under.edge, ev.probOver, ev.probUnder
         """
-        # projection=40, line=24.5, stdev=6 -> raw probOver ~0.995
-        # After calibration (T=1.81), probOver shrinks but stays in bin 9 (>= 0.90).
+        # projection=50, line=24.5, stdev=6 -> raw probOver ~0.99999
+        # After aggressive calibration (T=3.29), probOver stays in bin 9 (>= 0.90).
         result = compute_ev(
-            projection=40.0,
+            projection=50.0,
             line=24.5,
             over_odds=-110,
             under_odds=-110,
@@ -163,15 +163,15 @@ class TestCalEVGatesPipeline(unittest.TestCase):
         self.assertGreaterEqual(result["probUnder"], 0.0)
         self.assertLessEqual(result["probUnder"], 1.0)
 
-        # With projection=40 vs line=24.5, over edge should be strongly positive.
+        # With projection=50 vs line=24.5, over edge should be strongly positive.
         self.assertGreater(result["over"]["edge"], 0.08,
-                           "Strong over edge expected for proj=40 vs line=24.5")
+                           "Strong over edge expected for proj=50 vs line=24.5")
 
         # Calibrated probOver should be in bin 9 for this extreme gap.
         prob_over = result["probOver"]
         bin_idx = max(0, min(9, int(prob_over * 10)))
         self.assertEqual(bin_idx, 9,
-                         f"Expected bin 9 for proj=40 vs line=24.5, got bin {bin_idx} "
+                         f"Expected bin 9 for proj=50 vs line=24.5, got bin {bin_idx} "
                          f"(probOver={prob_over:.4f})")
 
         # Now verify that the wrapped result actually passes _qualifies().
@@ -293,20 +293,20 @@ class TestCalEVGatesPipeline(unittest.TestCase):
         confidence to pass every gate in _qualifies().
 
         Uses an extreme gap to ensure that even after calibration temperature
-        scaling (T=1.81 for pts, or T=1.32 for bin-0), probOver stays below
-        0.10 (bin 0).
+        scaling (pts T up to ~3.3), probOver stays below 0.10 (bin 0).
 
         This is the canonical 'bin 0 UNDER on pts' signal that drives the
         production edge profile.
         """
-        # projection=10, line=25.5, stdev=6 -> raw probOver ~0.005
-        # Even with max temperature compression, probOver stays in bin 0.
+        # projection=5, line=25.5, stdev=4 -> raw probOver ~0.0000001
+        # Even with aggressive temperature compression (T=3.29), probOver
+        # stays well below 0.10 (bin 0).
         result = compute_ev(
-            projection=10.0,
+            projection=5.0,
             line=25.5,
             over_odds=-110,
             under_odds=-110,
-            stdev=6.0,
+            stdev=4.0,
             stat="pts",
         )
         self.assertIsNotNone(result)
@@ -314,7 +314,7 @@ class TestCalEVGatesPipeline(unittest.TestCase):
         # probOver should be very low (< 0.10) -> bin 0.
         prob_over = result["probOver"]
         self.assertLess(prob_over, 0.10,
-                        f"Expected low probOver for proj=10 vs line=25.5, got {prob_over}")
+                        f"Expected low probOver for proj=5 vs line=25.5, got {prob_over}")
         bin_idx = max(0, min(9, int(prob_over * 10)))
         self.assertEqual(bin_idx, 0, f"Expected bin 0, got bin {bin_idx}")
 

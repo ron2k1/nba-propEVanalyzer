@@ -22,6 +22,7 @@ tests/          test_betting_policy, test_compute_ev, test_gates
 
 ## 2. Recent Changes
 
+- **2026-03-12:** calibration refit from full-season data (Oct 21–Mar 02) — pts 1.81→3.29, ast 2.24→1.29; WF files regenerated; monotonicity enforcement added to fit_calibration.py
 - **2026-03-07:** freeze lifted - experimentation allowed again on branches with verification + documentation
 - **2026-03-05:** reb signal leak fixed — `gate_check()` now filters by BETTING_POLICY before GO-LIVE metrics
 - **2026-03-04:** match-live `stat_whitelist` fix in `nba_backtest.py` (162 phantom reb bets removed)
@@ -43,7 +44,7 @@ tests/          test_betting_policy, test_compute_ev, test_gates
 
 **Two-layer architecture:** `gate_check()` returns: (1) **metrics** — policy-qualified (pts+ast), drives GO-LIVE; (2) **model_leans** — all eligible signals; (3) **research_stats** — eligible but not in whitelist (reb); (4) **edge_at_emission** — pick-time edge stats.
 
-**Calibration temps** (refitted 2026-03-01): `pts=1.81 reb=3.79 ast=2.24 fg3m=1.49 pra=1.77 stl=1.39 blk=1.30 tov=1.25`
+**Calibration temps** (refitted 2026-03-12 from full-season data): `pts=3.29 reb=1.00 ast=1.29 fg3m=1.00 pra=3.27 stl=1.00 blk=1.00 tov=1.00`
 
 **Change policy:** projection, calibration, and gating experiments are allowed again, but only on branches with explicit verification. Forward paper-trading summaries remain the source of truth for live deployment decisions.
 

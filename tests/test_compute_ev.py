@@ -65,7 +65,7 @@ class TestComputeEvNormal:
         ev = _extract(result)
         assert ev["distributionMode"] == "normal"
         # Calibration temps shift probabilities; pin actual output with wider tolerance
-        assert ev["probOver"] == pytest.approx(0.5508, abs=0.02)
+        assert ev["probOver"] == pytest.approx(0.5115, abs=0.02)
         assert ev["over_edge"] > 0.0  # projection above line → positive over edge
         assert ev["under_edge"] < 0.0
 
@@ -166,7 +166,7 @@ class TestComputeEvPoisson:
         ev = _extract(result)
         assert ev["distributionMode"] == "poisson"
         # Calibration temps shift Poisson probabilities; pin actual output
-        assert ev["probOver"] == pytest.approx(0.373, abs=0.03)
+        assert ev["probOver"] == pytest.approx(0.3374, abs=0.03)
         assert ev["under_edge"] > 0.0  # under is the value side
         assert ev["over_edge"] < 0.0
 

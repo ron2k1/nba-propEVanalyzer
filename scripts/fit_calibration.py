@@ -150,7 +150,47 @@ def fit_bin_temperatures(bins, min_count=30, min_pred=0.10, max_pred=0.90):
         T_bin = _fit_bin_temp(p_raw_w, p_actual_w)
         for _, _, _, bin_lbl in block:
             result[bin_lbl] = T_bin
+
+    # Post-process: enforce monotone calibrated outputs across bins.
+    # Independent per-bin T fitting can produce non-monotone calibrated
+    # probabilities (e.g., high T at low bins overshoots mid-bin outputs).
+    # Fix by merging adjacent violating bins until outputs are monotone.
+    result = _enforce_monotone_bin_outputs(result)
+
     return result or None
+
+
+def _enforce_monotone_bin_outputs(bin_temps):
+    """Merge adjacent bins whose calibrated midpoint outputs violate monotonicity."""
+    if not bin_temps:
+        return bin_temps
+
+    # Parse bin labels into (lo, hi, label, T)
+    parsed = []
+    for lbl, T in bin_temps.items():
+        parts = lbl.split("-")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            parsed.append([int(parts[0]), int(parts[1]), lbl, T])
+    parsed.sort(key=lambda x: x[0])
+
+    if len(parsed) < 2:
+        return bin_temps
+
+    # Iteratively merge violating adjacent bins
+    changed = True
+    while changed:
+        changed = False
+        cal_vals = [_apply_temp((p[0] + p[1]) / 200.0, p[3]) for p in parsed]
+        for i in range(1, len(cal_vals)):
+            if cal_vals[i] < cal_vals[i - 1] - 0.001:
+                # Average the T values of the two violating bins
+                avg_T = round((parsed[i - 1][3] + parsed[i][3]) / 2, 2)
+                parsed[i - 1][3] = avg_T
+                parsed[i][3] = avg_T
+                changed = True
+                break
+
+    return {item[2]: item[3] for item in parsed}
 
 
 # ---------------------------------------------------------------------------
