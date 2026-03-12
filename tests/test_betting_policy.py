@@ -28,6 +28,7 @@ if _REPO_ROOT not in sys.path:
 
 from core.nba_data_collection import BETTING_POLICY
 from core.gates import SIGNAL_SPEC, CURRENT_SIGNAL_VERSION, _qualifies
+from core import policy_config as _pc
 
 
 # ---------------------------------------------------------------------------
@@ -772,3 +773,43 @@ class TestQualifiesEdgeCases:
         prop = _make_prop_result(prob_over=0.05, edge_over=0.10, n_books_offering=2)
         qualifies, reason = _qualifies(prop, "pts")
         assert "only_one_book" not in reason
+
+
+# ===========================================================================
+# F. policy_config.py constant pins
+# ===========================================================================
+
+class TestPolicyConfigConstants:
+    """Pin policy_config.py constants that gates.py depends on."""
+
+    def test_min_games_played(self):
+        assert _pc.MIN_GAMES_PLAYED == 10
+
+    def test_min_season_avg_minutes(self):
+        assert _pc.MIN_SEASON_AVG_MINUTES == 10.0
+
+    def test_eligible_stats(self):
+        assert _pc.ELIGIBLE_STATS == {"pts", "reb", "ast"}
+
+    def test_min_edge(self):
+        assert _pc.MIN_EDGE == 0.08
+
+    def test_min_edge_by_stat(self):
+        assert _pc.MIN_EDGE_BY_STAT == {"reb": 0.08, "ast": 0.09}
+
+    def test_min_confidence(self):
+        assert _pc.MIN_CONFIDENCE == 0.60
+
+    def test_real_line_required_stats(self):
+        assert _pc.REAL_LINE_REQUIRED_STATS == {"reb"}
+
+    def test_pinnacle_thresholds(self):
+        assert _pc.PINNACLE_THRESHOLDS == {0: 0.75, 9: 0.75}
+
+    def test_stat_whitelist_matches_betting_policy(self):
+        """policy_config STAT_WHITELIST must stay in sync with BETTING_POLICY."""
+        assert _pc.STAT_WHITELIST == BETTING_POLICY["stat_whitelist"]
+
+    def test_blocked_prob_bins_matches_betting_policy(self):
+        """policy_config BLOCKED_PROB_BINS must stay in sync with BETTING_POLICY."""
+        assert _pc.BLOCKED_PROB_BINS == BETTING_POLICY["blocked_prob_bins"]

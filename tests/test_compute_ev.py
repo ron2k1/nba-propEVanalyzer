@@ -328,3 +328,129 @@ class TestCalibrationIntegration:
         assert "under" in ev
         assert "edge" in ev["over"]
         assert "edge" in ev["under"]
+
+
+# ===========================================================================
+# E. Boundary / extreme input tests
+# ===========================================================================
+
+class TestComputeEvBoundaries:
+    """
+    Verify compute_ev() handles extreme inputs without crashing or
+    returning NaN/Inf. The engine should produce valid probabilities
+    (0 <= p <= 1) and finite edges for all reasonable inputs.
+    """
+
+    def test_very_large_projection(self):
+        """Projection far above line → probOver near 1.0, no NaN."""
+        result = compute_ev(
+            projection=100.0, line=25.5, over_odds=-110, under_odds=-110,
+            stdev=6.5, stat="pts",
+        )
+        ev = _extract(result)
+        assert ev["probOver"] is not None
+        assert 0.99 <= ev["probOver"] <= 1.0
+        assert ev["over_edge"] is not None
+
+    def test_very_small_projection(self):
+        """Projection far below line → probOver very low, no NaN."""
+        result = compute_ev(
+            projection=0.5, line=25.5, over_odds=-110, under_odds=-110,
+            stdev=6.5, stat="pts",
+        )
+        ev = _extract(result)
+        assert ev["probOver"] is not None
+        # Bin-level calibration may push this above raw value; just verify it's low
+        assert 0.0 <= ev["probOver"] <= 0.15
+
+    def test_very_small_stdev(self):
+        """Tiny stdev (near zero but nonzero) → valid output."""
+        result = compute_ev(
+            projection=27.0, line=25.5, over_odds=-110, under_odds=-110,
+            stdev=0.001, stat="pts",
+        )
+        ev = _extract(result)
+        assert 0.0 <= ev["probOver"] <= 1.0
+        assert ev["over_edge"] is not None
+
+    def test_very_large_stdev(self):
+        """Huge stdev → probOver near 0.5."""
+        result = compute_ev(
+            projection=27.0, line=25.5, over_odds=-110, under_odds=-110,
+            stdev=1000.0, stat="pts",
+        )
+        ev = _extract(result)
+        assert 0.49 < ev["probOver"] < 0.51
+
+    def test_negative_projection(self):
+        """Negative projection (invalid but shouldn't crash)."""
+        result = compute_ev(
+            projection=-5.0, line=25.5, over_odds=-110, under_odds=-110,
+            stdev=6.5, stat="pts",
+        )
+        ev = _extract(result)
+        assert 0.0 <= ev["probOver"] <= 1.0
+
+    def test_zero_line(self):
+        """Line = 0 with positive projection."""
+        result = compute_ev(
+            projection=5.0, line=0.0, over_odds=-110, under_odds=-110,
+            stdev=2.0, stat="pts",
+        )
+        ev = _extract(result)
+        assert ev["probOver"] > 0.5
+
+    def test_extreme_odds_heavy_favorite(self):
+        """Very heavy favorite odds (-500) → valid edge."""
+        result = compute_ev(
+            projection=27.0, line=25.5, over_odds=-500, under_odds=+400,
+            stdev=6.5, stat="pts",
+        )
+        ev = _extract(result)
+        assert 0.0 <= ev["probOver"] <= 1.0
+        assert ev["over_edge"] is not None
+        assert ev["under_edge"] is not None
+
+    def test_extreme_odds_heavy_underdog(self):
+        """Very heavy underdog odds (+500) → valid edge."""
+        result = compute_ev(
+            projection=27.0, line=25.5, over_odds=+500, under_odds=-600,
+            stdev=6.5, stat="pts",
+        )
+        ev = _extract(result)
+        assert 0.0 <= ev["probOver"] <= 1.0
+
+    def test_poisson_large_lambda(self):
+        """Poisson with large lambda (projection=15) for blk → valid output."""
+        result = compute_ev(
+            projection=15.0, line=10.5, over_odds=-110, under_odds=-110,
+            stdev=3.0, stat="blk",
+        )
+        ev = _extract(result)
+        assert ev["distributionMode"] == "poisson"
+        assert 0.0 <= ev["probOver"] <= 1.0
+
+    def test_poisson_zero_projection(self):
+        """Poisson with projection=0 (lambda=0) for blk → valid output."""
+        result = compute_ev(
+            projection=0.0, line=0.5, over_odds=-110, under_odds=-110,
+            stdev=1.0, stat="blk",
+        )
+        ev = _extract(result)
+        assert ev["distributionMode"] == "poisson"
+        assert 0.0 <= ev["probOver"] <= 1.0
+
+    def test_equal_projection_and_line_all_stats(self):
+        """When projection == line, probOver should be valid for all stats.
+        Note: bin-level calibration applies different T per bin, so probOver +
+        probUnder may not sum to exactly 1.0 after calibration."""
+        for stat in ("pts", "reb", "ast", "blk", "stl", "fg3m", "tov"):
+            result = compute_ev(
+                projection=5.0, line=5.0, over_odds=-110, under_odds=-110,
+                stdev=2.0, stat=stat,
+            )
+            ev = _extract(result)
+            assert 0.0 <= ev["probOver"] <= 1.0, f"{stat}: probOver out of range"
+            assert 0.0 <= ev["probUnder"] <= 1.0, f"{stat}: probUnder out of range"
+            assert ev["over_edge"] is not None, f"{stat}: over_edge missing"
+            assert ev["under_edge"] is not None, f"{stat}: under_edge missing"
