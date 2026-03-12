@@ -23,6 +23,12 @@ MIN_CONFIDENCE = 0.60    # raised 2026-03-01: 0.55→0.60
 REAL_LINE_REQUIRED_STATS = {"reb"}
 
 # ---------------------------------------------------------------------------
+# Player quality gates — filter deep-bench / low-sample players
+# ---------------------------------------------------------------------------
+MIN_GAMES_PLAYED = 10              # reject recent callups with tiny sample
+MIN_SEASON_AVG_MINUTES = 10.0      # per-game average (not cumulative)
+
+# ---------------------------------------------------------------------------
 # Pinnacle confirmation
 # ---------------------------------------------------------------------------
 PINNACLE_THRESHOLDS = {0: 0.75, 9: 0.75}
