@@ -233,6 +233,19 @@ export default function () {
           <article class="metric"><h4>Avg Edge</h4><p>${pctAlready(leans.avgEdge)}</p></article>
         </div>
         ${researchRows ? `<h4 style="margin-top:14px">Research Stats (Not in Whitelist)</h4><div class="odds-table-wrap"><table class="odds-table"><thead><tr><th>Stat</th><th>Signals</th><th>Wins</th><th>Losses</th><th>Hit Rate</th><th>PnL</th></tr></thead><tbody>${researchRows}</tbody></table></div>` : ''}
+        ${(() => {
+          const lt = (d.lean_tracking || {}).byTier || (leans.byTier || {});
+          const hev = lt.highEV;
+          if (!hev || !hev.count) return '';
+          return `<h4 style="margin-top:14px">High EV Leans (edge &ge; 20%)</h4>
+            <div class="metric-grid" style="margin-top:8px">
+              <article class="metric"><h4>Sample</h4><p>${hev.count}</p></article>
+              <article class="metric"><h4>Settled</h4><p>${hev.settled ?? 0}</p></article>
+              <article class="metric ev-over"><h4>Hit Rate</h4><p>${pctAlready(hev.hitRate)}</p></article>
+              <article class="metric ev-over"><h4>ROI</h4><p>${pctAlready(hev.roi)}</p></article>
+              <article class="metric"><h4>PnL</h4><p>${fmt(hev.pnl, 2)}u</p></article>
+            </div>`;
+        })()}
       `;
     },
 
