@@ -19,7 +19,22 @@ outputs/
 Thumbs.db
 
 # ── Generated / binary report artifacts ──────────────────────────────────────
-docs/reports/*.html
+docs/reports/
+docs/ev-rules.md
+docs/runbooks/
+docs/plans/
+docs/prompts/
+docs/guides/
+
+# ── Engine / pipeline (proprietary — not for public repo) ────────────────────
+core/
+nba_cli/
+scripts/
+tests/
+models/
+server.py
+nba_mod.py
+.mcp.json
 
 # ── Data / databases / serialized models ─────────────────────────────────────
 # 1.1 GB of historical odds, backtests, journals — never publish
@@ -28,7 +43,6 @@ data/
 *.db
 *.jsonl
 *.ndjson
-models/*.pkl
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
 logs/
@@ -52,6 +66,7 @@ PROMPT_PLAN_BACKTEST_AGENT.md
 PROMPT_PLAN_PHD_CODING_AGENT.md
 PROMPT_backtest_staged.md
 AGENT_MAP.md
+tasks/
 
 # ── Project-private files ─────────────────────────────────────────────────────
 CLAUDE.md
