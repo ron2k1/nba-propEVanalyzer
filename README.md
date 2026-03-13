@@ -16,16 +16,22 @@ A local-first NBA player prop expected value engine with projection modeling, mu
 ## Project Structure
 
 ```
-server.py        HTTP server (port 8787)
-nba_mod.py       CLI entrypoint
-core/            Engine modules (projection, EV, odds, tracking, backtesting)
-nba_cli/         CLI command handlers
-scripts/         Standalone utilities (collection, backfill, quality gate)
-web/             Alpine.js browser UI
-models/          Calibration configs
+web/             Alpine.js browser UI (included)
+docs/            Architecture overview (included)
+core/            Engine modules — not included (see below)
+nba_cli/         CLI command handlers — not included
+scripts/         Utilities (collection, backfill, calibration) — not included
+models/          Calibration configs — not included
+server.py        HTTP server — not included
+nba_mod.py       CLI entrypoint — not included
 data/            Runtime data (gitignored)
-docs/            Runbooks and architecture guides
 ```
+
+### Core Engine Access
+
+The core Python engine modules (projection, EV calculation, signal gating, calibration, backtesting, paper trading, and odds infrastructure) are not included in this public repository. This repo contains the web UI, architecture documentation, and project scaffold.
+
+For access to the full engine, please contact me directly.
 
 ## Setup
 
@@ -132,7 +138,7 @@ Runtime LLM calls generate analysis output only — they never modify source cod
 
 ## Notes
 
-- **Private repo.** Do not commit `.env` or API keys.
+- Core engine modules are proprietary and not included in this repository.
 - Runtime data (`data/`, `.nba_cache/`) is gitignored.
 - All CLI commands output parseable JSON on the last stdout line.
-- See `docs/` for architecture guides, runbooks, and operational procedures.
+- See `docs/architecture.md` for a high-level overview of the system design.
